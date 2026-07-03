@@ -1,0 +1,33 @@
+
+# kwt shell integration
+# Enables 'kwt cd' to change the current shell's directory.
+function __kwt_shim_cd
+    # Pass through help flags directly to the binary
+    for __kwt_arg in $argv
+        if test "$__kwt_arg" = "--help"; or test "$__kwt_arg" = "-h"
+            command {{.CommandName}} $argv
+            return $status
+        end
+    end
+    # Use set -lx for compatibility with fish < 3.1.
+    # Fish 3.1+ supports VAR=value command syntax (e.g., __KWT_CD_SHIM=1 command ...).
+    set -lx __KWT_CD_SHIM 1
+    set -l __kwt_result (command {{.CommandName}} $argv)
+    set -l __kwt_st $status
+    if test $__kwt_st -eq 0; and test -n "$__kwt_result"
+        builtin cd $__kwt_result
+    else
+        return $__kwt_st
+    end
+end
+
+function {{.CommandName}} --wraps={{.CommandName}}
+    if test (count $argv) -gt 0
+        switch $argv[1]
+            case cd
+                __kwt_shim_cd $argv
+                return $status
+        end
+    end
+    command {{.CommandName}} $argv
+end

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            test: go test ./...
+          - os: windows-latest
+            test: >-
+              go test
+              ./cmd/kwt
+              ./internal/cmd
+              ./internal/command
+              ./internal/discovery
+              ./internal/duration
+              ./internal/filesystem
+              ./internal/finder
+              ./internal/git
+              ./internal/registry
+              ./internal/shell
+              ./internal/status
+              ./internal/table
+              ./internal/template
+              ./internal/tmux
+              ./internal/tui
+              ./internal/ui
+              ./internal/url
+              ./internal/utils
+              ./internal/worktree
+              ./pkg/models
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Test
+        run: ${{ matrix.test }}
+
+      - name: Build
+        run: go build ./cmd/kwt

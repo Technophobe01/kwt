@@ -1,0 +1,32 @@
+
+# kwt shell integration
+# Enables 'kwt cd' to change the current shell's directory.
+__kwt_shim_cd() {
+    # Pass through help flags directly to the binary
+    local __kwt_arg
+    for __kwt_arg in "$@"; do
+        case "$__kwt_arg" in
+            --help|-h)
+                command {{.CommandName}} "$@"
+                return $?
+                ;;
+        esac
+    done
+    local __kwt_result
+    __kwt_result="$(__KWT_CD_SHIM=1 command {{.CommandName}} "$@")" || return $?
+    if [[ -n "$__kwt_result" ]]; then
+        builtin cd "$__kwt_result" || return $?
+    fi
+    return 0
+}
+
+{{.CommandName}}() {
+    case "$1" in
+        cd)
+            __kwt_shim_cd "$@"
+            ;;
+        *)
+            command {{.CommandName}} "$@"
+            ;;
+    esac
+}

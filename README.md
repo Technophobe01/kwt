@@ -1,0 +1,186 @@
+# kwt
+
+`kwt` is a focused Git worktree manager for cross-project development and
+tmux-backed agent workspaces.
+
+Run `kwt` from a terminal to open the dashboard. The dashboard shows known
+projects and worktrees, lets you create/delete worktrees, and attaches to a
+tmux workspace for the selected branch.
+
+## Install
+
+```bash
+go install go.kenn.io/kwt/cmd/kwt@latest
+```
+
+From source:
+
+```bash
+git clone https://github.com/kenn-io/kwt.git
+cd kwt
+go build -o kwt ./cmd/kwt
+```
+
+## Daily Use
+
+```bash
+# Open the cross-project dashboard
+kwt
+kwt tui
+
+# Create a worktree and launch its default workspace
+kwt add -b feature/new-ui
+
+# Create without launching tmux
+kwt add --no-launch -b feature/new-ui
+
+# Attach to an existing worktree workspace
+kwt open
+
+# Inspect worktrees and git status
+kwt list
+kwt status
+
+# Use a worktree path in scripts
+cd "$(kwt get feature/new-ui)"
+kwt exec feature/new-ui -- npm test
+
+# Delete a worktree
+kwt remove feature/new-ui
+kwt remove -b feature/new-ui
+```
+
+### Dashboard Keys
+
+| Key       | Action                                  |
+| --------- | --------------------------------------- |
+| `up/down` | Move selection                          |
+| `enter`   | Attach to selected workspace            |
+| `n`       | Create a worktree in the active project |
+| `L`       | Select workspace layout                 |
+| `P`       | Switch active project perspective       |
+| `p`       | Filter visible projects                 |
+| `/`       | Search rows                             |
+| `d`       | Delete selected worktree                |
+| `K`       | Kill selected live workspace            |
+| `s`       | Open a shell in the selected worktree   |
+| `r`       | Refresh                                 |
+| `?`       | Toggle help                             |
+| `q`       | Quit                                    |
+
+## Configuration
+
+Global config lives at `~/.config/kwt/config.toml`, or
+`$KWT_HOME/config.toml` when `KWT_HOME` is set. Repository-local overrides live
+in `.kwt.toml` and are trust-gated before use.
+
+`config.toml` is the source of truth for layouts and agent commands. When kwt
+creates the file for the first time, it writes a starter set of agents and
+layouts. After that, kwt does not rely on hidden layout or agent defaults in the
+binary.
+
+```toml
+[worktree]
+basedir = "~/worktrees"
+auto_mkdir = true
+
+[naming]
+template = "{{.FullPath}}/{{.Branch}}"
+
+[naming.sanitize_chars]
+"/" = "-"
+":" = "-"
+
+[agents]
+codex = "codex"
+claude = "claude"
+roborev = "roborev tui"
+
+[layouts]
+default = "quad"
+auto_launch_on_add = true
+
+[[layouts.presets]]
+name = "quad"
+arrange = "even-horizontal"
+panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
+
+[[layouts.presets]]
+name = "stack"
+arrange = "even-vertical"
+panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
+```
+
+Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
+table before tmux starts, so command flags are configured once. Approval or
+sandbox bypass flags are an explicit opt-in in your local config.
+
+Useful config commands:
+
+```bash
+kwt config list
+kwt config get layouts.default
+kwt config set worktree.basedir ~/worktrees
+kwt config set --local layouts.default stack
+```
+
+### Project Discovery
+
+The dashboard lists worktrees from the global base directory and from projects
+recorded in `config.toml`. Running `kwt` inside a repository registers or
+refreshes that project entry, so future dashboard launches can see its
+worktrees even when they are outside `worktree.basedir`.
+
+### Repository Setup
+
+Optional `repository_settings` copy files or run commands when new worktrees are
+created:
+
+```toml
+[[repository_settings]]
+repository = "~/code/myapp"
+basedir = "./worktrees"
+copy_files = ["templates/.env.example"]
+setup_commands = [
+  "npm install",
+  'printf "branch=%s\npath=%s\n" "{{.Branch}}" "{{.Path}}" > .worktree-info',
+]
+```
+
+Template variables include `Host`, `Owner`, `Repository`, `FullPath`, `Branch`,
+`Hash`, and `Path`. Quote variables in shell commands when values may contain
+spaces.
+
+## Commands
+
+| Command          | Purpose                                   |
+| ---------------- | ----------------------------------------- |
+| `kwt`, `kwt tui` | Cross-project dashboard                   |
+| `kwt add`        | Create a worktree                         |
+| `kwt open`       | Fuzzy-pick and attach to a workspace      |
+| `kwt list`       | List worktrees                            |
+| `kwt status`     | Show git status, sync state, and activity |
+| `kwt get`        | Print a matching worktree path            |
+| `kwt cd`         | Open a shell in a matching worktree       |
+| `kwt exec`       | Run a command in a matching worktree      |
+| `kwt remove`     | Delete a worktree, optionally its branch  |
+| `kwt prune`      | Clean up stale Git worktree metadata      |
+| `kwt tmux`       | Manage standalone tmux sessions           |
+| `kwt config`     | Read and write config values              |
+| `kwt completion` | Generate shell completion and integration |
+
+Run `kwt <command> --help` for flags and examples.
+
+## Requirements
+
+- Git 2.5+
+- Go 1.26+ to build from source
+- tmux for workspace launch and `kwt tmux`
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).[^fork]
+
+[^fork]:
+    `kwt` began as a personalized fork of [`gwq`](https://github.com/d-kuro/gwq);
+    the original project is Apache-2.0 licensed.

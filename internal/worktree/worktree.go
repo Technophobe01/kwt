@@ -1,0 +1,398 @@
+// Package worktree provides high-level worktree management functionality.
+package worktree
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"go.kenn.io/kwt/internal/template"
+	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
+	"go.kenn.io/kwt/pkg/models"
+)
+
+// GitInterface defines the git operations used by Manager.
+type GitInterface interface {
+	ListWorktrees() ([]models.Worktree, error)
+	AddWorktree(path, branch string, createBranch bool) error
+	AddWorktreeFromBase(path, branch, baseBranch string) error
+	RemoveWorktree(path string, force bool) error
+	DeleteBranch(branch string, force bool) error
+	PruneWorktrees() error
+	GetRepositoryName() (string, error)
+	GetRecentCommits(path string, limit int) ([]models.CommitInfo, error)
+	GetRepositoryURL() (string, error)
+	GetMainRepositoryPath() (string, error)
+}
+
+// Manager handles worktree operations.
+type Manager struct {
+	git    GitInterface
+	config *models.Config
+}
+
+// New creates a new worktree Manager.
+func New(g GitInterface, config *models.Config) *Manager {
+	return &Manager{
+		git:    g,
+		config: config,
+	}
+}
+
+// Add creates a new worktree and returns the path of the created worktree.
+func (m *Manager) Add(branch string, customPath string, createBranch bool) (string, error) {
+	path, err := m.preparePath(customPath, branch)
+	if err != nil {
+		return "", err
+	}
+
+	if err := m.git.AddWorktree(path, branch, createBranch); err != nil {
+		return "", err
+	}
+
+	m.runPostWorktreeSetup(branch, path)
+	return path, nil
+}
+
+// AddFromBase creates a new worktree with a branch from a specific base branch
+// and returns the path of the created worktree.
+func (m *Manager) AddFromBase(branch string, baseBranch string, customPath string) (string, error) {
+	path, err := m.preparePath(customPath, branch)
+	if err != nil {
+		return "", err
+	}
+
+	if err := m.git.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
+		return "", err
+	}
+
+	m.runPostWorktreeSetup(branch, path)
+	return path, nil
+}
+
+// Remove deletes a worktree.
+func (m *Manager) Remove(path string, force bool) error {
+	return m.git.RemoveWorktree(path, force)
+}
+
+// RemoveWithBranch deletes a worktree and optionally its branch.
+func (m *Manager) RemoveWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool) error {
+	// First remove the worktree
+	if err := m.git.RemoveWorktree(path, forceWorktree); err != nil {
+		return err
+	}
+
+	// Then delete the branch if requested
+	if deleteBranch && branch != "" {
+		if err := m.git.DeleteBranch(branch, forceBranch); err != nil {
+			// Return error but worktree is already removed
+			return fmt.Errorf("worktree removed but failed to delete branch: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// List returns all worktrees.
+func (m *Manager) List() ([]models.Worktree, error) {
+	return m.git.ListWorktrees()
+}
+
+// Prune removes worktree information for deleted directories.
+func (m *Manager) Prune() error {
+	return m.git.PruneWorktrees()
+}
+
+// GetWorktreePath returns the path for a worktree by pattern matching.
+func (m *Manager) GetWorktreePath(pattern string) (string, error) {
+	worktrees, err := m.List()
+	if err != nil {
+		return "", err
+	}
+
+	pattern = strings.ToLower(pattern)
+	for _, wt := range worktrees {
+		if strings.Contains(strings.ToLower(wt.Branch), pattern) ||
+			strings.Contains(strings.ToLower(wt.Path), pattern) {
+			return wt.Path, nil
+		}
+	}
+
+	return "", fmt.Errorf("no worktree found matching pattern: %s", pattern)
+}
+
+// GetMatchingWorktrees returns all worktrees matching the given pattern.
+func (m *Manager) GetMatchingWorktrees(pattern string) ([]models.Worktree, error) {
+	worktrees, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []models.Worktree
+	pattern = strings.ToLower(pattern)
+	for _, wt := range worktrees {
+		if strings.Contains(strings.ToLower(wt.Branch), pattern) ||
+			strings.Contains(strings.ToLower(wt.Path), pattern) {
+			matches = append(matches, wt)
+		}
+	}
+
+	return matches, nil
+}
+
+// ValidateWorktreePath checks if a path can be used for a new worktree.
+func (m *Manager) ValidateWorktreePath(path string) error {
+	info, err := os.Stat(path)
+	if err == nil {
+		if info.IsDir() {
+			entries, err := os.ReadDir(path)
+			if err != nil {
+				return fmt.Errorf("failed to read directory: %w", err)
+			}
+			if len(entries) > 0 {
+				return fmt.Errorf("directory is not empty: %s", path)
+			}
+		} else {
+			return fmt.Errorf("path exists and is not a directory: %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to check path: %w", err)
+	}
+
+	return nil
+}
+
+// preparePath resolves and prepares the worktree path, creating parent directories if needed.
+func (m *Manager) preparePath(customPath, branch string) (string, error) {
+	path := customPath
+	if path == "" {
+		generatedPath, err := m.generateWorktreePath(branch)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate worktree path: %w", err)
+		}
+		path = generatedPath
+	}
+
+	expandedPath, err := utils.ExpandPath(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to expand path: %w", err)
+	}
+	path = expandedPath
+
+	if m.config.Worktree.AutoMkdir {
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create directory: %w", err)
+		}
+	}
+
+	return path, nil
+}
+
+// generateWorktreePath generates a path for a new worktree using template configuration.
+func (m *Manager) generateWorktreePath(branch string) (string, error) {
+	repoInfo, err := m.repositoryInfo()
+	if err != nil {
+		return "", err
+	}
+
+	// Determine effective base directory: per-repo setting overrides global
+	baseDir := m.config.Worktree.BaseDir
+	if len(m.config.RepositorySettings) > 0 {
+		repoRoot, err := m.git.GetMainRepositoryPath()
+		if err != nil {
+			return "", fmt.Errorf("failed to get repository path: %w", err)
+		}
+		if setting := findRepoSetting(m.config.RepositorySettings, repoRoot); setting != nil && setting.BaseDir != "" {
+			baseDir = setting.BaseDir
+		}
+	}
+
+	// Use template if configured, otherwise fall back to default URL hierarchy
+	if m.config.Naming.Template != "" {
+		// Create template processor
+		processor, err := template.New(m.config.Naming.Template, m.config.Naming.SanitizeChars)
+		if err != nil {
+			// Fall back to default hierarchy if template is invalid
+			return url.GenerateWorktreePath(baseDir, repoInfo, branch), nil
+		}
+
+		// Generate path using template
+		path, err := processor.GeneratePath(baseDir, repoInfo, branch)
+		if err != nil {
+			// Fall back to default hierarchy if template execution fails
+			path = url.GenerateWorktreePath(baseDir, repoInfo, branch)
+			return path, ensurePathWithinBase(baseDir, path)
+		}
+
+		return path, ensurePathWithinBase(baseDir, path)
+	}
+
+	// Fall back to default URL hierarchy
+	path := url.GenerateWorktreePath(baseDir, repoInfo, branch)
+	return path, ensurePathWithinBase(baseDir, path)
+}
+
+func (m *Manager) repositoryInfo() (*url.RepositoryInfo, error) {
+	return RepositoryInfoFromGit(m.git)
+}
+
+// RepositoryInfoFromGit returns repository identity from origin when possible,
+// falling back to a path-safe local identity for repositories without a usable
+// remote.
+func RepositoryInfoFromGit(g GitInterface) (*url.RepositoryInfo, error) {
+	repoURL, urlErr := g.GetRepositoryURL()
+	if urlErr == nil {
+		if repoInfo, err := url.ParseRepositoryURL(repoURL); err == nil {
+			return repoInfo, nil
+		} else {
+			urlErr = fmt.Errorf("failed to parse repository URL: %w", err)
+		}
+	} else {
+		urlErr = fmt.Errorf("failed to get repository URL: %w", urlErr)
+	}
+
+	repoRoot, pathErr := g.GetMainRepositoryPath()
+	if pathErr != nil {
+		return nil, fmt.Errorf("%v; failed to get repository path for local fallback: %w", urlErr, pathErr)
+	}
+	repoInfo, pathErr := repositoryInfoFromLocalPath(repoRoot)
+	if pathErr != nil {
+		return nil, fmt.Errorf("%v; failed to build local repository identity: %w", urlErr, pathErr)
+	}
+	return repoInfo, nil
+}
+
+func repositoryInfoFromLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
+	repoRoot = strings.TrimSpace(repoRoot)
+	if repoRoot == "" {
+		return nil, fmt.Errorf("empty repository path")
+	}
+	cleanPath := repoRoot
+	if absPath, err := filepath.Abs(cleanPath); err == nil {
+		cleanPath = absPath
+	} else {
+		return nil, err
+	}
+	if resolvedPath, err := filepath.EvalSymlinks(cleanPath); err == nil {
+		cleanPath = resolvedPath
+	}
+	name := filepath.Base(cleanPath)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = filepath.ToSlash(cleanPath)
+	}
+	return &url.RepositoryInfo{
+		Repository: name,
+		FullPath:   localRepositoryFullPath(cleanPath),
+	}, nil
+}
+
+func localRepositoryFullPath(cleanPath string) string {
+	slashPath := slashLocalPath(cleanPath)
+	volumeName, slashPath := splitLocalPathVolume(slashPath)
+	slashPath = strings.TrimLeft(slashPath, "/")
+
+	parts := []string{"local"}
+	if volumeName != "" {
+		volumeName = strings.Trim(volumeName, "/")
+		if volumeName != "" {
+			parts = append(parts, volumeName)
+		}
+	}
+	if slashPath != "" {
+		parts = append(parts, slashPath)
+	}
+	return strings.Join(parts, "/")
+}
+
+func slashLocalPath(cleanPath string) string {
+	slashPath := filepath.ToSlash(cleanPath)
+	if runtime.GOOS == "windows" || isWindowsPathLiteral(cleanPath) {
+		return strings.ReplaceAll(slashPath, `\`, "/")
+	}
+	slashPath = strings.ReplaceAll(slashPath, "%", "%25")
+	return strings.ReplaceAll(slashPath, `\`, "%5C")
+}
+
+func isWindowsPathLiteral(cleanPath string) bool {
+	if len(cleanPath) >= 2 && cleanPath[1] == ':' {
+		return true
+	}
+	return strings.HasPrefix(cleanPath, `\\`) || strings.HasPrefix(cleanPath, "//")
+}
+
+func splitLocalPathVolume(slashPath string) (string, string) {
+	if len(slashPath) >= 2 && slashPath[1] == ':' {
+		return slashPath[:1], slashPath[2:]
+	}
+	if strings.HasPrefix(slashPath, "//") {
+		rest := strings.TrimLeft(slashPath, "/")
+		host, rest, ok := strings.Cut(rest, "/")
+		if !ok {
+			return host, ""
+		}
+		share, rest, ok := strings.Cut(rest, "/")
+		if !ok {
+			return host + "/" + share, ""
+		}
+		return host + "/" + share, rest
+	}
+	return "", slashPath
+}
+
+func ensurePathWithinBase(baseDir, path string) error {
+	baseResolved, err := resolveExistingPathPrefix(baseDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve worktree base path: %w", err)
+	}
+	pathResolved, err := resolveExistingPathPrefix(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve generated worktree path: %w", err)
+	}
+	rel, err := filepath.Rel(baseResolved, pathResolved)
+	if err != nil {
+		return fmt.Errorf("failed to compare generated path with worktree base: %w", err)
+	}
+	if rel == "." || (!filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+		return nil
+	}
+	return fmt.Errorf("generated worktree path %s is outside worktree base %s", path, baseDir)
+}
+
+func resolveExistingPathPrefix(rawPath string) (string, error) {
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return "", err
+	}
+
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return resolved, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	current := absPath
+	var missingParts []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(absPath), nil
+		}
+		missingParts = append(missingParts, filepath.Base(current))
+		current = parent
+
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(missingParts) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missingParts[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+}

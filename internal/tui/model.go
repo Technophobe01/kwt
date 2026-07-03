@@ -1,0 +1,1028 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"unicode"
+
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+)
+
+type inputMode int
+
+const (
+	inputNone inputMode = iota
+	inputFilter
+	inputProjectFilter
+	inputProjectSwitch
+	inputNewBranch
+)
+
+type confirmKind int
+
+const (
+	confirmNone confirmKind = iota
+	confirmDelete
+	confirmKill
+)
+
+type confirmState struct {
+	kind confirmKind
+	row  Row
+	text string
+}
+
+type rowsMsg struct {
+	rows []Row
+	err  error
+}
+
+type actionDoneMsg struct {
+	message    string
+	err        error
+	refresh    bool
+	anchorPath string
+}
+
+type Model struct {
+	backend Backend
+	baseDir string
+	keys    keyMap
+	theme   theme
+	input   textinput.Model
+
+	rows                []Row
+	cursor              int
+	filter              string
+	projectPerspective  string
+	projectFilter       string
+	projectSwitchCursor int
+	layouts             []string
+	selectedLayout      string
+	inputMode           inputMode
+	confirm             confirmState
+	fetching            bool
+	pendingRefresh      bool
+	showHelp            bool
+	message             string
+	err                 error
+	handoff             Handoff
+	anchorPath          string
+	width               int
+	height              int
+}
+
+func NewModel(backend Backend, baseDir string) Model {
+	input := textinput.New()
+	input.SetWidth(60)
+	input.Prompt = ""
+
+	return Model{
+		backend:  backend,
+		baseDir:  baseDir,
+		keys:     newKeyMap(),
+		theme:    newTheme(),
+		input:    input,
+		layouts:  backend.LayoutNames(),
+		fetching: true,
+		width:    100,
+		height:   30,
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return m.fetchRowsCmd()
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+	case rowsMsg:
+		return m.applyRows(msg)
+	case actionDoneMsg:
+		return m.applyActionDone(msg)
+	case tea.KeyPressMsg:
+		return m.handleKey(msg)
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
+	default:
+		if m.shouldForwardToTextInput() {
+			return m.updateTextInput(msg)
+		}
+		return m, nil
+	}
+}
+
+func (m Model) View() tea.View {
+	var b strings.Builder
+
+	if m.showHelp {
+		b.WriteString(m.renderHelp())
+	} else if m.inputMode == inputProjectSwitch {
+		b.WriteString(m.renderProjectSwitchView())
+	} else {
+		b.WriteString(m.renderHeader())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderRows())
+		b.WriteString("\n")
+		b.WriteString(m.renderStatusLine())
+		b.WriteString("\n")
+		b.WriteString(m.renderFooter())
+	}
+
+	view := tea.NewView(b.String())
+	view.AltScreen = true
+	return view
+}
+
+func (m Model) Handoff() Handoff {
+	return m.handoff
+}
+
+func (m Model) selectedRow() Row {
+	rows := m.filteredRows()
+	if len(rows) == 0 {
+		return Row{}
+	}
+	return rows[clampCursor(m.cursor, len(rows))]
+}
+
+func (m Model) filteredRows() []Row {
+	return filterRows(
+		filterProjectRows(
+			filterProjectPerspectiveRows(m.rows, m.projectPerspective),
+			m.projectFilter,
+		),
+		m.filter,
+	)
+}
+
+func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
+	m.fetching = false
+	if msg.err != nil {
+		m.err = msg.err
+		return m.startPendingRefresh()
+	}
+
+	oldRows := m.filteredRows()
+	oldCursor := m.cursor
+	hadRows := len(m.rows) > 0
+	rows := append([]Row(nil), msg.rows...)
+	sortRows(rows)
+	m.rows = rows
+	newRows := m.filteredRows()
+
+	if m.anchorPath != "" {
+		if index, ok := indexByPathOK(newRows, m.anchorPath); ok {
+			m.cursor = index
+			m.anchorPath = ""
+		} else if m.pendingRefresh {
+			m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+		} else {
+			m.cursor = 0
+			m.anchorPath = ""
+		}
+	} else if !hadRows {
+		if index, ok := currentRowIndex(newRows); ok {
+			m.cursor = index
+		} else {
+			m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+		}
+	} else {
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+	}
+	m.cursor = clampCursor(m.cursor, len(newRows))
+	m.err = nil
+	return m.startPendingRefresh()
+}
+
+func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+		m.message = ""
+		return m, nil
+	}
+	m.err = nil
+	m.message = msg.message
+	if msg.anchorPath != "" {
+		m.anchorPath = msg.anchorPath
+	}
+	if msg.refresh && m.fetching {
+		m.pendingRefresh = true
+		return m, nil
+	}
+	if msg.refresh {
+		m.fetching = true
+		return m, m.fetchRowsCmd()
+	}
+	return m, nil
+}
+
+func (m Model) startPendingRefresh() (Model, tea.Cmd) {
+	if !m.pendingRefresh {
+		return m, nil
+	}
+	m.pendingRefresh = false
+	m.fetching = true
+	return m, m.fetchRowsCmd()
+}
+
+func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if m.err != nil {
+		m.err = nil
+	}
+
+	if m.showHelp {
+		m.showHelp = false
+		return m, nil
+	}
+
+	if m.confirm.kind != confirmNone {
+		return m.handleConfirmKey(msg)
+	}
+
+	if m.inputMode != inputNone {
+		return m.handleInputKey(msg)
+	}
+
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, quitCmd()
+	case key.Matches(msg, m.keys.Down):
+		m.cursor = clampCursor(m.cursor+1, len(m.filteredRows()))
+	case key.Matches(msg, m.keys.Up):
+		m.cursor = clampCursor(m.cursor-1, len(m.filteredRows()))
+	case key.Matches(msg, m.keys.Top):
+		m.cursor = 0
+	case key.Matches(msg, m.keys.Bottom):
+		if rows := m.filteredRows(); len(rows) > 0 {
+			m.cursor = len(rows) - 1
+		}
+	case key.Matches(msg, m.keys.Open):
+		return m.openSelected()
+	case key.Matches(msg, m.keys.Layout):
+		return m.cycleLayout()
+	case key.Matches(msg, m.keys.New):
+		return m.startNewBranch()
+	case key.Matches(msg, m.keys.Delete):
+		return m.startDelete()
+	case key.Matches(msg, m.keys.Shell):
+		return m.shellSelected()
+	case key.Matches(msg, m.keys.Kill):
+		return m.startKill()
+	case key.Matches(msg, m.keys.Switch):
+		return m.startProjectSwitch()
+	case key.Matches(msg, m.keys.Project):
+		return m.startProjectFilter()
+	case key.Matches(msg, m.keys.Filter):
+		return m.startFilter()
+	case key.Matches(msg, m.keys.Refresh):
+		if !m.fetching {
+			m.fetching = true
+			return m, m.fetchRowsCmd()
+		}
+	case key.Matches(msg, m.keys.Help):
+		m.showHelp = true
+	case key.Matches(msg, m.keys.Cancel):
+		if m.filter != "" {
+			selectedPath := rowPath(m.selectedRow())
+			m.filter = ""
+			m.input.SetValue("")
+			if selectedPath != "" {
+				m.cursor = indexByPath(m.filteredRows(), selectedPath)
+			} else {
+				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			}
+		} else if m.projectFilter != "" {
+			selectedPath := rowPath(m.selectedRow())
+			m.projectFilter = ""
+			m.input.SetValue("")
+			if selectedPath != "" {
+				m.cursor = indexByPath(m.filteredRows(), selectedPath)
+			} else {
+				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			}
+		}
+	}
+
+	return m, nil
+}
+
+func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if m.inputMode == inputProjectSwitch {
+		return m.handleProjectSwitchKey(msg)
+	}
+
+	if key.Matches(msg, m.keys.Cancel) {
+		selectedPath := rowPath(m.selectedRow())
+		wasFilter := m.inputMode == inputFilter
+		wasProjectFilter := m.inputMode == inputProjectFilter
+		m.inputMode = inputNone
+		m.input.Blur()
+		if wasFilter {
+			m.filter = ""
+			m.input.SetValue("")
+			if selectedPath != "" {
+				m.cursor = indexByPath(m.filteredRows(), selectedPath)
+			} else {
+				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			}
+		} else if wasProjectFilter {
+			m.projectFilter = ""
+			m.input.SetValue("")
+			if selectedPath != "" {
+				m.cursor = indexByPath(m.filteredRows(), selectedPath)
+			} else {
+				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			}
+		}
+		return m, nil
+	}
+
+	if key.Matches(msg, m.keys.Open) {
+		switch m.inputMode {
+		case inputNewBranch:
+			branch := strings.TrimSpace(m.input.Value())
+			m.inputMode = inputNone
+			m.input.Blur()
+			m.input.SetValue("")
+			if branch == "" {
+				m.message = "branch name required"
+				return m, nil
+			}
+			row := m.selectedRow()
+			return m, m.createWorktreeCmd(row, branch)
+		case inputFilter:
+			m.inputMode = inputNone
+			m.input.Blur()
+			return m, nil
+		case inputProjectFilter:
+			m.inputMode = inputNone
+			m.input.Blur()
+			return m, nil
+		case inputProjectSwitch:
+			return m.chooseProjectPerspective()
+		}
+	}
+
+	return m.updateTextInput(msg)
+}
+
+func (m Model) handlePaste(msg tea.PasteMsg) (Model, tea.Cmd) {
+	if m.err != nil {
+		m.err = nil
+	}
+	if m.showHelp || m.confirm.kind != confirmNone || m.inputMode == inputNone {
+		return m, nil
+	}
+	if m.inputMode == inputProjectSwitch {
+		return m.appendProjectSwitchText(msg.Content), nil
+	}
+	return m.updateTextInput(msg)
+}
+
+func (m Model) shouldForwardToTextInput() bool {
+	return !m.showHelp &&
+		m.confirm.kind == confirmNone &&
+		m.inputMode != inputNone &&
+		m.inputMode != inputProjectSwitch
+}
+
+func (m Model) updateTextInput(msg tea.Msg) (Model, tea.Cmd) {
+	oldRows := m.filteredRows()
+	oldCursor := m.cursor
+	next, cmd := m.input.Update(msg)
+	m.input = next
+	switch m.inputMode {
+	case inputFilter:
+		m.filter = m.input.Value()
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
+	case inputProjectFilter:
+		m.projectFilter = m.input.Value()
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
+	}
+	return m, cmd
+}
+
+func (m Model) handleProjectSwitchKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	switch msg.Key().Code {
+	case tea.KeyEsc:
+		m.inputMode = inputNone
+		m.input.Blur()
+		m.input.SetValue("")
+		return m, nil
+	case tea.KeyEnter:
+		return m.chooseProjectPerspective()
+	case tea.KeyUp:
+		m.projectSwitchCursor = clampCursor(m.projectSwitchCursor-1, len(m.projectSwitchOptions()))
+		return m, nil
+	case tea.KeyDown:
+		m.projectSwitchCursor = clampCursor(m.projectSwitchCursor+1, len(m.projectSwitchOptions()))
+		return m, nil
+	case tea.KeyBackspace:
+		value := []rune(m.input.Value())
+		if len(value) > 0 {
+			m.input.SetValue(string(value[:len(value)-1]))
+			m.projectSwitchCursor = clampCursor(0, len(m.projectSwitchOptions()))
+		}
+		return m, nil
+	}
+
+	if msg.String() == "ctrl+c" {
+		return m, quitCmd()
+	}
+
+	return m.appendProjectSwitchText(msg.Key().Text), nil
+}
+
+func (m Model) appendProjectSwitchText(text string) Model {
+	var b strings.Builder
+	for _, r := range text {
+		if unicode.IsPrint(r) && !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return m
+	}
+	m.input.SetValue(m.input.Value() + b.String())
+	m.projectSwitchCursor = clampCursor(0, len(m.projectSwitchOptions()))
+	return m
+}
+
+func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Cancel, m.keys.No) {
+		m.confirm = confirmState{}
+		m.message = "cancelled"
+		return m, nil
+	}
+	if !key.Matches(msg, m.keys.Yes) {
+		return m, nil
+	}
+
+	row := m.confirm.row
+	kind := m.confirm.kind
+	m.confirm = confirmState{}
+	switch kind {
+	case confirmDelete:
+		return m, m.removeWorktreeCmd(row)
+	case confirmKill:
+		return m, m.killSessionCmd(row)
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) openSelected() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Entry == nil {
+		m.message = "no worktree selected"
+		return m, nil
+	}
+	if m.backend.InsideTmux() {
+		return m, m.openInTmuxCmd(row)
+	}
+	m.handoff = Handoff{Kind: HandoffAttach, Row: row, LayoutName: m.selectedLayout}
+	return m, quitCmd()
+}
+
+func (m Model) shellSelected() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Entry == nil {
+		m.message = "no worktree selected"
+		return m, nil
+	}
+	m.handoff = Handoff{Kind: HandoffShell, Row: row}
+	return m, quitCmd()
+}
+
+func (m Model) cycleLayout() (Model, tea.Cmd) {
+	if len(m.layouts) == 0 {
+		m.message = "no layouts configured"
+		return m, nil
+	}
+	if m.selectedLayout == "" {
+		m.selectedLayout = m.layouts[0]
+	} else {
+		next := 0
+		for i, name := range m.layouts {
+			if name == m.selectedLayout {
+				next = i + 1
+				break
+			}
+		}
+		if next >= len(m.layouts) {
+			m.selectedLayout = ""
+		} else {
+			m.selectedLayout = m.layouts[next]
+		}
+	}
+	m.message = fmt.Sprintf("layout %s", m.layoutLabel())
+	return m, nil
+}
+
+func (m Model) startNewBranch() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Entry == nil {
+		m.message = "no worktree selected"
+		return m, nil
+	}
+	m.inputMode = inputNewBranch
+	m.input.Prompt = fmt.Sprintf("new branch in %s: ", rowRepoName(row))
+	m.input.SetValue("")
+	return m, m.input.Focus()
+}
+
+func (m Model) startFilter() (Model, tea.Cmd) {
+	m.inputMode = inputFilter
+	m.input.Prompt = "/ filter: "
+	m.input.SetValue(m.filter)
+	return m, m.input.Focus()
+}
+
+func (m Model) startProjectFilter() (Model, tea.Cmd) {
+	m.inputMode = inputProjectFilter
+	m.input.Prompt = "p filter: "
+	m.input.SetValue(m.projectFilter)
+	return m, m.input.Focus()
+}
+
+func (m Model) startProjectSwitch() (Model, tea.Cmd) {
+	m.inputMode = inputProjectSwitch
+	m.input.SetValue("")
+	m.projectSwitchCursor = indexProjectSwitchOption(m.projectSwitchOptions(), m.projectPerspective)
+	m.input.Blur()
+	return m, nil
+}
+
+func (m Model) chooseProjectPerspective() (Model, tea.Cmd) {
+	options := m.projectSwitchOptions()
+	if len(options) == 0 {
+		m.message = "no matching project"
+		return m, nil
+	}
+	selectedPath := rowPath(m.selectedRow())
+	option := options[clampCursor(m.projectSwitchCursor, len(options))]
+	m.projectPerspective = option.key
+	m.projectFilter = ""
+	m.inputMode = inputNone
+	m.input.Blur()
+	m.input.SetValue("")
+	m.cursor = m.cursorAfterProjectChange(selectedPath)
+	return m, nil
+}
+
+func (m Model) cursorAfterProjectChange(selectedPath string) int {
+	rows := m.filteredRows()
+	if selectedPath != "" {
+		if index, ok := indexByPathOK(rows, selectedPath); ok {
+			return index
+		}
+	}
+	if index, ok := currentRowIndex(rows); ok {
+		return index
+	}
+	return clampCursor(0, len(rows))
+}
+
+func (m Model) startDelete() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Entry == nil {
+		m.message = "no worktree selected"
+		return m, nil
+	}
+	if row.Entry.IsMain {
+		m.message = "refusing to remove a main worktree"
+		return m, nil
+	}
+	text := fmt.Sprintf("delete %s? [y/N]", rowLabel(row))
+	if row.SessionLive {
+		text = fmt.Sprintf("delete %s and kill its live workspace? [y/N]", rowLabel(row))
+	}
+	m.confirm = confirmState{kind: confirmDelete, row: row, text: text}
+	return m, nil
+}
+
+func (m Model) startKill() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Entry == nil {
+		m.message = "no worktree selected"
+		return m, nil
+	}
+	if !row.SessionLive {
+		m.message = "no live workspace"
+		return m, nil
+	}
+	m.confirm = confirmState{
+		kind: confirmKill,
+		row:  row,
+		text: fmt.Sprintf("kill workspace for %s? [y/N]", rowLabel(row)),
+	}
+	return m, nil
+}
+
+func (m Model) fetchRowsCmd() tea.Cmd {
+	return func() tea.Msg {
+		rows, err := m.backend.List(context.Background())
+		return rowsMsg{rows: rows, err: err}
+	}
+}
+
+func (m Model) createWorktreeCmd(row Row, branch string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := m.backend.CreateWorktree(context.Background(), row, branch)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{
+			message:    fmt.Sprintf("created %s", branch),
+			refresh:    true,
+			anchorPath: path,
+		}
+	}
+}
+
+func (m Model) removeWorktreeCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.backend.RemoveWorktree(context.Background(), row); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
+	}
+}
+
+func (m Model) killSessionCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.backend.KillSession(row); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{message: fmt.Sprintf("killed workspace for %s", rowLabel(row)), refresh: true}
+	}
+}
+
+func (m Model) openInTmuxCmd(row Row) tea.Cmd {
+	layoutName := m.selectedLayout
+	return func() tea.Msg {
+		if err := m.backend.OpenInTmux(context.Background(), row, layoutName); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{message: fmt.Sprintf("attached %s", rowLabel(row)), refresh: true}
+	}
+}
+
+func quitCmd() tea.Cmd {
+	return func() tea.Msg { return tea.Quit() }
+}
+
+func (m Model) renderHeader() string {
+	repoCount := make(map[string]bool)
+	for _, row := range m.rows {
+		repoCount[rowRepoName(row)] = true
+	}
+	spinner := ""
+	if m.fetching {
+		spinner = " · fetching"
+	}
+	left := fmt.Sprintf("kwt · %d %s · %d %s%s",
+		len(m.rows), plural(len(m.rows), "worktree", "worktrees"),
+		len(repoCount), plural(len(repoCount), "repo", "repos"),
+		spinner,
+	)
+	right := fmt.Sprintf("P project:%s  p filter:%s  / search  L layout:%s  ? help",
+		m.projectPerspectiveLabel(), m.projectFilterLabel(), m.layoutLabel())
+	spaces := "  "
+	if width := m.width - len(left) - len(right); width > 2 {
+		spaces = strings.Repeat(" ", width)
+	}
+	return m.theme.header.Render(left) + spaces + m.theme.dim.Render(right)
+}
+
+func (m Model) renderRows() string {
+	rows := m.filteredRows()
+	if len(m.rows) == 0 && !m.fetching {
+		return fmt.Sprintf("no worktrees under %s — create one with kwt add", m.baseDir)
+	}
+	if len(rows) == 0 {
+		return "no matching worktrees"
+	}
+
+	var b strings.Builder
+	b.WriteString(renderDashboardHeader())
+	b.WriteString("\n")
+	now := timeNow()
+	selected := clampCursor(m.cursor, len(rows))
+	start, visibleRows := rowWindow(rows, selected, m.availableRowCount())
+	for offset, row := range visibleRows {
+		i := start + offset
+		cursor := " "
+		if i == selected {
+			cursor = "▸"
+		}
+		activity := "-"
+		if row.Status != nil {
+			activity = formatActivityAt(row.Status.LastActivity, now)
+		}
+		ws := "offline"
+		if row.SessionLive {
+			ws = m.theme.live.Render("live")
+		} else {
+			ws = m.theme.dim.Render(ws)
+		}
+		line := cursor + " " + renderDashboardCells([]string{
+			rowRepoName(row),
+			rowBranch(row),
+			formatChanges(row.Status),
+			formatSync(row.Status),
+			activity,
+			ws,
+		})
+		if i == selected {
+			line = m.theme.cursor.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) availableRowCount() int {
+	if m.height <= 0 {
+		return len(m.filteredRows())
+	}
+	fixedLines := 5 + m.footerHelpLines()
+	count := m.height - fixedLines
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+func rowWindow(rows []Row, cursor, maxRows int) (int, []Row) {
+	if len(rows) == 0 || maxRows <= 0 || maxRows >= len(rows) {
+		return 0, rows
+	}
+	cursor = clampCursor(cursor, len(rows))
+	start := cursor - maxRows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+maxRows > len(rows) {
+		start = len(rows) - maxRows
+	}
+	return start, rows[start : start+maxRows]
+}
+
+func currentRowIndex(rows []Row) (int, bool) {
+	for i, row := range rows {
+		if row.Status != nil && row.Status.IsCurrent {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (m Model) renderStatusLine() string {
+	switch {
+	case m.err != nil:
+		return m.theme.error.Render(m.err.Error())
+	case m.confirm.kind != confirmNone:
+		return m.confirm.text
+	case m.inputMode != inputNone:
+		if m.inputMode == inputProjectSwitch {
+			return ""
+		}
+		return m.input.View()
+	case m.message != "":
+		return m.theme.success.Render(m.message)
+	default:
+		return m.renderSelectionDetails()
+	}
+}
+
+func (m Model) renderSelectionDetails() string {
+	row := m.selectedRow()
+	path := rowPath(row)
+	if path == "" {
+		return ""
+	}
+	workspace := "workspace offline"
+	if row.SessionLive {
+		workspace = "workspace live"
+	}
+	return fmt.Sprintf("selected %s · layout %s · %s\n%s",
+		rowLabel(row), m.layoutLabel(), workspace, abbreviateHome(path))
+}
+
+func (m Model) layoutLabel() string {
+	if m.selectedLayout == "" {
+		return "default"
+	}
+	return m.selectedLayout
+}
+
+func (m Model) projectFilterLabel() string {
+	if m.projectFilter == "" {
+		return "all"
+	}
+	return m.projectFilter
+}
+
+const projectAllLabel = "all"
+
+type projectSwitchOption struct {
+	key     string
+	display string
+	count   int
+}
+
+func (m Model) projectPerspectiveLabel() string {
+	if m.projectPerspective == "" {
+		return projectAllLabel
+	}
+	for _, option := range m.projectSwitchOptionsForQuery("") {
+		if option.key == m.projectPerspective {
+			return option.display
+		}
+	}
+	return m.projectPerspective
+}
+
+func (m Model) projectSwitchOptionRows() []projectSwitchOption {
+	return m.projectSwitchOptions()
+}
+
+func (m Model) projectSwitchOptions() []projectSwitchOption {
+	return m.projectSwitchOptionsForQuery(m.input.Value())
+}
+
+func (m Model) projectSwitchOptionsForQuery(query string) []projectSwitchOption {
+	query = strings.TrimSpace(strings.ToLower(query))
+	type projectAccumulator struct {
+		display string
+		count   int
+	}
+	byKey := make(map[string]projectAccumulator)
+	displayCounts := make(map[string]int)
+	for _, row := range m.rows {
+		key := rowProjectKey(row)
+		if key == "" {
+			continue
+		}
+		display := rowRepoName(row)
+		if display == "" {
+			display = key
+		}
+		acc := byKey[key]
+		acc.display = display
+		acc.count++
+		byKey[key] = acc
+	}
+	for _, acc := range byKey {
+		displayCounts[acc.display]++
+	}
+	options := make([]projectSwitchOption, 0, len(byKey)+1)
+	options = append(options, projectSwitchOption{key: "", display: projectAllLabel, count: len(m.rows)})
+	for key, acc := range byKey {
+		display := acc.display
+		if displayCounts[display] > 1 {
+			display = key
+		}
+		options = append(options, projectSwitchOption{
+			key:     key,
+			display: display,
+			count:   acc.count,
+		})
+	}
+	sort.SliceStable(options[1:], func(i, j int) bool {
+		left := options[i+1]
+		right := options[j+1]
+		if left.display != right.display {
+			return strings.ToLower(left.display) < strings.ToLower(right.display)
+		}
+		return strings.ToLower(left.key) < strings.ToLower(right.key)
+	})
+
+	if query == "" {
+		return options
+	}
+	filtered := make([]projectSwitchOption, 0, len(options))
+	for _, option := range options {
+		haystack := strings.ToLower(strings.Join([]string{option.display, option.key}, " "))
+		if strings.Contains(haystack, query) {
+			filtered = append(filtered, option)
+		}
+	}
+	return filtered
+}
+
+func (m Model) renderProjectSwitchView() string {
+	var b strings.Builder
+	b.WriteString(m.theme.header.Render("Project"))
+	b.WriteString("\n\n")
+
+	if m.err != nil {
+		b.WriteString(m.theme.error.Render(m.err.Error()))
+		b.WriteString("\n\n")
+	}
+
+	searchDisplay := m.input.Value()
+	if searchDisplay == "" {
+		searchDisplay = m.theme.dim.Render("Type to search")
+	}
+	b.WriteString("Search: ")
+	b.WriteString(searchDisplay)
+	b.WriteString("\n\n")
+
+	options := m.projectSwitchOptionRows()
+	if len(options) == 0 {
+		b.WriteString(m.theme.dim.Render("  No matching projects"))
+		b.WriteString("\n")
+	} else {
+		selected := clampCursor(m.projectSwitchCursor, len(options))
+		visibleRows := m.projectSwitchVisibleRows()
+		start, visibleOptions := projectSwitchWindow(options, selected, visibleRows)
+		for offset, option := range visibleOptions {
+			i := start + offset
+			cursor := " "
+			if i == selected {
+				cursor = "▸"
+			}
+			line := fmt.Sprintf("%s %s (%d)", cursor, projectSwitchDisplayName(option), option.count)
+			if i == selected {
+				line = m.theme.cursor.Render(line)
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		if len(options) > visibleRows && visibleRows > 0 {
+			end := start + len(visibleOptions)
+			b.WriteString(m.theme.dim.Render(fmt.Sprintf("[showing %d-%d of %d]", start+1, end, len(options))))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString(renderHelpTable(inputHelpRows(inputProjectSwitch), m.width))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) projectSwitchVisibleRows() int {
+	if m.height <= 0 {
+		return len(m.projectSwitchOptions())
+	}
+	footerLines := helpLines(inputHelpRows(inputProjectSwitch), m.width)
+	count := m.height - 5 - footerLines
+	if count < 1 {
+		return 1
+	}
+	return count
+}
+
+func projectSwitchWindow(options []projectSwitchOption, cursor, maxRows int) (int, []projectSwitchOption) {
+	if len(options) == 0 || maxRows <= 0 || maxRows >= len(options) {
+		return 0, options
+	}
+	cursor = clampCursor(cursor, len(options))
+	start := cursor - maxRows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+maxRows > len(options) {
+		start = len(options) - maxRows
+	}
+	return start, options[start : start+maxRows]
+}
+
+func projectSwitchDisplayName(option projectSwitchOption) string {
+	if option.key == "" {
+		return "All"
+	}
+	return option.display
+}
+
+func indexProjectSwitchOption(options []projectSwitchOption, targetKey string) int {
+	for i, option := range options {
+		if option.key == targetKey {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) renderHelp() string {
+	return strings.Join([]string{
+		"kwt help",
+		"",
+		"↑/k ↓/j move    g/G top/bottom",
+		"enter attach    L layout    n new    d delete    s shell    K kill workspace",
+		"P project       p filter    / search    r refresh    esc cancel/clear    q quit",
+		"",
+		"Press any key to close help.",
+	}, "\n")
+}
