@@ -1,0 +1,41 @@
+# Agent Workspaces
+
+`kwt` is useful when each branch deserves its own terminal workspace and agents
+should not fight over one checkout.
+
+## Layouts
+
+Layouts define tmux panes. Keep them explicit and boring:
+
+```toml
+[agents]
+codex = "codex"
+claude = "claude"
+roborev = "roborev tui"
+
+[[layouts.presets]]
+name = "review"
+arrange = "even-horizontal"
+panes = ["agent:codex", "agent:roborev", ""]
+```
+
+The empty string creates a plain shell. Agent commands can include flags, but
+approval and sandbox bypass flags should be deliberate local choices.
+
+## Working loop
+
+```sh
+kwt add -b fix/flaky-status
+kwt exec fix/flaky-status -- go test ./internal/status
+kwt open fix/flaky-status
+```
+
+For long-running agent work, keep one branch per worktree, one tmux workspace per
+branch, and let `kwt status` show which branches are dirty, ahead, behind, or
+quiet.
+
+## Cross-project steering
+
+The dashboard is project-aware. Use `P` to set the active project perspective
+before creating a worktree, then `n` to create it without leaving the TUI. Use
+lowercase `p` for a temporary project-name filter and `/` for row search.

@@ -217,6 +217,16 @@ Run `kwt <command> --help` for flags and examples.
 - Go 1.26+ to build from source
 - tmux for workspace launch and `kwt tmux`
 
+## Documentation
+
+The maintained docs live in [docs](docs/):
+
+```bash
+make docs-install
+make docs-build
+make docs-serve
+```
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).[^fork]

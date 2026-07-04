@@ -1,0 +1,73 @@
+# Quickstart
+
+## Install
+
+```sh
+go install go.kenn.io/kwt/cmd/kwt@latest
+```
+
+From a clone:
+
+```sh
+git clone https://github.com/kenn-io/kwt.git
+cd kwt
+go build -o kwt ./cmd/kwt
+```
+
+## Open the dashboard
+
+From any Git repository:
+
+```sh
+kwt
+```
+
+Bare `kwt` opens the full-screen dashboard when stdin and stdout are interactive.
+Use `kwt tui` when you want the explicit command form.
+
+Useful keys:
+
+| Key     | Action                                               |
+| ------- | ---------------------------------------------------- |
+| `enter` | Attach to the selected workspace.                    |
+| `n`     | Create a worktree in the active project perspective. |
+| `P`     | Switch the active project perspective.               |
+| `p`     | Filter visible projects by name.                     |
+| `/`     | Search rows within the active perspective/filter.    |
+| `L`     | Select a workspace layout.                           |
+| `d`     | Delete the selected worktree.                        |
+| `K`     | Kill the selected live tmux workspace.               |
+| `s`     | Open a shell in the selected worktree.               |
+| `r`     | Refresh.                                             |
+| `?`     | Toggle help.                                         |
+
+## Create a worktree
+
+```sh
+kwt add -b feature/new-ui
+```
+
+By default, `kwt add` creates the worktree and launches the configured tmux
+workspace. To create without launching:
+
+```sh
+kwt add --no-launch -b feature/new-ui
+```
+
+## Use worktrees from scripts
+
+```sh
+cd "$(kwt get feature/new-ui)"
+kwt exec feature/new-ui -- npm test
+```
+
+## Clean up
+
+```sh
+kwt remove feature/new-ui
+kwt remove -b feature/new-ui
+kwt prune
+```
+
+`remove -b` removes both the worktree and the matching branch. `prune` cleans up
+stale Git worktree metadata.

@@ -10,7 +10,7 @@ BUILD_DIR := build
 GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
-.PHONY: all build clean test test-verbose test-coverage lint fmt vet install help
+.PHONY: all build clean test test-verbose test-coverage lint fmt vet install help docs-install docs-build docs-serve docs-check
 
 # Default target
 all: clean build
@@ -69,6 +69,21 @@ test-coverage-report:
 bench:
 	@echo "Running benchmarks..."
 	@go test -bench=. -benchmem ./...
+
+## docs-install: Install docs toolchain
+docs-install:
+	@cd docs && uv sync --frozen --no-dev
+
+## docs-build: Build Zensical docs
+docs-build:
+	@cd docs && uv run --frozen bash ./zensical-docs.sh build
+
+## docs-serve: Serve Zensical docs locally
+docs-serve:
+	@cd docs && uv run bash ./zensical-docs.sh serve
+
+## docs-check: Verify docs build
+docs-check: docs-build
 
 ## lint: Run golangci-lint
 lint:
