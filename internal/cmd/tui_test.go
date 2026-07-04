@@ -791,6 +791,7 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
 	cfg := &models.Config{
 		Fleet:    models.FleetConfig{Enabled: true},
 		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
