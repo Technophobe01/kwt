@@ -191,12 +191,12 @@ auto_mkdir = true
 [fleet]
 enabled = true
 host_id = "Host-A"
-hub_url = "http://100.64.1.2:8787"
+hub_url = "https://host-a.example"
 token_file = "~/kwt/fleet.token"
 token_env = "KWT_FLEET_TOKEN"
 
 [fleet.hub]
-listen_addr = "100.64.1.2:8787"
+listen_addr = "127.0.0.1:8787"
 store_path = "~/kwt/fleet/state.json"
 `)))
 
@@ -204,7 +204,7 @@ store_path = "~/kwt/fleet/state.json"
 	require.NoError(t, err)
 	assert.True(t, cfg.Fleet.Enabled)
 	assert.Equal(t, "Host-A", cfg.Fleet.HostID)
-	assert.Equal(t, "http://100.64.1.2:8787", cfg.Fleet.HubURL)
+	assert.Equal(t, "https://host-a.example", cfg.Fleet.HubURL)
 	assert.Equal(t, filepath.Join(home, "kwt", "fleet.token"), cfg.Fleet.TokenFile)
 	assert.Equal(t, filepath.Join(home, "kwt", "fleet", "state.json"), cfg.Fleet.Hub.StorePath)
 }

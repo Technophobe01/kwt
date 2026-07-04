@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 type inputMode int
@@ -31,9 +32,10 @@ const (
 )
 
 type confirmState struct {
-	kind confirmKind
-	row  Row
-	text string
+	kind  confirmKind
+	row   Row
+	text  string
+	force bool
 }
 
 type rowsMsg struct {
@@ -471,10 +473,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	row := m.confirm.row
 	kind := m.confirm.kind
+	force := m.confirm.force
 	m.confirm = confirmState{}
 	switch kind {
 	case confirmDelete:
-		return m, m.removeWorktreeCmd(row)
+		return m, m.removeWorktreeCmd(row, force)
 	case confirmKill:
 		return m, m.killSessionCmd(row)
 	default:
@@ -625,12 +628,38 @@ func (m Model) startDelete() (Model, tea.Cmd) {
 		m.message = "refusing to remove a main worktree"
 		return m, nil
 	}
+	dirty := rowHasUncommittedChanges(row)
 	text := fmt.Sprintf("delete %s? [y/N]", rowLabel(row))
-	if row.SessionLive {
+	if dirty && row.SessionLive {
+		text = fmt.Sprintf("discard changes, delete %s, and kill its live workspace? [y/N]", rowLabel(row))
+	} else if dirty {
+		text = fmt.Sprintf("discard changes and delete %s? [y/N]", rowLabel(row))
+	} else if row.SessionLive {
 		text = fmt.Sprintf("delete %s and kill its live workspace? [y/N]", rowLabel(row))
 	}
-	m.confirm = confirmState{kind: confirmDelete, row: row, text: text}
+	m.confirm = confirmState{kind: confirmDelete, row: row, text: text, force: dirty}
 	return m, nil
+}
+
+func rowHasUncommittedChanges(row Row) bool {
+	if row.Status == nil {
+		return false
+	}
+	status := row.Status.GitStatus
+	if status.Added > 0 ||
+		status.Modified > 0 ||
+		status.Deleted > 0 ||
+		status.Untracked > 0 ||
+		status.Staged > 0 ||
+		status.Conflicts > 0 {
+		return true
+	}
+	switch row.Status.Status {
+	case models.WorktreeStatusModified, models.WorktreeStatusStaged, models.WorktreeStatusConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) startKill() (Model, tea.Cmd) {
@@ -686,9 +715,9 @@ func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
 	}
 }
 
-func (m Model) removeWorktreeCmd(row Row) tea.Cmd {
+func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.backend.RemoveWorktree(context.Background(), row); err != nil {
+		if err := m.backend.RemoveWorktree(context.Background(), row, force); err != nil {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}

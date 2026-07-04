@@ -55,6 +55,9 @@ workspace.
 This checks out a branch that is already available in the current repository or
 on a fetched remote; if the source machine has unpushed commits, push or fetch
 those commits first. `kwt` does not transfer commit objects or dirty files.
+Remote-only sync does not run repository setup (`copy_files` or
+`setup_commands`); those hooks are reserved for locally initiated `kwt add`
+worktrees.
 Detached-head rows are shown for awareness but are not synced by v1.
 
 ## Configure it
@@ -65,17 +68,19 @@ Multi-machine sync is disabled by default. Enable it explicitly:
 [fleet]
 enabled = true
 host_id = "host-a"
-hub_url = "http://host-a.example:8787"
+hub_url = "https://host-a.example"
 token_file = "~/.config/kwt/fleet.token"
 
 [fleet.hub]
-listen_addr = "100.x.y.z:8787"
+listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
 Use `token_file` or `token_env`; do not put the token inline in `config.toml`.
-The intended deployment is over Tailscale or an equivalent trusted private
-network. The hub rejects public and unspecified listen addresses by default.
+Plain `http://` hub URLs are allowed only for loopback hosts. Use HTTPS for
+multi-machine hub URLs, typically by putting the loopback hub behind Tailscale
+Serve, Caddy, or an equivalent private TLS endpoint. The hub rejects public and
+unspecified listen addresses by default.
 
 ## Freshness and differences
 

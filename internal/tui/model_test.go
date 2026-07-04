@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 type fakeBackend struct {
@@ -28,6 +29,7 @@ type fakeBackend struct {
 	createCalls     []string
 	materializeRows []string
 	removeCalls     []string
+	removeForces    []bool
 	killCalls       []string
 	openCalls       []string
 }
@@ -42,8 +44,9 @@ func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string
 	return b.createPath, b.createErr
 }
 
-func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row) error {
+func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row, force bool) error {
 	b.removeCalls = append(b.removeCalls, rowPath(row))
+	b.removeForces = append(b.removeForces, force)
 	return b.removeErr
 }
 
@@ -656,6 +659,42 @@ func TestModelDeleteLiveWorktreeConfirmsAndCallsRemove(t *testing.T) {
 	msg := cmd()
 	assert.IsType(t, actionDoneMsg{}, msg)
 	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
+	assert.Equal(t, []bool{false}, backend.removeForces)
+}
+
+func TestModelDeleteDirtyWorktreeConfirmsDiscardAndForcesRemove(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Modified = 1
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, _ = updateModel(t, model, press("d"))
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "discard changes and delete kwt:feature? [y/N]")
+	assert.NotContains(t, content, "kwt remove --force")
+
+	_, cmd := updateModel(t, model, press("y"))
+	require.NotNil(t, cmd)
+	msg := cmd()
+	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
+	assert.Equal(t, []bool{true}, backend.removeForces)
+}
+
+func TestModelDeleteDirtyLiveWorktreeConfirmsDiscardAndKill(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.SessionLive = true
+	row.SessionName = "kwt-workspace-kwt-feature"
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Untracked = 1
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Contains(t, stripANSI(viewContent(model)), "discard changes, delete kwt:feature, and kill its live workspace? [y/N]")
 }
 
 func TestModelKillWorkspaceConfirm(t *testing.T) {

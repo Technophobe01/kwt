@@ -71,6 +71,25 @@ func TestClientUsesBearerTokenAndTimeout(t *testing.T) {
 	assert.Equal(t, "Bearer secret", gotAuth)
 }
 
+func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
+	client := NewClient(ClientOptions{HubURL: "http://192.0.2.10:8787", Token: "secret"})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, req)
+	assert.Contains(t, err.Error(), "plaintext sync hub URL")
+}
+
+func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {
+	client := NewClient(ClientOptions{HubURL: "http://127.0.0.1:8787", Token: "secret"})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
+}
+
 func TestClientHonorsTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)

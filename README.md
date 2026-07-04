@@ -140,8 +140,9 @@ kwt config set --local layouts.default stack
 ### Multi-machine Sync
 
 Multi-machine sync is opt-in and uses static config. Set `[fleet].enabled =
-true`, configure a hub URL or local `[fleet.hub].listen_addr`, and provide a
-bearer token through `token_env` or `token_file`.
+true`, configure a hub URL, and provide a bearer token through `token_env` or
+`token_file`. Non-loopback hub URLs must use HTTPS; plain HTTP is reserved for
+loopback listeners.
 
 The hub is a dumb store for signed-in hosts' latest worktree manifests.
 Multi-machine status is advisory: it helps compare branch, commit, dirty-state,
@@ -151,6 +152,8 @@ When enabled, the dashboard shows remote-only rows with `WORKSPACE` set to
 may also show a `MACHINES` column, but the table keeps the worktree status
 visible at roughly 100 columns. Select a remote-only branch row and press `s` to
 sync that branch locally. Press `c` on a local row to open a shell there.
+Remote-only sync skips repository setup (`copy_files` and `setup_commands`);
+those hooks run for locally initiated `kwt add` worktrees.
 
 Useful commands:
 
@@ -179,7 +182,7 @@ worktrees even when they are outside `worktree.basedir`.
 ### Repository Setup
 
 Optional `repository_settings` copy files or run commands when new worktrees are
-created:
+created by `kwt add`:
 
 ```toml
 [[repository_settings]]

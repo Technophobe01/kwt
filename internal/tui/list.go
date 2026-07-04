@@ -254,6 +254,9 @@ func formatPushPullStatus(status *models.WorktreeStatus) (string, bool) {
 }
 
 func formatRowChanges(row Row) string {
+	if rowHasUncommittedChanges(row) {
+		return formatChanges(row.Status)
+	}
 	if row.Fleet != nil && row.Fleet.Dirty != "" {
 		if row.Status == nil || row.Fleet.Dirty != "clean" {
 			return formatFleetDirty(row.Fleet.Dirty)

@@ -62,7 +62,7 @@ last_touched = "2026-07-04T12:00:00Z"
 ## Repository setup
 
 Optional repository settings can copy files or run commands when new worktrees
-are created:
+are created by `kwt add`:
 
 ```toml
 [[repository_settings]]
@@ -79,6 +79,10 @@ Template variables include `Host`, `Owner`, `Repository`, `FullPath`, `Branch`,
 `Hash`, and `Path`. Quote variables in shell commands when values may contain
 spaces.
 
+Remote-only multi-machine sync skips repository setup (`copy_files` and
+`setup_commands`) because the branch name is reported by another host. Run any
+project bootstrap command manually after syncing if that branch needs it.
+
 ## Multi-machine sync config
 
 Multi-machine sync is an opt-in subsystem. The public command namespace is
@@ -88,13 +92,17 @@ Multi-machine sync is an opt-in subsystem. The public command namespace is
 [fleet]
 enabled = true
 host_id = "host-a"
-hub_url = "http://host-a.example:8787"
+hub_url = "https://host-a.example"
 token_file = "~/.config/kwt/fleet.token"
 
 [fleet.hub]
-listen_addr = "100.x.y.z:8787"
+listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
+
+Plain `http://` hub URLs are accepted only for loopback hosts. Use HTTPS for a
+multi-machine hub URL, commonly by serving the loopback hub through a private TLS
+endpoint.
 
 See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
 and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the

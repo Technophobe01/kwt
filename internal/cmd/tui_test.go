@@ -176,6 +176,62 @@ func TestTUIStatusCollectorOptionsFetchesSyncState(t *testing.T) {
 	assert.Equal(t, "/worktrees", opts.BaseDir)
 }
 
+func TestReadTUIFleetStatePublishesBeforeReadingHub(t *testing.T) {
+	resetFleetCommandDeps(t)
+
+	cfg := &models.Config{Fleet: models.FleetConfig{
+		Enabled: true,
+		HubURL:  "https://hub.example.test",
+	}}
+	sequence := []string{}
+	client := &stubFleetClient{}
+	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
+		sequence = append(sequence, "publish")
+		assert.Same(t, cfg, gotCfg)
+		assert.NotNil(t, builder)
+		return errors.New("hub unavailable")
+	}
+	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
+		sequence = append(sequence, "builder")
+		return &stubFleetManifestBuilder{}
+	}
+	newFleetClientFromConfig = func(gotCfg *models.Config) (fleetHubClient, error) {
+		sequence = append(sequence, "client")
+		assert.Same(t, cfg, gotCfg)
+		client.sequence = &sequence
+		return client, nil
+	}
+
+	_, err := readTUIFleetState(context.Background(), cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"builder", "publish", "client", "state"}, sequence)
+}
+
+func TestReadTUIFleetStateIgnoresPublishWarningWithoutPanicking(t *testing.T) {
+	resetFleetCommandDeps(t)
+
+	cfg := &models.Config{Fleet: models.FleetConfig{
+		Enabled: true,
+		HubURL:  "https://hub.example.test",
+	}}
+	client := &stubFleetClient{}
+	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
+		return &stubFleetManifestBuilder{err: errors.New("build failed")}
+	}
+	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
+		return fleet.PublishBestEffort(ctx, gotCfg, builder, warn)
+	}
+	newFleetClientFromConfig = func(gotCfg *models.Config) (fleetHubClient, error) {
+		assert.Same(t, cfg, gotCfg)
+		return client, nil
+	}
+
+	_, err := readTUIFleetState(context.Background(), cfg)
+
+	require.NoError(t, err)
+}
+
 func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {
 	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
 	globalEntry := &discovery.GlobalWorktreeEntry{
@@ -722,11 +778,83 @@ func TestTUIBackendRemoveWorktreeFallsBackToRegisteredProjectRoot(t *testing.T) 
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
-	err := backend.RemoveWorktree(context.Background(), row)
+	err := backend.RemoveWorktree(context.Background(), row, false)
 
 	require.NoError(t, err)
 	output := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
 	assert.NotContains(t, output, worktreePath)
+}
+
+func TestTUIBackendRemoveWorktreeDirtyErrorDoesNotSuggestCLIForce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "dirty-worktree")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/dirty", worktreePath)
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "dirty.txt"), []byte("dirty\n"), 0644))
+
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+		Projects: []models.Project{{
+			Repository: "github.com/example/service-api",
+			Name:       "service-api",
+			Path:       repoPath,
+		}},
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "service-api",
+			FullPath:   "github.com/example/service-api",
+		},
+		Branch: "codex/dirty",
+		Path:   worktreePath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	err := backend.RemoveWorktree(context.Background(), row, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uncommitted changes")
+	assert.NotContains(t, err.Error(), "kwt remove --force")
+	assert.DirExists(t, worktreePath)
+}
+
+func TestTUIBackendForceRemoveDeletesDirtyWorktree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "dirty-worktree")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/dirty", worktreePath)
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "dirty.txt"), []byte("dirty\n"), 0644))
+
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+		Projects: []models.Project{{
+			Repository: "github.com/example/service-api",
+			Name:       "service-api",
+			Path:       repoPath,
+		}},
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "service-api",
+			FullPath:   "github.com/example/service-api",
+		},
+		Branch: "codex/dirty",
+		Path:   worktreePath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	err := backend.RemoveWorktree(context.Background(), row, true)
+
+	require.NoError(t, err)
+	assert.NoDirExists(t, worktreePath)
 }
 
 func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
@@ -762,6 +890,81 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 	assert.True(t, strings.HasPrefix(path, baseDir), path)
 	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
 	assert.Equal(t, "feature/studio-only", branch)
+}
+
+func TestTUIBackendMaterializeWorktreeSkipsRepositorySetupCommands(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("setup command execution requires sh")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	runTUITestGit(t, repoPath, "branch", "feature/studio-only")
+	baseDir := filepath.Join(t.TempDir(), "worktrees")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir, AutoMkdir: true},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       repoPath,
+		}},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository:    repoPath,
+			SetupCommands: []string{"printf setup > setup-ran"},
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+	}}
+
+	path, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(path, "setup-ran"))
+}
+
+func TestProjectForFleetInfoRequiresRepositoryIdentityMatch(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Projects: []models.Project{{
+			Repository: "github.com/example/other",
+			Name:       "kwt",
+			Path:       "/repos/other",
+		}},
+	}, "")
+
+	project, ok := backend.projectForFleetInfo(&dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+	})
+
+	assert.False(t, ok)
+	assert.Empty(t, project.Path)
+}
+
+func TestProjectForFleetInfoMatchesNormalizedRepositoryIdentity(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Projects: []models.Project{{
+			Repository: "https://github.com/example/kwt.git",
+			Name:       "service",
+			Path:       "/repos/kwt",
+		}},
+	}, "")
+
+	project, ok := backend.projectForFleetInfo(&dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+	})
+
+	require.True(t, ok)
+	assert.Equal(t, "/repos/kwt", project.Path)
 }
 
 func TestTUIBackendMaterializeWorktreeExplainsUnavailableBranch(t *testing.T) {
@@ -830,7 +1033,7 @@ func TestTUIBackendRemoveWorktreeRepairsBrokenGitFile(t *testing.T) {
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
-	err := backend.RemoveWorktree(context.Background(), row)
+	err := backend.RemoveWorktree(context.Background(), row, false)
 
 	require.NoError(t, err)
 	output := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")

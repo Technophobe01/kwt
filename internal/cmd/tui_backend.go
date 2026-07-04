@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -491,6 +492,10 @@ func buildTUIRow(
 }
 
 func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetState, error) {
+	if cfg != nil && cfg.Fleet.Enabled {
+		var publishWarning bytes.Buffer
+		_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
+	}
 	client, err := newFleetClientFromConfig(cfg)
 	if err != nil {
 		return fleet.FleetState{}, err
@@ -648,7 +653,12 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	if !ok {
 		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
 	}
-	path, err := worktree.New(git.New(project.Path), b.cfg).Add(row.Fleet.Branch, "", false)
+	path, err := worktree.New(git.New(project.Path), b.cfg).AddWithOptions(
+		row.Fleet.Branch,
+		"",
+		false,
+		worktree.AddOptions{SkipSetup: true},
+	)
 	if err != nil {
 		return "", fmt.Errorf(
 			"could not sync %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
@@ -666,21 +676,36 @@ func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Proj
 	if b == nil || b.cfg == nil || info == nil {
 		return models.Project{}, false
 	}
+	projectIdentity := strings.TrimSpace(info.ProjectIdentity)
+	if projectIdentity == "" {
+		return models.Project{}, false
+	}
 	for _, project := range b.cfg.Projects {
 		if strings.TrimSpace(project.Path) == "" {
 			continue
 		}
-		if strings.EqualFold(project.Repository, info.ProjectIdentity) {
-			return project, true
-		}
-		if info.ProjectName != "" && strings.EqualFold(project.Name, info.ProjectName) {
+		if sameRepositoryIdentity(project.Repository, projectIdentity) {
 			return project, true
 		}
 	}
 	return models.Project{}, false
 }
 
-func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) error {
+func sameRepositoryIdentity(left string, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	normalizedLeft, leftErr := fleet.NormalizeRepositoryIdentity(left)
+	normalizedRight, rightErr := fleet.NormalizeRepositoryIdentity(right)
+	return leftErr == nil && rightErr == nil && strings.EqualFold(normalizedLeft, normalizedRight)
+}
+
+func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, force bool) error {
 	if row.Entry == nil {
 		return fmt.Errorf("no worktree selected")
 	}
@@ -692,10 +717,10 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) erro
 	if err != nil {
 		return err
 	}
-	if err := b.removeWorktreeFromRoot(repoRoot, row.Entry.Path); err != nil {
+	if err := b.removeWorktreeFromRoot(repoRoot, row.Entry.Path, force); err != nil {
 		if strings.Contains(err.Error(), "contains modified or untracked files") ||
 			strings.Contains(err.Error(), "has local changes") {
-			return fmt.Errorf("worktree has uncommitted changes (use kwt remove --force)")
+			return fmt.Errorf("worktree has uncommitted changes")
 		}
 		return err
 	}
@@ -771,8 +796,8 @@ func rowRepositoryIdentityCandidates(info *url.RepositoryInfo) []string {
 	return candidates
 }
 
-func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string) error {
-	err := worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, false)
+func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string, force bool) error {
+	err := worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
 	if err == nil || !isWorktreeValidationError(err) {
 		return err
 	}
@@ -780,7 +805,7 @@ func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string
 	if repairErr := repairLinkedWorktreeGitFile(repoRoot, worktreePath); repairErr != nil {
 		return fmt.Errorf("%w (failed to repair worktree metadata: %v)", err, repairErr)
 	}
-	return worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, false)
+	return worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
 }
 
 func isWorktreeValidationError(err error) bool {

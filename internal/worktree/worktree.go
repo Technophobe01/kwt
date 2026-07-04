@@ -34,6 +34,11 @@ type Manager struct {
 	config *models.Config
 }
 
+// AddOptions controls optional behavior for creating a worktree.
+type AddOptions struct {
+	SkipSetup bool
+}
+
 // New creates a new worktree Manager.
 func New(g GitInterface, config *models.Config) *Manager {
 	return &Manager{
@@ -44,6 +49,11 @@ func New(g GitInterface, config *models.Config) *Manager {
 
 // Add creates a new worktree and returns the path of the created worktree.
 func (m *Manager) Add(branch string, customPath string, createBranch bool) (string, error) {
+	return m.AddWithOptions(branch, customPath, createBranch, AddOptions{})
+}
+
+// AddWithOptions creates a new worktree and returns the path of the created worktree.
+func (m *Manager) AddWithOptions(branch string, customPath string, createBranch bool, opts AddOptions) (string, error) {
 	path, err := m.preparePath(customPath, branch)
 	if err != nil {
 		return "", err
@@ -53,7 +63,9 @@ func (m *Manager) Add(branch string, customPath string, createBranch bool) (stri
 		return "", err
 	}
 
-	m.runPostWorktreeSetup(branch, path)
+	if !opts.SkipSetup {
+		m.runPostWorktreeSetup(branch, path)
+	}
 	return path, nil
 }
 

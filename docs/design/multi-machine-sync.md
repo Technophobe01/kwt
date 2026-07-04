@@ -27,11 +27,11 @@ or require background daemons for single-machine users.
 [fleet]
 enabled = true
 host_id = "host-a"
-hub_url = "http://host-a.example:8787"
+hub_url = "https://host-a.example"
 token_file = "~/.config/kwt/fleet.token"
 
 [fleet.hub]
-listen_addr = "100.x.y.z:8787"
+listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
@@ -39,12 +39,15 @@ There is no `role` field. A node with `[fleet.hub]` configured is the hub. A
 node without it is a publisher/client.
 
 The hub machine's CLI still publishes through the same HTTP API as any other
-node. A hub node should set `hub_url` to its own listener URL, or kwt should
-default an empty `hub_url` from `[fleet.hub].listen_addr`.
+node. For a loopback-only hub it may default an empty `hub_url` from
+`[fleet.hub].listen_addr`; multi-machine clients should use an HTTPS `hub_url`
+that reaches the hub through a private TLS endpoint.
 
 Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
-deployment is HTTP over Tailscale or an equivalent encrypted private network, so
-the hub should reject public and unspecified listen addresses by default.
+deployment keeps the daemon listener private and exposes it through HTTPS for
+other machines. Plain HTTP bearer-token requests are valid only for loopback
+hub URLs, and the hub should reject public and unspecified listen addresses by
+default.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail

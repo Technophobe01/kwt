@@ -158,6 +158,19 @@ func TestFormatRowChangesUsesFleetDirtyForRemoteOnlyRows(t *testing.T) {
 	assert.Equal(t, "clean", formatRowChanges(row))
 }
 
+func TestFormatRowChangesPrefersLocalDirtyCounts(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Modified = 1
+	row.Fleet = &FleetInfo{
+		Local: true,
+		Hosts: []string{"local", "host-b"},
+		Dirty: "host-b (1 modified)",
+	}
+
+	assert.Equal(t, "~1", formatRowChanges(row))
+}
+
 func TestFormatPushPullStatus(t *testing.T) {
 	got, ok := formatPushPullStatus(nil)
 	assert.True(t, ok)

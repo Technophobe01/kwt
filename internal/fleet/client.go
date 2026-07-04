@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -230,6 +231,9 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 	if c.hubURL == "" {
 		return nil, errors.New("sync hub URL is not configured")
 	}
+	if err := validateBearerHubURL(c.hubURL); err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.hubURL+path, body)
 	if err != nil {
@@ -237,6 +241,29 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	return req, nil
+}
+
+func validateBearerHubURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse sync hub URL: %w", err)
+	}
+	if parsed.Scheme != "http" {
+		return nil
+	}
+	if isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback hosts; use https for multi-machine hubs", raw)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func nonEmptyToken(raw string, source string) (string, error) {

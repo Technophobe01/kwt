@@ -54,7 +54,7 @@ type Backend interface {
 	List(ctx context.Context) ([]Row, error)
 	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
-	RemoveWorktree(ctx context.Context, row Row) error
+	RemoveWorktree(ctx context.Context, row Row, force bool) error
 	KillSession(row Row) error
 	OpenInTmux(ctx context.Context, row Row, layoutName string) error
 	LayoutNames() []string
