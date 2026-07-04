@@ -321,13 +321,13 @@ func validateStoreManifest(manifest Manifest) error {
 		return fmt.Errorf("host ID %q must be normalized as %q", manifest.HostID, normalized)
 	}
 	for i, project := range manifest.Projects {
-		if strings.TrimSpace(project.Identity) == "" {
-			return fmt.Errorf("project %d identity is required", i)
+		if err := validateCanonicalIdentity(fmt.Sprintf("project %d identity", i), project.Identity); err != nil {
+			return err
 		}
 	}
 	for i, worktree := range manifest.Worktrees {
-		if strings.TrimSpace(worktree.ProjectIdentity) == "" {
-			return fmt.Errorf("worktree %d project identity is required", i)
+		if err := validateCanonicalIdentity(fmt.Sprintf("worktree %d project identity", i), worktree.ProjectIdentity); err != nil {
+			return err
 		}
 		if strings.TrimSpace(worktree.Kind) == "" {
 			return fmt.Errorf("worktree %d kind is required", i)
@@ -338,6 +338,23 @@ func validateStoreManifest(manifest Manifest) error {
 		if strings.TrimSpace(worktree.Ref) == "" {
 			return fmt.Errorf("worktree %d ref is required", i)
 		}
+	}
+	return nil
+}
+
+// validateCanonicalIdentity rejects identities that are not already in
+// normalized form, so raw remote URLs (which can embed credentials) are never
+// stored or echoed back in fleet state.
+func validateCanonicalIdentity(field string, identity string) error {
+	if strings.TrimSpace(identity) == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	normalized, err := NormalizeRepositoryIdentity(identity)
+	if err != nil {
+		return fmt.Errorf("%s %q is not a canonical repository identity: %w", field, identity, err)
+	}
+	if normalized != identity {
+		return fmt.Errorf("%s %q must be normalized as %q", field, identity, normalized)
 	}
 	return nil
 }

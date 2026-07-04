@@ -169,6 +169,24 @@ func TestStorePutRejectsInvalidManifest(t *testing.T) {
 				manifest.Worktrees[0].Kind = "tag"
 			},
 		},
+		{
+			name: "raw remote URL as project identity",
+			change: func(manifest *Manifest) {
+				manifest.Projects[0].Identity = "https://user:token@github.com/kenn-io/kwt.git"
+			},
+		},
+		{
+			name: "raw remote URL as worktree project identity",
+			change: func(manifest *Manifest) {
+				manifest.Worktrees[0].ProjectIdentity = "git@github.com:kenn-io/kwt.git"
+			},
+		},
+		{
+			name: "unparseable project identity",
+			change: func(manifest *Manifest) {
+				manifest.Projects[0].Identity = "///"
+			},
+		},
 	}
 
 	for _, tt := range tests {
