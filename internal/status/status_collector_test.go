@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,17 @@ func TestRepositoryFullPathIdentityNormalizesWindowsSeparators(t *testing.T) {
 	info := &url.RepositoryInfo{FullPath: `gitlab.com\org\team\service`}
 
 	assert.Equal(t, "gitlab.com/org/team/service", repositoryFullPathIdentity(info))
+}
+
+func TestGetLastActivityFallbackHonorsCanceledContext(t *testing.T) {
+	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := collector.getLastActivityFallback(ctx, t.TempDir())
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled))
 }
 
 func changeDir(t *testing.T, dir string) {

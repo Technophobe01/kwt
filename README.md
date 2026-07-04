@@ -109,6 +109,18 @@ panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 name = "stack"
 arrange = "even-vertical"
 panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
+
+# Optional, opt-in fleet sync.
+[fleet]
+enabled = false
+host_id = "laptop"
+hub_url = "https://fleet.example.net"
+token_env = "KWT_FLEET_TOKEN"
+# token_file = "~/.config/kwt/fleet.token"
+
+[fleet.hub]
+listen_addr = "127.0.0.1:8787"
+store_path = "~/.config/kwt/fleet/state.json"
 ```
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
@@ -123,6 +135,33 @@ kwt config get layouts.default
 kwt config set worktree.basedir ~/worktrees
 kwt config set --local layouts.default stack
 ```
+
+### Fleet Sync
+
+Fleet sync is opt-in and uses static config. Set `[fleet].enabled = true`,
+configure a hub URL or local `[fleet.hub].listen_addr`, and provide a bearer
+token through `token_env` or `token_file`.
+
+The hub is a dumb store for signed-in hosts' latest worktree manifests. Fleet
+status is advisory: it helps compare branch, commit, dirty-state, and freshness
+across hosts, but it does not lock worktrees or enforce ownership.
+
+Useful fleet commands:
+
+```bash
+kwt fleet serve
+kwt fleet publish
+kwt fleet status
+kwt fleet forget <host-id>
+```
+
+When fleet is enabled, `kwt fleet status` publishes this host before reading the
+hub. Successful mutations also publish best-effort: `kwt add`, local and global
+`kwt remove`, and `kwt prune --expired` when it actually removes or unregisters
+an expired worktree. Normal `kwt prune` publishes after every successful run.
+Dry-runs, expired-prune no-ops, and failed removals do not publish. Missing hub
+config, disabled fleet sync, or publish failures never make the mutation command
+fail; publish warnings may be written to stderr.
 
 ### Project Discovery
 
@@ -165,6 +204,7 @@ spaces.
 | `kwt exec`       | Run a command in a matching worktree      |
 | `kwt remove`     | Delete a worktree, optionally its branch  |
 | `kwt prune`      | Clean up stale Git worktree metadata      |
+| `kwt fleet`      | Publish and inspect advisory fleet status |
 | `kwt tmux`       | Manage standalone tmux sessions           |
 | `kwt config`     | Read and write config values              |
 | `kwt completion` | Generate shell completion and integration |

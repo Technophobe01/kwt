@@ -459,6 +459,21 @@ func expandConfigPaths(cfg *models.Config) error {
 	}
 	cfg.Worktree.BaseDir = expandedPath
 
+	if cfg.Fleet.TokenFile != "" {
+		expandedPath, err = utils.ExpandPath(cfg.Fleet.TokenFile)
+		if err != nil {
+			return fmt.Errorf("failed to expand fleet token file: %w", err)
+		}
+		cfg.Fleet.TokenFile = expandedPath
+	}
+	if cfg.Fleet.Hub.StorePath != "" {
+		expandedPath, err = utils.ExpandPath(cfg.Fleet.Hub.StorePath)
+		if err != nil {
+			return fmt.Errorf("failed to expand fleet hub store path: %w", err)
+		}
+		cfg.Fleet.Hub.StorePath = expandedPath
+	}
+
 	for i := range cfg.RepositorySettings {
 		repo := cfg.RepositorySettings[i].Repository
 		// Skip path expansion for glob patterns — ExpandPath would prepend

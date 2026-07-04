@@ -36,6 +36,7 @@ type CdConfig struct {
 // Config represents the application configuration.
 type Config struct {
 	Worktree           WorktreeConfig      `mapstructure:"worktree"`            // Worktree-related configuration
+	Fleet              FleetConfig         `mapstructure:"fleet" toml:"fleet"`  // Fleet sync configuration
 	Cd                 CdConfig            `mapstructure:"cd"`                  // Cd command configuration
 	Finder             FinderConfig        `mapstructure:"finder"`              // Fuzzy finder configuration
 	UI                 UIConfig            `mapstructure:"ui"`                  // UI-related configuration
@@ -44,6 +45,22 @@ type Config struct {
 	Projects           []Project           `mapstructure:"projects"`            // Known repositories for cross-project discovery
 	RepositorySettings []RepositorySetting `mapstructure:"repository_settings"` // Per-repository setup/copy overrides
 	Layouts            LayoutsConfig       `mapstructure:"layouts"`             // Named tmux workspace layout library
+}
+
+// FleetConfig contains optional fleet sync configuration.
+type FleetConfig struct {
+	Enabled   bool           `mapstructure:"enabled" toml:"enabled"`       // Enable fleet sync behavior
+	HostID    string         `mapstructure:"host_id" toml:"host_id"`       // Stable identity for this host
+	HubURL    string         `mapstructure:"hub_url" toml:"hub_url"`       // Hub API base URL
+	TokenFile string         `mapstructure:"token_file" toml:"token_file"` // Path to bearer token file
+	TokenEnv  string         `mapstructure:"token_env" toml:"token_env"`   // Environment variable containing bearer token
+	Hub       FleetHubConfig `mapstructure:"hub" toml:"hub"`               // Hub listener/store configuration
+}
+
+// FleetHubConfig contains configuration for running the fleet hub.
+type FleetHubConfig struct {
+	ListenAddr string `mapstructure:"listen_addr" toml:"listen_addr"` // Hub HTTP listen address
+	StorePath  string `mapstructure:"store_path" toml:"store_path"`   // Hub state store path
 }
 
 // LayoutsConfig defines the named tmux workspace layout library.

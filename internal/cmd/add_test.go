@@ -1,17 +1,86 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestAddPublishesBestEffortAfterSuccessfulCreation(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	t.Chdir(repoPath)
+
+	addBranch = true
+	addNoLaunch = true
+	worktreePath := filepath.Join(t.TempDir(), "task7-add-publish")
+	sequence := []string{}
+
+	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
+		sequence = append(sequence, "builder")
+		return &stubFleetManifestBuilder{}
+	}
+	publishFleetBestEffort = func(ctx context.Context, cfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
+		sequence = append(sequence, "publish")
+		assert.NotNil(t, ctx)
+		assert.True(t, cfg.Fleet.Enabled)
+		assert.NotNil(t, builder)
+		assert.DirExists(t, worktreePath, "publish should run after the worktree exists")
+		return errors.New("publish failed")
+	}
+
+	cmd, _, stderr := fleetTestCommand()
+	err := runAdd(cmd, []string{"task7/add-publish", worktreePath})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"builder", "publish"}, sequence)
+	assert.Contains(t, stderr.String(), "warning: fleet publish failed: publish failed")
+}
+
+func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	t.Chdir(repoPath)
+
+	addBranch = true
+	addNoLaunch = true
+	occupiedPath := filepath.Join(t.TempDir(), "occupied")
+	require.NoError(t, os.MkdirAll(occupiedPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(occupiedPath, "file.txt"), []byte("busy"), 0644))
+
+	var calls int
+	publishFleetBestEffortForCommand = func(*cobra.Command, *models.Config) {
+		calls++
+	}
+
+	cmd, _, _ := fleetTestCommand()
+	err := runAdd(cmd, []string{"task7/add-fails", occupiedPath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "directory is not empty")
+	assert.Zero(t, calls)
+}
 
 func TestShouldLaunch(t *testing.T) {
 	cases := []struct {
@@ -85,4 +154,70 @@ func putFakeTmuxOnPath(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(""), 0755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func resetAddCommandFlags(t *testing.T) {
+	t.Helper()
+
+	oldAddBranch := addBranch
+	oldAddInteractive := addInteractive
+	oldAddForce := addForce
+	oldAddExpires := addExpires
+	oldAddLayout := addLayout
+	oldAddSelectLayout := addSelectLayout
+	oldAddNoLaunch := addNoLaunch
+
+	t.Cleanup(func() {
+		addBranch = oldAddBranch
+		addInteractive = oldAddInteractive
+		addForce = oldAddForce
+		addExpires = oldAddExpires
+		addLayout = oldAddLayout
+		addSelectLayout = oldAddSelectLayout
+		addNoLaunch = oldAddNoLaunch
+	})
+
+	addBranch = false
+	addInteractive = false
+	addForce = false
+	addExpires = ""
+	addLayout = ""
+	addSelectLayout = false
+	addNoLaunch = false
+}
+
+func initCommandTestConfig(t *testing.T, baseDir string) {
+	t.Helper()
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	home := t.TempDir()
+	kwtHome := filepath.Join(home, "kwt")
+	require.NoError(t, os.MkdirAll(kwtHome, 0755))
+	t.Setenv("HOME", home)
+	t.Setenv("KWT_HOME", kwtHome)
+	t.Setenv("KWT_FLEET_TOKEN", "secret")
+
+	configText := fmt.Sprintf(`[worktree]
+basedir = %q
+auto_mkdir = true
+
+[fleet]
+enabled = true
+host_id = "test-host"
+hub_url = "http://fleet.example.test"
+token_env = "KWT_FLEET_TOKEN"
+
+[layouts]
+default = "shell"
+auto_launch_on_add = false
+
+[[layouts.presets]]
+name = "shell"
+arrange = "tiled"
+panes = [""]
+`, baseDir)
+	require.NoError(t, os.WriteFile(filepath.Join(kwtHome, "config.toml"), []byte(configText), 0600))
+	require.NoError(t, config.Init())
 }

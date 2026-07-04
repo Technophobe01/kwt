@@ -156,6 +156,59 @@ queue_dir = "~/.config/kwt/claude/queue"
 	}
 }
 
+func TestLoadFleetDefaultsDisabled(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(func() { viper.Reset() })
+	viper.SetConfigType("toml")
+	require.NoError(t, viper.ReadConfig(strings.NewReader(`
+[worktree]
+basedir = "/tmp/worktrees"
+auto_mkdir = true
+`)))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.Fleet.Enabled)
+	assert.Empty(t, cfg.Fleet.HostID)
+	assert.Empty(t, cfg.Fleet.HubURL)
+	assert.Empty(t, cfg.Fleet.TokenFile)
+	assert.Empty(t, cfg.Fleet.TokenEnv)
+	assert.Empty(t, cfg.Fleet.Hub.ListenAddr)
+	assert.Empty(t, cfg.Fleet.Hub.StorePath)
+}
+
+func TestLoadFleetConfigExpandsPaths(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(func() { viper.Reset() })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	viper.SetConfigType("toml")
+	require.NoError(t, viper.ReadConfig(strings.NewReader(`
+[worktree]
+basedir = "/tmp/worktrees"
+auto_mkdir = true
+
+[fleet]
+enabled = true
+host_id = "Host-A"
+hub_url = "http://100.64.1.2:8787"
+token_file = "~/kwt/fleet.token"
+token_env = "KWT_FLEET_TOKEN"
+
+[fleet.hub]
+listen_addr = "100.64.1.2:8787"
+store_path = "~/kwt/fleet/state.json"
+`)))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.Fleet.Enabled)
+	assert.Equal(t, "Host-A", cfg.Fleet.HostID)
+	assert.Equal(t, "http://100.64.1.2:8787", cfg.Fleet.HubURL)
+	assert.Equal(t, filepath.Join(home, "kwt", "fleet.token"), cfg.Fleet.TokenFile)
+	assert.Equal(t, filepath.Join(home, "kwt", "fleet", "state.json"), cfg.Fleet.Hub.StorePath)
+}
+
 func TestGetConfigDir(t *testing.T) {
 	t.Setenv("KWT_HOME", "")
 
