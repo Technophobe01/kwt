@@ -79,8 +79,23 @@ Template variables include `Host`, `Owner`, `Repository`, `FullPath`, `Branch`,
 `Hash`, and `Path`. Quote variables in shell commands when values may contain
 spaces.
 
-## Planned fleet config
+## Multi-machine sync config
 
-Fleet sync is a planned opt-in subsystem. Its intended config shape is captured
-in the [fleet sync design note](../design/fleet-sync.md), but fleet commands are
-not part of the current stable command surface.
+Multi-machine sync is an opt-in subsystem. The public command namespace is
+`kwt fleet`, and the config section is `[fleet]`.
+
+```toml
+[fleet]
+enabled = true
+host_id = "host-a"
+hub_url = "http://host-a.example:8787"
+token_file = "~/.config/kwt/fleet.token"
+
+[fleet.hub]
+listen_addr = "100.x.y.z:8787"
+store_path = "~/.local/share/kwt/fleet/state.json"
+```
+
+See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
+and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the
+wire protocol and hub behavior.

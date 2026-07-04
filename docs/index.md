@@ -30,20 +30,21 @@ for the selected branch.
 - Multiple active repositories without changing directories first.
 - Worktrees that are easy for humans and agents to locate.
 - Explicit tmux layouts for coding agents, shells, and review tools.
-- Local-first behavior by default. Optional fleet coordination is designed as an
-  advisory layer, not a hidden synchronization system.
+- Local-first behavior by default. Optional multi-machine sync is advisory, not
+  a hidden file synchronizer.
 
 ## Common commands
 
 ```sh
-kwt add -b feature/fleet-sync
+kwt add -b feature/machine-view
 kwt open
 kwt status
-kwt exec feature/fleet-sync -- go test ./...
-kwt remove feature/fleet-sync
+kwt exec feature/machine-view -- go test ./...
+kwt remove feature/machine-view
 ```
 
 See the [quickstart](get-started/quickstart.md), [CLI reference](reference/cli.md),
 and [configuration reference](reference/configuration.md) for the maintained
-surface. The [design notes](design/index.md) preserve the decisions behind the
-cross-project TUI and planned fleet sync work.
+surface. [Multi-machine sync](multi-machine-sync.md) covers trusted multi-host
+worktree visibility, and the [design notes](design/index.md) preserve the
+decisions behind the cross-project TUI and synchronization architecture.

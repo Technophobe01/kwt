@@ -1,22 +1,22 @@
-# Fleet Sync
+# Multi-machine Sync Architecture
 
-Fleet sync is the planned opt-in layer for coordinating active Git worktrees
-across a small trusted set of machines. It should show the union of fleet
-worktrees and identify which worktrees are missing or different on the current
-host.
+Multi-machine sync is the opt-in layer for coordinating active Git worktrees
+across a small trusted set of machines. It shows the union of observed worktrees
+and identifies which worktrees are missing or different on the current host.
 
 It is not a file synchronizer. It must not sync dirty files, delete worktrees,
 or require background daemons for single-machine users.
 
 ## Principles
 
-- Fleet sync is disabled by default and inert when disabled.
+- Multi-machine sync is disabled by default and inert when disabled.
 - The hub is a dumb store: authenticate, validate, store latest manifests by
-  host, and serve the fleet union.
+  host, and serve combined worktree state.
 - Every enabled node publishes a manifest. A hub node publishes through the same
   HTTP API as any other node; only the hub daemon writes the store file.
 - Spokes do not need a daemon in v1. Publish on successful `add`, `remove`, and
-  `prune`, and publish before fleet reads with a short best-effort timeout.
+  `prune`, and publish before multi-machine reads with a short best-effort
+  timeout.
 - The UI language is advisory: "missing on this host" and "differs from host X"
   are honest; "behind host X" is only valid when local Git data proves ancestry.
 
@@ -51,7 +51,7 @@ before publish. The hub must reject invalid host IDs in URL path segments.
 
 ## Project identity
 
-Fleet rows are keyed by logical project identity, not local paths. The same
+Rows are keyed by logical project identity, not local paths. The same
 repository can live at `~/code/kwt` on one host and `/src/kwt` on another.
 
 Remote URL normalization must handle these common forms as the same project:
@@ -64,7 +64,7 @@ They normalize to `github.com/kenn-io/kwt`. Owner/name differences remain
 different projects, so forks are distinct unless the user explicitly configures
 a canonical identity. SSH host aliases are not safely inferable from Git URLs,
 so explicit identity override is required when automatic normalization would
-split the fleet incorrectly.
+split the multi-machine view incorrectly.
 
 ## Manifest
 
@@ -91,12 +91,12 @@ Each publish sends a versioned manifest:
     {
       "project_identity": "github.com/kenn-io/kwt",
       "kind": "branch",
-      "ref": "feature/fleet-sync",
-      "branch": "feature/fleet-sync",
-      "path": "/home/user-a/worktrees/github.com/kenn-io/kwt/feature-fleet-sync",
+      "ref": "feature/machine-view",
+      "branch": "feature/machine-view",
+      "path": "/home/user-a/worktrees/github.com/kenn-io/kwt/feature-machine-view",
       "head": "abcdef123456",
       "head_time": "2026-07-04T11:30:00Z",
-      "upstream": "origin/feature/fleet-sync",
+      "upstream": "origin/feature/machine-view",
       "ahead": 1,
       "behind": 0,
       "status": {
@@ -122,26 +122,27 @@ Worktree identity is `(project_identity, kind, ref)`. Branch worktrees use
 
 The planned v1 commands are:
 
-| Command                      | Purpose                                                             |
-| ---------------------------- | ------------------------------------------------------------------- |
-| `kwt fleet serve`            | Run the hub HTTP server in the foreground.                          |
-| `kwt fleet publish`          | Build and publish the local manifest.                               |
-| `kwt fleet status`           | Publish best-effort, fetch fleet state, and render the fleet table. |
-| `kwt fleet forget <host_id>` | Ask the hub to delete a retired host.                               |
+| Command                      | Purpose                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------- |
+| `kwt fleet serve`            | Run the hub HTTP server in the foreground.                                |
+| `kwt fleet publish`          | Build and publish the local manifest.                                     |
+| `kwt fleet status`           | Publish best-effort, fetch hub state, and render the multi-machine table. |
+| `kwt fleet forget <host_id>` | Ask the hub to delete a retired host.                                     |
 
 Existing worktree mutation commands should publish after successful local
-mutations when fleet is enabled. Publish failures must not fail the mutation.
+mutations when multi-machine sync is enabled. Publish failures must not fail the
+mutation.
 
 ## Hub API
 
 The planned v1 API is intentionally small:
 
-| Route                                         | Purpose                         |
-| --------------------------------------------- | ------------------------------- |
-| `GET /api/v1/ping`                            | Health and runtime metadata.    |
-| `POST /api/v1/fleet/hosts/{host_id}/manifest` | Store one host manifest.        |
-| `GET /api/v1/fleet/state`                     | Return the grouped fleet union. |
-| `DELETE /api/v1/fleet/hosts/{host_id}`        | Forget a retired host.          |
+| Route                                         | Purpose                             |
+| --------------------------------------------- | ----------------------------------- |
+| `GET /api/v1/ping`                            | Health and runtime metadata.        |
+| `POST /api/v1/fleet/hosts/{host_id}/manifest` | Store one host manifest.            |
+| `GET /api/v1/fleet/state`                     | Return grouped multi-machine state. |
+| `DELETE /api/v1/fleet/hosts/{host_id}`        | Forget a retired host.              |
 
 Manifest requests are capped at 1 MiB. The hub rejects missing bearer auth,
 unknown schema versions, host ID mismatches, invalid host IDs, invalid project
@@ -155,7 +156,7 @@ whether a row is materialized locally.
 The hub store write must be atomic: write a temporary file, fsync as practical,
 then rename over `state.json`.
 
-## Fleet view
+## Multi-machine view
 
 For each row, `kwt fleet status` can show:
 
@@ -172,23 +173,23 @@ forget endpoint rather than silently disappearing.
 
 ## Error handling
 
-When fleet is disabled, fleet errors cannot affect existing commands.
+When multi-machine sync is disabled, its errors cannot affect existing commands.
 
-When fleet is enabled but the hub is unreachable, local commands continue with
-local state and report a concise fleet warning. Mutation commands such as
+When multi-machine sync is enabled but the hub is unreachable, local commands
+continue with local state and report a concise warning. Mutation commands such as
 `kwt add` must not fail solely because manifest publication failed.
 
-Project paths that do not exist on a host should not poison fleet state. The
-local manifest builder reports only projects and worktrees it can observe.
+Project paths that do not exist on a host should not poison multi-machine state.
+The local manifest builder reports only projects and worktrees it can observe.
 
 ## Testing expectations
 
-Fleet tests should use local HTTP handlers and temporary stores. They should not
-require Tailscale, public network access, elevated privileges, launchd, systemd,
-or an external daemon.
+Multi-machine sync tests should use local HTTP handlers and temporary stores.
+They should not require Tailscale, public network access, elevated privileges,
+launchd, systemd, or an external daemon.
 
-The tests should protect observable contracts: disabled fleet is inert, token
-loading works, listen validation rejects public binds, URL normalization is
-stable, manifest validation rejects bad payloads, the hub groups state
-correctly, ETags change when state changes, and local reconciliation reports
-materialized, missing, and different rows without inventing cross-host ancestry.
+The tests should protect observable contracts: the disabled subsystem is inert,
+token loading works, listen validation rejects public binds, URL normalization is
+stable, manifest validation rejects bad payloads, the hub groups state correctly,
+ETags change when state changes, and local reconciliation reports materialized,
+missing, and different rows without inventing cross-host ancestry.

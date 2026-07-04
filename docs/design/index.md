@@ -10,7 +10,7 @@ abstraction belongs in `kwt`.
 ## Available notes
 
 - [TUI and project registry](tui-projects.md)
-- [Fleet sync](fleet-sync.md)
+- [Multi-machine sync architecture](multi-machine-sync.md)
 
 Earlier Superpowers specs and implementation plans should be folded into these
 maintained notes once they are accepted or shipped, then removed so draft

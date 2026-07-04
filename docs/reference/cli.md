@@ -15,6 +15,7 @@ stable command surface.
 | `kwt exec`       | Run a command in a matching worktree.                  |
 | `kwt remove`     | Delete a worktree, optionally its branch.              |
 | `kwt prune`      | Clean up stale Git worktree metadata.                  |
+| `kwt fleet`      | Publish and inspect multi-machine sync state.          |
 | `kwt tmux`       | Manage standalone tmux sessions.                       |
 | `kwt config`     | Read and write config values.                          |
 | `kwt completion` | Generate shell completion and integration.             |
