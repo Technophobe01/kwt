@@ -15,7 +15,7 @@ func TestManifestJSONWireShape(t *testing.T) {
 		HostID:        "host-a",
 		Host:          HostInfo{Hostname: "Host-A", Platform: "darwin/arm64"},
 		ObservedAt:    time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC),
-		Projects:      []ProjectManifest{{Identity: "github.com/kenn-io/kwt", Name: "kwt", LocalRoot: "/workspace/user-a/code/kwt", RemoteURL: "git@github.com:kenn-io/kwt.git"}},
+		Projects:      []ProjectManifest{{Identity: "github.com/kenn-io/kwt", Name: "kwt", LocalRoot: "/workspace/user-a/code/kwt"}},
 		Worktrees: []WorktreeManifest{{
 			ProjectIdentity: "github.com/kenn-io/kwt",
 			Kind:            "branch",
@@ -36,6 +36,7 @@ func TestManifestJSONWireShape(t *testing.T) {
 	assert.Contains(t, text, `"ahead":0`)
 	assert.Contains(t, text, `"modified":1`)
 	assert.NotContains(t, text, "SchemaVersion")
+	assert.NotContains(t, text, "remote_url", "raw git remote URLs may embed credentials and must not go over the wire")
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(body, &decoded))

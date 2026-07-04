@@ -191,7 +191,6 @@ func (b *ManifestBuilder) addConfiguredProject(
 		Identity:  identity,
 		Name:      name,
 		LocalRoot: projectPath,
-		RemoteURL: remoteURL,
 	})
 
 	for _, worktree := range worktrees {
@@ -250,7 +249,6 @@ func (b *ManifestBuilder) addGlobalWorktrees(
 			Identity:  identity,
 			Name:      name,
 			LocalRoot: localRoot,
-			RemoteURL: strings.TrimSpace(entry.RepositoryURL),
 		})
 
 		worktree := models.Worktree{
@@ -519,9 +517,6 @@ func addProject(manifest *Manifest, indexes map[string]int, project ProjectManif
 		}
 		if existing.LocalRoot == "" {
 			existing.LocalRoot = project.LocalRoot
-		}
-		if existing.RemoteURL == "" {
-			existing.RemoteURL = project.RemoteURL
 		}
 		return
 	}

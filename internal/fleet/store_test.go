@@ -266,7 +266,6 @@ func testManifest(hostID string, hostname string, platform string, projectIdenti
 			Identity:  projectIdentity,
 			Name:      "kwt",
 			LocalRoot: "/workspace/user-a/code/kwt",
-			RemoteURL: "git@github.com:kenn-io/kwt.git",
 		}},
 		Worktrees: []WorktreeManifest{{
 			ProjectIdentity: projectIdentity,

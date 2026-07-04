@@ -26,11 +26,13 @@ type HostInfo struct {
 }
 
 // ProjectManifest describes one logical project observed on a host.
+// Raw git remote URLs are deliberately excluded: they can embed credentials
+// and must never be published to the hub. Identity carries the normalized
+// repository identity instead.
 type ProjectManifest struct {
 	Identity  string `json:"identity"`
 	Name      string `json:"name"`
 	LocalRoot string `json:"local_root"`
-	RemoteURL string `json:"remote_url"`
 }
 
 // ChangeStatus is the dirty-state subset carried inside fleet status objects.

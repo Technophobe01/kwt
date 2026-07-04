@@ -107,7 +107,6 @@ func TestBuildManifestUsesConfiguredProjectIdentityOverRemote(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, manifest.Projects, 1)
 	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
-	assert.Equal(t, "https://github.com/fork/kwt.git", manifest.Projects[0].RemoteURL)
 	for _, wt := range manifest.Worktrees {
 		assert.Equal(t, "github.com/kenn-io/kwt", wt.ProjectIdentity)
 	}
@@ -168,7 +167,6 @@ func TestBuildManifestUsesRemoteWhenConfiguredProjectIdentityIsPathBacked(t *tes
 	require.NoError(t, err)
 	require.Len(t, manifest.Projects, 1)
 	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
-	assert.Equal(t, "https://github.com/kenn-io/kwt.git", manifest.Projects[0].RemoteURL)
 	assert.Equal(t, "github.com/kenn-io/kwt", findBranch(t, manifest, "main").ProjectIdentity)
 }
 
