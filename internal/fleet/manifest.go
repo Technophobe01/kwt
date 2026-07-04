@@ -182,10 +182,7 @@ func (b *ManifestBuilder) addConfiguredProject(
 	}
 
 	remoteURL := remoteURLForPath(projectPath)
-	identity, ok, err := configuredProjectIdentity(project.Repository, remoteURL)
-	if err != nil {
-		return err
-	}
+	identity, ok := configuredProjectIdentity(project.Repository, remoteURL)
 	if !ok {
 		return nil
 	}
@@ -408,23 +405,22 @@ func collectChangeStatus(ctx context.Context, cfg *models.Config, worktree model
 	}, statuses[0].LastActivity, nil
 }
 
-func configuredProjectIdentity(configuredRepository, remoteURL string) (string, bool, error) {
+func configuredProjectIdentity(configuredRepository, remoteURL string) (string, bool) {
 	configuredRepository = strings.TrimSpace(configuredRepository)
 	if configuredRepository != "" {
 		identity, ok := normalizeFleetRepositoryIdentity(configuredRepository)
-		if !ok {
-			return "", false, fmt.Errorf("invalid repository identity %q", configuredRepository)
+		if ok {
+			return identity, true
 		}
-		return identity, true, nil
 	}
 	if strings.TrimSpace(remoteURL) == "" {
-		return "", false, nil
+		return "", false
 	}
 	identity, ok := normalizeFleetRepositoryIdentity(remoteURL)
 	if !ok {
-		return "", false, nil
+		return "", false
 	}
-	return identity, true, nil
+	return identity, true
 }
 
 func globalProjectIdentity(entry *discovery.GlobalWorktreeEntry) (string, bool) {

@@ -785,6 +785,86 @@ func TestTUIBackendRemoveWorktreeFallsBackToRegisteredProjectRoot(t *testing.T) 
 	assert.NotContains(t, output, worktreePath)
 }
 
+func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) {
+	resetFleetCommandDeps(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	cfg := &models.Config{
+		Fleet:    models.FleetConfig{Enabled: true},
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+	}
+	published := 0
+	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
+		return &stubFleetManifestBuilder{}
+	}
+	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
+		published++
+		assert.Same(t, cfg, gotCfg)
+		assert.NotNil(t, builder)
+		assert.NotNil(t, warn)
+		return errors.New("hub unavailable")
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch: "main",
+		Path:   repoPath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	path, err := backend.CreateWorktree(context.Background(), row, "feature/from-tui")
+
+	require.NoError(t, err)
+	assert.DirExists(t, path)
+	assert.Equal(t, 1, published)
+}
+
+func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {
+	resetFleetCommandDeps(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "removable-worktree")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/removable", worktreePath)
+	cfg := &models.Config{
+		Fleet:    models.FleetConfig{Enabled: true},
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+		Projects: []models.Project{{
+			Repository: "github.com/example/service-api",
+			Name:       "service-api",
+			Path:       repoPath,
+		}},
+	}
+	published := 0
+	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
+		return &stubFleetManifestBuilder{}
+	}
+	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
+		published++
+		assert.Same(t, cfg, gotCfg)
+		assert.NotNil(t, builder)
+		assert.NotNil(t, warn)
+		return errors.New("hub unavailable")
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "service-api",
+			FullPath:   "github.com/example/service-api",
+		},
+		Branch: "codex/removable",
+		Path:   worktreePath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	err := backend.RemoveWorktree(context.Background(), row, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, published)
+}
+
 func TestTUIBackendRemoveWorktreeDirtyErrorDoesNotSuggestCLIForce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -890,6 +970,42 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 	assert.True(t, strings.HasPrefix(path, baseDir), path)
 	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
 	assert.Equal(t, "feature/studio-only", branch)
+}
+
+func TestTUIBackendMaterializeWorktreeRejectsStaleLocalHead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	runTUITestGit(t, repoPath, "branch", "feature/studio-only")
+	baseDir := filepath.Join(t.TempDir(), "worktrees")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir, AutoMkdir: true},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       repoPath,
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+		RemoteHead:      strings.Repeat("b", 40),
+	}}
+
+	path, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.Error(t, err)
+	assert.Empty(t, path)
+	assert.Contains(t, err.Error(), "reported head")
+	assert.Contains(t, err.Error(), "push or fetch")
+	assert.NoDirExists(t, filepath.Join(baseDir, "github.com", "example", "kwt", "feature-studio-only"))
 }
 
 func TestTUIBackendMaterializeWorktreeSkipsRepositorySetupCommands(t *testing.T) {

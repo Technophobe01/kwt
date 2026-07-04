@@ -54,7 +54,9 @@ Press `c` on a local row to open a shell there; press Enter to attach the tmux
 workspace.
 This checks out a branch that is already available in the current repository or
 on a fetched remote; if the source machine has unpushed commits, push or fetch
-those commits first. `kwt` does not transfer commit objects or dirty files.
+those commits first. When the hub reported a head commit, `kwt` verifies that
+the created worktree matches it and removes the stale checkout if it does not.
+`kwt` does not transfer commit objects or dirty files.
 Remote-only sync does not run repository setup (`copy_files` or
 `setup_commands`); those hooks are reserved for locally initiated `kwt add`
 worktrees.

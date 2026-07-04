@@ -636,7 +636,12 @@ func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, bran
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	return worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	if err != nil {
+		return "", err
+	}
+	publishTUIFleetBestEffort(ctx, b.cfg)
+	return path, nil
 }
 
 func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {
@@ -666,10 +671,53 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 			err,
 		)
 	}
-	if b.cfg != nil && b.cfg.Fleet.Enabled {
-		_ = publishFleetBestEffort(ctx, b.cfg, newFleetManifestBuilder(), nil)
+	if err := b.verifyMaterializedHead(ctx, project.Path, path, row.Fleet); err != nil {
+		return "", err
 	}
+	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
+}
+
+func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string, worktreePath string, info *dashboard.FleetInfo) error {
+	if info == nil || strings.TrimSpace(info.RemoteHead) == "" {
+		return nil
+	}
+	want := strings.TrimSpace(info.RemoteHead)
+	got, err := git.New(worktreePath).RunWithContext(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
+		return fmt.Errorf("could not verify synced head for %s; push or fetch it first: %w", info.Branch, err)
+	}
+	got = strings.TrimSpace(got)
+	if strings.EqualFold(got, want) {
+		return nil
+	}
+	_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
+	return fmt.Errorf(
+		"synced %s at %s, but hub reported head %s; push or fetch the reported commit first",
+		info.Branch,
+		shortCommit(got),
+		shortCommit(want),
+	)
+}
+
+func shortCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) > 12 {
+		return commit[:12]
+	}
+	if commit == "" {
+		return "unknown"
+	}
+	return commit
+}
+
+func publishTUIFleetBestEffort(ctx context.Context, cfg *models.Config) {
+	if cfg == nil || !cfg.Fleet.Enabled {
+		return
+	}
+	var publishWarning bytes.Buffer
+	_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
 }
 
 func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Project, bool) {
@@ -728,6 +776,8 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, forc
 	if reg, err := registry.New(); err == nil {
 		_ = reg.Unregister(row.Entry.Path)
 	}
+
+	publishTUIFleetBestEffort(ctx, b.cfg)
 
 	if row.SessionLive && row.SessionName != "" {
 		return b.tmux.KillSession(row.SessionName)

@@ -150,10 +150,10 @@ func TestBuildManifestPropagatesCanceledProjectWorktreeListing(t *testing.T) {
 	assert.Nil(t, manifest)
 }
 
-func TestBuildManifestRejectsPathBackedConfiguredProjectIdentity(t *testing.T) {
+func TestBuildManifestUsesRemoteWhenConfiguredProjectIdentityIsPathBacked(t *testing.T) {
 	repo := initFleetTestRepo(t, "https://github.com/kenn-io/kwt.git")
 
-	_, err := NewManifestBuilder(ManifestBuilderOptions{
+	manifest, err := NewManifestBuilder(ManifestBuilderOptions{
 		Now:      func() time.Time { return fixedTime },
 		Hostname: func() (string, error) { return "Host-A", nil },
 	}).Build(context.Background(), &models.Config{
@@ -165,14 +165,17 @@ func TestBuildManifestRejectsPathBackedConfiguredProjectIdentity(t *testing.T) {
 		}},
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid repository identity")
+	require.NoError(t, err)
+	require.Len(t, manifest.Projects, 1)
+	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
+	assert.Equal(t, "https://github.com/kenn-io/kwt.git", manifest.Projects[0].RemoteURL)
+	assert.Equal(t, "github.com/kenn-io/kwt", findBranch(t, manifest, "main").ProjectIdentity)
 }
 
-func TestBuildManifestRejectsBarePathLikeConfiguredProjectIdentity(t *testing.T) {
+func TestBuildManifestUsesRemoteWhenConfiguredProjectIdentityIsBarePathLike(t *testing.T) {
 	repo := initFleetTestRepo(t, "https://github.com/kenn-io/kwt.git")
 
-	_, err := NewManifestBuilder(ManifestBuilderOptions{
+	manifest, err := NewManifestBuilder(ManifestBuilderOptions{
 		Now:      func() time.Time { return fixedTime },
 		Hostname: func() (string, error) { return "Host-A", nil },
 	}).Build(context.Background(), &models.Config{
@@ -184,14 +187,15 @@ func TestBuildManifestRejectsBarePathLikeConfiguredProjectIdentity(t *testing.T)
 		}},
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid repository identity")
+	require.NoError(t, err)
+	require.Len(t, manifest.Projects, 1)
+	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
 }
 
-func TestBuildManifestRejectsTildeConfiguredProjectIdentity(t *testing.T) {
+func TestBuildManifestUsesRemoteWhenConfiguredProjectIdentityIsTildePath(t *testing.T) {
 	repo := initFleetTestRepo(t, "https://github.com/kenn-io/kwt.git")
 
-	_, err := NewManifestBuilder(ManifestBuilderOptions{
+	manifest, err := NewManifestBuilder(ManifestBuilderOptions{
 		Now:      func() time.Time { return fixedTime },
 		Hostname: func() (string, error) { return "Host-A", nil },
 	}).Build(context.Background(), &models.Config{
@@ -203,14 +207,15 @@ func TestBuildManifestRejectsTildeConfiguredProjectIdentity(t *testing.T) {
 		}},
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid repository identity")
+	require.NoError(t, err)
+	require.Len(t, manifest.Projects, 1)
+	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
 }
 
-func TestBuildManifestRejectsFileURLConfiguredProjectIdentity(t *testing.T) {
+func TestBuildManifestUsesRemoteWhenConfiguredProjectIdentityIsFileURL(t *testing.T) {
 	repo := initFleetTestRepo(t, "https://github.com/kenn-io/kwt.git")
 
-	_, err := NewManifestBuilder(ManifestBuilderOptions{
+	manifest, err := NewManifestBuilder(ManifestBuilderOptions{
 		Now:      func() time.Time { return fixedTime },
 		Hostname: func() (string, error) { return "Host-A", nil },
 	}).Build(context.Background(), &models.Config{
@@ -222,8 +227,29 @@ func TestBuildManifestRejectsFileURLConfiguredProjectIdentity(t *testing.T) {
 		}},
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid repository identity")
+	require.NoError(t, err)
+	require.Len(t, manifest.Projects, 1)
+	assert.Equal(t, "github.com/kenn-io/kwt", manifest.Projects[0].Identity)
+}
+
+func TestBuildManifestSkipsProjectWhenConfiguredAndRemoteIdentitiesAreUnsupported(t *testing.T) {
+	repo := initFleetTestRepo(t, "workspace/org/repo")
+
+	manifest, err := NewManifestBuilder(ManifestBuilderOptions{
+		Now:      func() time.Time { return fixedTime },
+		Hostname: func() (string, error) { return "Host-A", nil },
+	}).Build(context.Background(), &models.Config{
+		Fleet: models.FleetConfig{HostID: "host-a"},
+		Projects: []models.Project{{
+			Repository: repo,
+			Name:       "kwt",
+			Path:       repo,
+		}},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, manifest.Projects)
+	assert.Empty(t, manifest.Worktrees)
 }
 
 func TestBuildManifestSkipsConfiguredProjectWithoutStableIdentity(t *testing.T) {

@@ -152,8 +152,9 @@ When enabled, the dashboard shows remote-only rows with `WORKSPACE` set to
 may also show a `MACHINES` column, but the table keeps the worktree status
 visible at roughly 100 columns. Select a remote-only branch row and press `s` to
 sync that branch locally. Press `c` on a local row to open a shell there.
-Remote-only sync skips repository setup (`copy_files` and `setup_commands`);
-those hooks run for locally initiated `kwt add` worktrees.
+Remote-only sync verifies the created worktree against the hub-reported commit
+when one is available, and skips repository setup (`copy_files` and
+`setup_commands`); those hooks run for locally initiated `kwt add` worktrees.
 
 Useful commands:
 

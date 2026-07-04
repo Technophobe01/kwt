@@ -143,6 +143,7 @@ show a `MACHINES` column on wide terminals. At roughly 100 columns the table
 prioritizes worktree status over host lists so `WORKSPACE` remains visible. The
 user can sync a remote-only branch onto the current host. The sync action is
 local: it uses the configured project root and normal worktree naming rules,
+verifies the created worktree against the hub-reported head when present, and
 then publishes best-effort. It can only check out branches whose commits are
 already available locally or through a fetched remote; machines with unpushed
 commits must push or otherwise transfer those commits first. Detached-head rows
