@@ -124,21 +124,34 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) [
 
 	rendered := fleet.BuildStatusRows(state, currentHost, b.now())
 	for i, fleetRow := range state.Rows {
-		info := dashboardFleetInfo(fleetRow, renderedStatusRow(rendered, i), currentHost)
+		// Local presence is decided by the rows just discovered on disk, not
+		// by hub observations for this host, which can be stale when a
+		// publish fails.
+		rowIndex, local := byKey[tuiFleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
+		info := dashboardFleetInfo(fleetRow, renderedStatusRow(rendered, i), currentHost, local)
 		if info == nil {
 			continue
 		}
-		key := tuiFleetKey(info.ProjectIdentity, info.Kind, info.Ref)
-		if rowIndex, ok := byKey[key]; ok {
+		if local {
 			rows[rowIndex].Fleet = info
 			continue
 		}
-		if info.Local {
+		if len(info.Hosts) == 0 {
+			// Only this host's own stale observation backs the row and the
+			// worktree is gone locally; nothing real to show.
 			continue
 		}
 		rows = append(rows, dashboard.Row{Fleet: info})
 	}
 	return rows
+}
+
+func fleetRowRef(row fleet.FleetRow) string {
+	ref := strings.TrimSpace(row.Ref)
+	if ref == "" {
+		ref = strings.TrimSpace(row.Branch)
+	}
+	return ref
 }
 
 func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
@@ -544,11 +557,8 @@ func renderedStatusRow(rows []fleet.StatusRow, index int) fleet.StatusRow {
 	return rows[index]
 }
 
-func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string) *dashboard.FleetInfo {
-	ref := strings.TrimSpace(row.Ref)
-	if ref == "" {
-		ref = strings.TrimSpace(row.Branch)
-	}
+func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string, local bool) *dashboard.FleetInfo {
+	ref := fleetRowRef(row)
 	if row.ProjectIdentity == "" || row.Kind == "" || ref == "" {
 		return nil
 	}
@@ -558,8 +568,8 @@ func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHos
 		Kind:            row.Kind,
 		Ref:             ref,
 		Branch:          strings.TrimSpace(row.Branch),
-		Local:           fleetRowHasHost(row.Observations, currentHost),
-		Hosts:           fleetDisplayHosts(row.Observations, currentHost),
+		Local:           local,
+		Hosts:           fleetDisplayHosts(row.Observations, currentHost, local),
 		Sync:            rendered.Sync,
 		Dirty:           rendered.Dirty,
 		Freshness:       rendered.Freshness,
@@ -578,7 +588,7 @@ func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHos
 		info.MaterializeLabel = info.Ref
 	}
 	if !info.Local {
-		if observation, ok := fleetMaterializeObservation(row.Observations); ok {
+		if observation, ok := fleetMaterializeObservation(row.Observations, currentHost); ok {
 			info.MaterializeHost = observation.HostID
 			info.RemotePath = observation.Path
 			info.RemoteHead = observation.Head
@@ -590,27 +600,19 @@ func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHos
 	return info
 }
 
-func fleetRowHasHost(observations []fleet.Observation, hostID string) bool {
-	hostID = strings.TrimSpace(hostID)
-	for _, observation := range observations {
-		if observation.HostID == hostID {
-			return true
-		}
-	}
-	return false
-}
-
-func fleetDisplayHosts(observations []fleet.Observation, currentHost string) []string {
-	seen := make(map[string]struct{}, len(observations))
+func fleetDisplayHosts(observations []fleet.Observation, currentHost string, local bool) []string {
+	seen := make(map[string]struct{}, len(observations)+1)
 	for _, observation := range observations {
 		hostID := strings.TrimSpace(observation.HostID)
-		if hostID == "" {
+		if hostID == "" || hostID == currentHost {
+			// This host's hub observation may be stale; the local flag from
+			// on-disk discovery decides whether "local" is listed.
 			continue
 		}
-		if hostID == currentHost {
-			hostID = "local"
-		}
 		seen[hostID] = struct{}{}
+	}
+	if local {
+		seen["local"] = struct{}{}
 	}
 	hosts := make([]string, 0, len(seen))
 	for hostID := range seen {
@@ -620,16 +622,14 @@ func fleetDisplayHosts(observations []fleet.Observation, currentHost string) []s
 	return hosts
 }
 
-func fleetMaterializeObservation(observations []fleet.Observation) (fleet.Observation, bool) {
-	if len(observations) == 0 {
-		return fleet.Observation{}, false
-	}
+func fleetMaterializeObservation(observations []fleet.Observation, currentHost string) (fleet.Observation, bool) {
 	for _, observation := range observations {
-		if strings.TrimSpace(observation.HostID) != "" {
+		hostID := strings.TrimSpace(observation.HostID)
+		if hostID != "" && hostID != currentHost {
 			return observation, true
 		}
 	}
-	return observations[0], true
+	return fleet.Observation{}, false
 }
 
 func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, branch string) (string, error) {

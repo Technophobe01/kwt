@@ -436,6 +436,112 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 	assert.Equal(t, 2, remote.Fleet.RemoteAhead)
 }
 
+func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
+	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       "/repos/kwt",
+		}},
+	}
+	localEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "kwt",
+			FullPath:   "github.com/example/kwt",
+		},
+		Branch: "main",
+		Path:   "/repos/kwt",
+		IsMain: true,
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{localEntry}, nil
+	}
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return map[string]*models.WorktreeStatus{
+			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
+		}, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Rows: []fleet.FleetRow{
+			{
+				// Present locally, but the hub missed this host's publish.
+				ProjectIdentity: "github.com/example/kwt",
+				Kind:            "branch",
+				Ref:             "main",
+				Branch:          "main",
+				Observations: []fleet.Observation{{
+					HostID:     "host-b",
+					Path:       "/work/host-b/kwt",
+					Head:       "bbb",
+					ObservedAt: observedAt,
+				}},
+			},
+			{
+				// Deleted locally, but a stale hub observation for this host
+				// remains alongside a real one from another host.
+				ProjectIdentity: "github.com/example/kwt",
+				Kind:            "branch",
+				Ref:             "feature/remote",
+				Branch:          "feature/remote",
+				Observations: []fleet.Observation{
+					{HostID: "host-a", Path: "/repos/kwt-feature-remote", Head: "ccc", ObservedAt: observedAt},
+					{HostID: "host-b", Path: "/work/host-b/kwt-feature-remote", Head: "ddd", ObservedAt: observedAt},
+				},
+			},
+			{
+				// Deleted locally and observed nowhere else: stale noise.
+				ProjectIdentity: "github.com/example/kwt",
+				Kind:            "branch",
+				Ref:             "feature/gone",
+				Branch:          "feature/gone",
+				Observations: []fleet.Observation{{
+					HostID:     "host-a",
+					Path:       "/repos/kwt-feature-gone",
+					Head:       "eee",
+					ObservedAt: observedAt,
+				}},
+			},
+		}}, nil
+	}
+
+	rows, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	var local, remote dashboard.Row
+	for _, row := range rows {
+		if row.Entry != nil {
+			local = row
+		} else {
+			remote = row
+		}
+	}
+	require.NotNil(t, local.Entry)
+	require.NotNil(t, local.Fleet)
+	assert.True(t, local.Fleet.Local)
+	assert.Equal(t, []string{"host-b", "local"}, local.Fleet.Hosts)
+	require.NotNil(t, remote.Fleet)
+	assert.Equal(t, "feature/remote", remote.Fleet.Ref)
+	assert.False(t, remote.Fleet.Local)
+	assert.Equal(t, []string{"host-b"}, remote.Fleet.Hosts)
+	assert.Equal(t, "host-b", remote.Fleet.MaterializeHost)
+	assert.Equal(t, "ddd", remote.Fleet.RemoteHead)
+}
+
 func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
 	repoPath := newTUITestRepo(t)
 	cfg := &models.Config{
