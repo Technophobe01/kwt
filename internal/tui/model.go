@@ -273,6 +273,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.startNewBranch()
 	case key.Matches(msg, m.keys.Delete):
 		return m.startDelete()
+	case key.Matches(msg, m.keys.Sync):
+		return m.syncSelected(m.selectedRow())
 	case key.Matches(msg, m.keys.Shell):
 		return m.shellSelected()
 	case key.Matches(msg, m.keys.Kill):
@@ -500,10 +502,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
-		if rowCanSync(row) {
-			return m.syncSelected(row)
-		}
-		m.message = "no worktree selected"
+		m.message = "sync this worktree before opening a shell"
 		return m, nil
 	}
 	m.handoff = Handoff{Kind: HandoffShell, Row: row}
@@ -531,7 +530,7 @@ func (m Model) cycleLayout() (Model, tea.Cmd) {
 			m.selectedLayout = m.layouts[next]
 		}
 	}
-	m.message = fmt.Sprintf("layout %s", m.layoutLabel())
+	m.message = ""
 	return m, nil
 }
 
@@ -549,11 +548,11 @@ func (m Model) startNewBranch() (Model, tea.Cmd) {
 
 func (m Model) syncSelected(row Row) (Model, tea.Cmd) {
 	if row.Fleet == nil {
-		m.message = "no sync worktree selected"
+		m.message = "nothing to sync for this row"
 		return m, nil
 	}
 	if row.Fleet.Local {
-		m.message = "worktree already synced"
+		m.message = "nothing to sync for this row"
 		return m, nil
 	}
 	if !row.Fleet.CanMaterialize {
@@ -764,7 +763,7 @@ func (m Model) renderRows() string {
 		if i == selected {
 			cursor = "▸"
 		}
-		line := cursor + " " + renderDashboardCells(columns, dashboardCellValues(row, now))
+		line := cursor + " " + renderDashboardCells(columns, dashboardCellValues(row, now), m.dashboardCellStyles(row))
 		if i == selected {
 			line = m.theme.cursor.Render(line)
 		}
@@ -772,6 +771,17 @@ func (m Model) renderRows() string {
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) dashboardCellStyles(row Row) map[string]dashboardCellStyle {
+	styles := make(map[string]dashboardCellStyle, 1)
+	switch formatWorkspace(row) {
+	case "live":
+		styles[dashboardColumnWorkspace] = func(s string) string { return m.theme.live.Render(s) }
+	case "remote", "offline":
+		styles[dashboardColumnWorkspace] = func(s string) string { return m.theme.dim.Render(s) }
+	}
+	return styles
 }
 
 func (m Model) availableRowCount() int {
@@ -863,7 +873,7 @@ func (m Model) renderSelectionDetails() string {
 	if row.SessionLive {
 		workspace = "workspace live"
 	}
-	detail := fmt.Sprintf("selected %s · layout %s · %s", rowLabel(row), m.layoutLabel(), workspace)
+	detail := fmt.Sprintf("selected %s · layout %s · %s", rowLabel(row), m.renderLayoutLabel(), workspace)
 	if fleetDetail := renderLocalFleetDetails(row); fleetDetail != "" {
 		detail += "\n" + fleetDetail
 	}
@@ -892,6 +902,10 @@ func (m Model) layoutLabel() string {
 		return "default"
 	}
 	return m.selectedLayout
+}
+
+func (m Model) renderLayoutLabel() string {
+	return m.theme.success.Render(m.layoutLabel())
 }
 
 func (m Model) projectFilterLabel() string {
@@ -1087,7 +1101,7 @@ func (m Model) renderHelp() string {
 		"kwt help",
 		"",
 		"↑/k ↓/j move    g/G top/bottom",
-		"enter attach    L layout    n new    d delete    s shell    K kill workspace",
+		"enter attach    L layout    n new    d delete    s sync    c shell    K kill workspace",
 		"P project       p filter    / search    r refresh    esc cancel/clear    q quit",
 		"",
 		"Press any key to close help.",

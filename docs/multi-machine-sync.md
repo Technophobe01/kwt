@@ -42,11 +42,14 @@ The dashboard is the main day-to-day surface. When multi-machine sync is enabled
   worktree status columns and keep the table within roughly 100 columns.
 - `HEADS` reports Git upstream state for local-only rows and whether another
   host observed a different head for multi-machine rows.
-- `CHANGES` reports dirty state from any observed host.
+- `CHANGES` reports dirty state. Local dirty state is shown as counts such as
+  `~3 ?2`; dirty state observed only on another machine is summarized as
+  `host ~3 ?2`, with the selected-row details naming the source host.
 
 Select a remote-only branch row and press `s` to sync it onto the current
 machine using the matching local project root and normal worktree naming rules.
-On local rows, `s` still opens a shell.
+Press `c` on a local row to open a shell there; press Enter to attach the tmux
+workspace.
 This checks out a branch that is already available in the current repository or
 on a fetched remote; if the source machine has unpushed commits, push or fetch
 those commits first. `kwt` does not transfer commit objects or dirty files.

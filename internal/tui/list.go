@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -243,10 +244,27 @@ func formatSync(status *models.WorktreeStatus) string {
 func formatRowChanges(row Row) string {
 	if row.Fleet != nil && row.Fleet.Dirty != "" {
 		if row.Status == nil || row.Fleet.Dirty != "clean" {
-			return row.Fleet.Dirty
+			return formatFleetDirty(row.Fleet.Dirty)
 		}
 	}
 	return formatChanges(row.Status)
+}
+
+var fleetDirtySummaryPattern = regexp.MustCompile(`\(([^()]*)\)`)
+
+func formatFleetDirty(dirty string) string {
+	dirty = strings.TrimSpace(dirty)
+	if dirty == "" || dirty == "clean" {
+		return dirty
+	}
+	matches := fleetDirtySummaryPattern.FindAllStringSubmatch(dirty, -1)
+	if len(matches) == 0 {
+		return dirty
+	}
+	if len(matches) == 1 {
+		return "host " + strings.TrimSpace(matches[0][1])
+	}
+	return fmt.Sprintf("%d hosts", len(matches))
 }
 
 func formatRowSync(row Row) string {
@@ -511,13 +529,19 @@ func dashboardColumnMaxWidth(specs []tableColumnSpec, key string) int {
 	return 0
 }
 
-func renderDashboardCells(columns []tableColumn, values map[string]string) string {
+type dashboardCellStyle func(string) string
+
+func renderDashboardCells(columns []tableColumn, values map[string]string, styles map[string]dashboardCellStyle) string {
 	var b strings.Builder
 	for i, column := range columns {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString(padRight(truncateWithEllipsis(values[column.key], column.width), column.width))
+		cell := padRight(truncateWithEllipsis(values[column.key], column.width), column.width)
+		if style := styles[column.key]; style != nil {
+			cell = style(cell)
+		}
+		b.WriteString(cell)
 	}
 	return b.String()
 }
@@ -527,7 +551,7 @@ func renderDashboardHeader(columns []tableColumn) string {
 	for _, column := range columns {
 		values[column.key] = column.header
 	}
-	return "  " + renderDashboardCells(columns, values)
+	return "  " + renderDashboardCells(columns, values, nil)
 }
 
 func dashboardCellValues(row Row, now time.Time) map[string]string {

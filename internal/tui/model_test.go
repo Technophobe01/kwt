@@ -169,10 +169,12 @@ func TestModelPolishesSingleRowDashboard(t *testing.T) {
 	assert.Contains(t, content, "kwt · 1 worktree · 1 repo")
 	assert.Contains(t, content, "WORKSPACE")
 	assert.Contains(t, content, "live")
-	assert.Contains(t, content, "layout default")
+	assert.Contains(t, content, "\x1b[92mlive")
+	assert.Contains(t, stripANSI(content), "layout default")
 	assert.Contains(t, content, "selected kwt:test/layouts")
 	assert.Contains(t, content, "/worktrees/github.com/example/kwt/test-layouts")
-	assert.Contains(t, stripANSI(content), "s shell")
+	assert.Contains(t, stripANSI(content), "c shell")
+	assert.NotContains(t, stripANSI(content), "s shell")
 	assert.NotContains(t, stripANSI(content), "s sync")
 }
 
@@ -208,6 +210,7 @@ func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 	assert.NotContains(t, content, "hosts same")
 	assert.Contains(t, content, "remote")
 	assert.Contains(t, content, "s sync")
+	assert.NotContains(t, content, "c shell")
 	assert.NotContains(t, content, "m materialize")
 	assert.Contains(t, content, "selected kwt:feature/studio-only")
 	assert.Contains(t, content, "remote on host-b")
@@ -247,23 +250,51 @@ func TestModelDashboardFitsHundredColumnTerminal(t *testing.T) {
 	assert.LessOrEqual(t, visibleWidth(body), 100, body)
 }
 
+func TestModelSummarizesRemoteChangesInTableAndDetailsNameHost(t *testing.T) {
+	row := testRow("kwt", "feature/remote-dirty", "/w/kwt/feature")
+	row.Fleet = &FleetInfo{
+		ProjectName: "kwt",
+		Local:       true,
+		Hosts:       []string{"local", "host-b"},
+		Sync:        "same",
+		Dirty:       "host-b (~3 ?3)",
+		Freshness:   "5m",
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	body := findLineContaining(lines, "feature/remote-dirty")
+
+	require.NotEmpty(t, body)
+	assert.Contains(t, body, "host ~3 ?3")
+	assert.NotContains(t, body, "host-b")
+	assert.Contains(t, stripANSI(viewContent(model)), "changes host-b (~3 ?3)")
+}
+
 func TestModelCyclesLayoutSelection(t *testing.T) {
 	model := NewModel(&fakeBackend{layoutNames: []string{"quad", "focus"}}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{testRow("kwt", "main", "/w/kwt/main")}})
 
-	assert.Contains(t, viewContent(model), "layout default")
+	assert.Contains(t, stripANSI(viewContent(model)), "layout default")
+	footerLine := lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit")
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Equal(t, "quad", model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout quad")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout quad · workspace offline")
+	assert.Contains(t, viewContent(model), "layout \x1b")
+	assert.Contains(t, viewContent(model), "/w/kwt/main")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Equal(t, "focus", model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout focus")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout focus · workspace offline")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Empty(t, model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout default")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout default · workspace offline")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 }
 
 func TestModelCursorFilterAndEscape(t *testing.T) {
@@ -642,7 +673,7 @@ func TestModelShellAndAttachHandoffsQuitFirst(t *testing.T) {
 	model := NewModel(&fakeBackend{layoutNames: []string{"quad", "focus"}}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
 
-	model, _ = updateModel(t, model, press("s"))
+	model, _ = updateModel(t, model, press("c"))
 	assert.Equal(t, HandoffShell, model.Handoff().Kind)
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.Handoff().Row))
 
@@ -654,6 +685,18 @@ func TestModelShellAndAttachHandoffsQuitFirst(t *testing.T) {
 	assert.Equal(t, HandoffAttach, model.Handoff().Kind)
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.Handoff().Row))
 	assert.Equal(t, "focus", model.Handoff().LayoutName)
+}
+
+func TestModelSyncKeyDoesNotOpenShellForLocalRow(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, cmd := updateModel(t, model, press("s"))
+
+	require.Nil(t, cmd)
+	assert.Equal(t, HandoffNone, model.Handoff().Kind)
+	assert.Contains(t, stripANSI(viewContent(model)), "nothing to sync for this row")
 }
 
 func TestModelInsideTmuxAttachRunsResidentAction(t *testing.T) {

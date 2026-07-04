@@ -37,7 +37,8 @@ Useful keys:
 | `L`     | Select a workspace layout.                           |
 | `d`     | Delete the selected worktree.                        |
 | `K`     | Kill the selected live tmux workspace.               |
-| `s`     | Open a shell in the selected worktree.               |
+| `s`     | Sync a remote-only branch row locally.               |
+| `c`     | Open a shell in the selected worktree.               |
 | `r`     | Refresh.                                             |
 | `?`     | Toggle help.                                         |
 

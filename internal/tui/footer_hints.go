@@ -14,7 +14,7 @@ type helpItem struct {
 }
 
 func defaultHelpRows(row Row) [][]helpItem {
-	action := helpItem{key: "s", desc: "shell"}
+	action := helpItem{key: "c", desc: "shell"}
 	if rowCanSync(row) {
 		action = helpItem{key: "s", desc: "sync"}
 	}

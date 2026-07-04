@@ -258,6 +258,15 @@ func findLineContaining(lines []string, needle string) string {
 	return ""
 }
 
+func lineIndexContaining(lines []string, needle string) int {
+	for i, line := range lines {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	return -1
+}
+
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 func stripANSI(s string) string {

@@ -63,7 +63,8 @@ kwt remove -b feature/new-ui
 | `/`       | Search rows                             |
 | `d`       | Delete selected worktree                |
 | `K`       | Kill selected live workspace            |
-| `s`       | Open a shell in the selected worktree   |
+| `s`       | Sync a remote-only branch row locally   |
+| `c`       | Open a shell in the selected worktree   |
 | `r`       | Refresh                                 |
 | `?`       | Toggle help                             |
 | `q`       | Quit                                    |
@@ -149,7 +150,7 @@ When enabled, the dashboard shows remote-only rows with `WORKSPACE` set to
 `remote`; selected-row details show the source machine and path. Wide terminals
 may also show a `MACHINES` column, but the table keeps the worktree status
 visible at roughly 100 columns. Select a remote-only branch row and press `s` to
-sync that branch locally. Local rows still use `s` for shell.
+sync that branch locally. Press `c` on a local row to open a shell there.
 
 Useful commands:
 
