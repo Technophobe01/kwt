@@ -658,7 +658,11 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	if !ok {
 		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
 	}
-	path, err := worktree.New(git.New(project.Path), b.cfg).AddWithOptions(
+	repo := git.New(project.Path)
+	// `git worktree add` auto-creates a local branch from a fetched remote;
+	// remember whether one existed so a failed verification can clean it up.
+	branchExisted := localBranchExists(ctx, repo, row.Fleet.Branch)
+	path, err := worktree.New(repo, b.cfg).AddWithOptions(
 		row.Fleet.Branch,
 		"",
 		false,
@@ -672,6 +676,9 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		)
 	}
 	if err := b.verifyMaterializedHead(ctx, project.Path, path, row.Fleet); err != nil {
+		if !branchExisted {
+			_ = repo.DeleteBranch(row.Fleet.Branch, true)
+		}
 		return "", err
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
@@ -699,6 +706,11 @@ func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string
 		shortCommit(got),
 		shortCommit(want),
 	)
+}
+
+func localBranchExists(ctx context.Context, g *git.Git, branch string) bool {
+	_, err := g.RunWithContext(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
 }
 
 func shortCommit(commit string) string {

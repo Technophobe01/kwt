@@ -1113,6 +1113,51 @@ func TestTUIBackendMaterializeWorktreeRejectsStaleLocalHead(t *testing.T) {
 	assert.Contains(t, err.Error(), "reported head")
 	assert.Contains(t, err.Error(), "push or fetch")
 	assert.NoDirExists(t, filepath.Join(baseDir, "github.com", "example", "kwt", "feature-studio-only"))
+	assert.True(t, tuiTestBranchExists(repoPath, "feature/studio-only"),
+		"pre-existing branch must survive a failed sync")
+}
+
+func TestTUIBackendMaterializeWorktreeDeletesAutoCreatedBranchOnStaleHead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	// Simulate a fetched remote branch with no local counterpart, so
+	// `git worktree add` auto-creates the local branch.
+	runTUITestGit(t, repoPath, "update-ref", "refs/remotes/origin/feature/studio-only", "HEAD")
+	baseDir := filepath.Join(t.TempDir(), "worktrees")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir, AutoMkdir: true},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       repoPath,
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+		RemoteHead:      strings.Repeat("b", 40),
+	}}
+
+	path, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.Error(t, err)
+	assert.Empty(t, path)
+	assert.False(t, tuiTestBranchExists(repoPath, "feature/studio-only"),
+		"auto-created branch must be removed when verification fails")
+}
+
+func tuiTestBranchExists(repoPath string, branch string) bool {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
 }
 
 func TestTUIBackendMaterializeWorktreeSkipsRepositorySetupCommands(t *testing.T) {
