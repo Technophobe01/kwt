@@ -17,9 +17,9 @@ func defaultHelpRows() [][]helpItem {
 	return [][]helpItem{{
 		{key: "↑↓", desc: "move"},
 		{key: "↵", desc: "attach"},
+		{key: "m", desc: "materialize"},
 		{key: "P", desc: "project"},
 		{key: "n", desc: "new"},
-		{key: "m", desc: "materialize"},
 		{key: "L", desc: "layout"},
 		{key: "s", desc: "shell"},
 		{key: "d", desc: "delete"},

@@ -187,6 +187,9 @@ func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 		Freshness:        "just now",
 		MaterializeHost:  "host-b",
 		RemotePath:       "/work/host-b/kwt/feature-studio-only",
+		RemoteHead:       "bbb",
+		RemoteUpstream:   "origin/feature/studio-only",
+		RemoteAhead:      2,
 		CanMaterialize:   true,
 		MaterializeLabel: "feature/studio-only",
 	}}
@@ -199,10 +202,13 @@ func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 	assert.Contains(t, content, "kwt")
 	assert.Contains(t, content, "feature/studio-only")
 	assert.Contains(t, content, "host-b only")
+	assert.Contains(t, content, "hosts same")
 	assert.Contains(t, content, "remote")
 	assert.Contains(t, content, "m materialize")
 	assert.Contains(t, content, "selected kwt:feature/studio-only")
 	assert.Contains(t, content, "remote on host-b")
+	assert.Contains(t, content, "press m to materialize (branch must be pushed/fetched here)")
+	assert.Contains(t, content, "source is 2 commits ahead of origin/feature/studio-only")
 	assert.Contains(t, content, "/work/host-b/kwt/feature-studio-only")
 }
 
@@ -517,9 +523,10 @@ func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
 	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
 
-	_, cmd := updateModel(t, model, press("m"))
+	model, cmd := updateModel(t, model, press("m"))
 
 	require.NotNil(t, cmd)
+	assert.Contains(t, model.message, "materializing kwt:feature/studio-only")
 	msg := cmd()
 	assert.IsType(t, actionDoneMsg{}, msg)
 	assert.Equal(t, []string{"github.com/example/kwt:feature/studio-only"}, backend.materializeRows)

@@ -250,9 +250,9 @@ func formatRowChanges(row Row) string {
 
 func formatRowSync(row Row) string {
 	if row.Fleet != nil && row.Fleet.Sync != "" {
-		return row.Fleet.Sync
+		return "hosts " + row.Fleet.Sync
 	}
-	return formatSync(row.Status)
+	return "git " + formatSync(row.Status)
 }
 
 func formatMachines(row Row) string {
@@ -353,7 +353,7 @@ var dashboardColumns = []tableColumn{
 	{header: "BRANCH", width: 22},
 	{header: "MACHINES", width: 20},
 	{header: "CHANGES", width: 11},
-	{header: "SYNC", width: 18},
+	{header: "HEADS", width: 22},
 	{header: "ACTIVITY", width: 10},
 	{header: "WORKSPACE"},
 }

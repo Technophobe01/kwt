@@ -564,6 +564,7 @@ func (m Model) materializeSelected() (Model, tea.Cmd) {
 		m.message = "cannot materialize this worktree"
 		return m, nil
 	}
+	m.message = fmt.Sprintf("materializing %s", rowLabel(row))
 	return m, m.materializeWorktreeCmd(row)
 }
 
@@ -857,6 +858,20 @@ func (m Model) renderSelectionDetails() string {
 		detail := location
 		if row.Fleet.RemotePath != "" {
 			detail += "\n" + abbreviateHome(row.Fleet.RemotePath)
+		}
+		if row.Fleet.CanMaterialize {
+			detail += "\npress m to materialize (branch must be pushed/fetched here)"
+		}
+		if row.Fleet.RemoteAhead > 0 {
+			upstream := strings.TrimSpace(row.Fleet.RemoteUpstream)
+			if upstream == "" {
+				upstream = "upstream"
+			}
+			detail += fmt.Sprintf("\nsource is %d %s ahead of %s",
+				row.Fleet.RemoteAhead,
+				plural(row.Fleet.RemoteAhead, "commit", "commits"),
+				upstream,
+			)
 		}
 		return fmt.Sprintf("selected %s · %s", rowLabel(row), detail)
 	}

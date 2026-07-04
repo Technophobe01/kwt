@@ -137,8 +137,10 @@ The TUI consumes the same hub state as `kwt sync status`. It adds machine
 presence to dashboard rows, includes remote-only branch rows, and lets the user
 materialize a remote-only branch on the current host. Materialization is local:
 it uses the configured project root and normal worktree naming rules, then
-publishes best-effort. Detached-head rows remain visible but are not
-materialized in v1.
+publishes best-effort. It can only check out branches whose commits are already
+available locally or through a fetched remote; machines with unpushed commits
+must push or otherwise transfer those commits first. Detached-head rows remain
+visible but are not materialized in v1.
 
 ## Hub API
 

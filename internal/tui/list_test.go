@@ -226,7 +226,7 @@ func TestRenderRowsAlignsBodyToHeaderColumns(t *testing.T) {
 	header := findLineContaining(lines, "REPO")
 	body := findLineContaining(lines, "test/layouts")
 
-	for _, value := range []string{"kwt", "test/layouts", "clean", "↑2 ↓1", "live"} {
+	for _, value := range []string{"kwt", "test/layouts", "clean", "git ↑2 ↓1", "live"} {
 		assert.Equal(t, visualIndex(header, columnForValue(value)), visualIndex(body, value), value)
 	}
 }
@@ -239,8 +239,8 @@ func columnForValue(value string) string {
 		return "BRANCH"
 	case "clean":
 		return "CHANGES"
-	case "↑2 ↓1":
-		return "SYNC"
+	case "git ↑2 ↓1":
+		return "HEADS"
 	case "live":
 		return "WORKSPACE"
 	default:

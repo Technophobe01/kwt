@@ -43,6 +43,9 @@ type FleetInfo struct {
 	Freshness        string
 	MaterializeHost  string
 	RemotePath       string
+	RemoteHead       string
+	RemoteUpstream   string
+	RemoteAhead      int
 	CanMaterialize   bool
 	MaterializeLabel string
 }

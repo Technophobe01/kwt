@@ -38,13 +38,16 @@ The dashboard is the main day-to-day surface. When multi-machine sync is enabled
 
 - `MACHINES` shows whether a row is local, remote-only, or present on multiple
   hosts.
-- `SYNC` reports whether another host observed a different head for the same
-  branch.
+- `HEADS` reports Git upstream state for local-only rows and whether another
+  host observed a different head for multi-machine rows.
 - `CHANGES` reports dirty state from any observed host.
 - `WORKSPACE` shows `remote` for rows that exist somewhere else but not here.
 
 Select a remote-only branch row and press `m` to materialize it on the current
 machine using the matching local project root and normal worktree naming rules.
+This checks out a branch that is already available in the current repository or
+on a fetched remote; if the source machine has unpushed commits, push or fetch
+those commits first. `kwt` does not transfer commit objects or dirty files.
 Detached-head rows are shown for awareness but are not materialized by v1.
 
 ## Configure it

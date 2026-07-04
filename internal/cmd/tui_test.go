@@ -351,6 +351,8 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 					HostID:     "host-b",
 					Path:       "/work/host-b/kwt/feature-studio-only",
 					Head:       "bbb",
+					Upstream:   "origin/feature/studio-only",
+					Ahead:      2,
 					ObservedAt: observedAt,
 				}},
 			},
@@ -373,6 +375,9 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 	assert.Equal(t, []string{"host-b"}, remote.Fleet.Hosts)
 	assert.Equal(t, "host-b", remote.Fleet.MaterializeHost)
 	assert.Equal(t, "/work/host-b/kwt/feature-studio-only", remote.Fleet.RemotePath)
+	assert.Equal(t, "bbb", remote.Fleet.RemoteHead)
+	assert.Equal(t, "origin/feature/studio-only", remote.Fleet.RemoteUpstream)
+	assert.Equal(t, 2, remote.Fleet.RemoteAhead)
 }
 
 func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
@@ -757,6 +762,37 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 	assert.True(t, strings.HasPrefix(path, baseDir), path)
 	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
 	assert.Equal(t, "feature/studio-only", branch)
+}
+
+func TestTUIBackendMaterializeWorktreeExplainsUnavailableBranch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       repoPath,
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/not-pushed",
+		Branch:          "feature/not-pushed",
+		Hosts:           []string{"host-b"},
+	}}
+
+	_, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "branch must exist locally or on a fetched remote")
+	assert.Contains(t, err.Error(), "push or fetch it first")
 }
 
 func TestTUIBackendRemoveWorktreeRepairsBrokenGitFile(t *testing.T) {

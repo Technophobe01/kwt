@@ -576,6 +576,9 @@ func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHos
 		if observation, ok := fleetMaterializeObservation(row.Observations); ok {
 			info.MaterializeHost = observation.HostID
 			info.RemotePath = observation.Path
+			info.RemoteHead = observation.Head
+			info.RemoteUpstream = observation.Upstream
+			info.RemoteAhead = observation.Ahead
 		}
 		info.CanMaterialize = row.Kind == "branch" && info.Branch != ""
 	}
@@ -647,7 +650,11 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	}
 	path, err := worktree.New(git.New(project.Path), b.cfg).Add(row.Fleet.Branch, "", false)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf(
+			"could not materialize %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
+			row.Fleet.Branch,
+			err,
+		)
 	}
 	if b.cfg != nil && b.cfg.Fleet.Enabled {
 		_ = publishFleetBestEffort(ctx, b.cfg, newFleetManifestBuilder(), nil)
