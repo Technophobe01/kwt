@@ -5,7 +5,7 @@ stable command surface.
 
 | Command          | Purpose                                                |
 | ---------------- | ------------------------------------------------------ |
-| `kwt`, `kwt tui` | Open the cross-project dashboard.                      |
+| `kwt`, `kwt tui` | Open the cross-project and multi-machine dashboard.    |
 | `kwt add`        | Create a worktree and optionally launch its workspace. |
 | `kwt open`       | Fuzzy-pick and attach to a workspace.                  |
 | `kwt list`       | List worktrees.                                        |
@@ -26,6 +26,7 @@ stable command surface.
 kwt add -b fix/parser-race
 kwt open parser
 kwt status
+kwt sync status
 kwt exec fix/parser-race -- go test ./internal/parser
 kwt config get layouts.default
 kwt config set --local layouts.default stack

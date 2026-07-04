@@ -18,6 +18,14 @@ func rowRepoName(row Row) string {
 	if row.Entry != nil && row.Entry.RepositoryInfo != nil && row.Entry.RepositoryInfo.Repository != "" {
 		return row.Entry.RepositoryInfo.Repository
 	}
+	if row.Fleet != nil {
+		if row.Fleet.ProjectName != "" {
+			return row.Fleet.ProjectName
+		}
+		if row.Fleet.ProjectIdentity != "" {
+			return filepath.Base(row.Fleet.ProjectIdentity)
+		}
+	}
 	if row.Entry != nil && row.Entry.Path != "" {
 		return filepath.Base(row.Entry.Path)
 	}
@@ -33,6 +41,12 @@ func rowRepoName(row Row) string {
 func rowBranch(row Row) string {
 	if row.Entry != nil {
 		return row.Entry.Branch
+	}
+	if row.Fleet != nil {
+		if row.Fleet.Branch != "" {
+			return row.Fleet.Branch
+		}
+		return row.Fleet.Ref
 	}
 	if row.Status != nil {
 		return row.Status.Branch
@@ -102,6 +116,7 @@ func filterRows(rows []Row, filter string) []Row {
 			rowBranch(row),
 			rowPath(row),
 			rowLabel(row),
+			rowFleetHaystack(row),
 		}, " "))
 		if strings.Contains(haystack, filter) {
 			filtered = append(filtered, row)
@@ -150,6 +165,13 @@ func rowProjectIdentity(row Row) []string {
 	if row.Status != nil {
 		parts = append(parts, row.Status.Repository)
 	}
+	if row.Fleet != nil {
+		parts = append(parts,
+			row.Fleet.ProjectIdentity,
+			row.Fleet.ProjectName,
+			strings.Join(row.Fleet.Hosts, " "),
+		)
+	}
 	return parts
 }
 
@@ -165,6 +187,14 @@ func rowProjectKey(row Row) string {
 	}
 	if row.Status != nil && row.Status.Repository != "" {
 		return row.Status.Repository
+	}
+	if row.Fleet != nil {
+		if row.Fleet.ProjectIdentity != "" {
+			return row.Fleet.ProjectIdentity
+		}
+		if row.Fleet.ProjectName != "" {
+			return row.Fleet.ProjectName
+		}
 	}
 	return rowRepoName(row)
 }
@@ -209,6 +239,80 @@ func formatSync(status *models.WorktreeStatus) string {
 	return fmt.Sprintf("↑%d ↓%d", status.GitStatus.Ahead, status.GitStatus.Behind)
 }
 
+func formatRowChanges(row Row) string {
+	if row.Fleet != nil && row.Fleet.Dirty != "" {
+		if row.Status == nil || row.Fleet.Dirty != "clean" {
+			return row.Fleet.Dirty
+		}
+	}
+	return formatChanges(row.Status)
+}
+
+func formatRowSync(row Row) string {
+	if row.Fleet != nil && row.Fleet.Sync != "" {
+		return row.Fleet.Sync
+	}
+	return formatSync(row.Status)
+}
+
+func formatMachines(row Row) string {
+	if row.Fleet == nil {
+		return "local"
+	}
+	hosts := append([]string(nil), row.Fleet.Hosts...)
+	if len(hosts) == 0 {
+		if row.Fleet.Local {
+			return "local"
+		}
+		return "remote"
+	}
+	if !row.Fleet.Local {
+		if len(hosts) == 1 {
+			return hosts[0] + " only"
+		}
+		return strings.Join(hosts, ", ")
+	}
+	if len(hosts) == 1 && containsHost(hosts, "local") {
+		return "local"
+	}
+	return strings.Join(hosts, ", ")
+}
+
+func formatRowActivity(row Row, now time.Time) string {
+	if row.Status != nil {
+		return formatActivityAt(row.Status.LastActivity, now)
+	}
+	if row.Fleet != nil && row.Fleet.Freshness != "" {
+		return row.Fleet.Freshness
+	}
+	return "-"
+}
+
+func containsHost(hosts []string, want string) bool {
+	for _, host := range hosts {
+		if host == want {
+			return true
+		}
+	}
+	return false
+}
+
+func rowFleetHaystack(row Row) string {
+	if row.Fleet == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		row.Fleet.ProjectIdentity,
+		row.Fleet.ProjectName,
+		row.Fleet.Ref,
+		row.Fleet.Branch,
+		strings.Join(row.Fleet.Hosts, " "),
+		row.Fleet.Sync,
+		row.Fleet.Dirty,
+		row.Fleet.RemotePath,
+	}, " ")
+}
+
 func formatActivityAt(activity, now time.Time) string {
 	if activity.IsZero() {
 		return "-"
@@ -247,8 +351,9 @@ type tableColumn struct {
 var dashboardColumns = []tableColumn{
 	{header: "REPO", width: 14},
 	{header: "BRANCH", width: 22},
+	{header: "MACHINES", width: 20},
 	{header: "CHANGES", width: 11},
-	{header: "SYNC", width: 7},
+	{header: "SYNC", width: 18},
 	{header: "ACTIVITY", width: 10},
 	{header: "WORKSPACE"},
 }

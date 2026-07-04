@@ -7,10 +7,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/status"
@@ -31,6 +34,8 @@ type tuiBackend struct {
 	collectStatuses          func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions             func() ([]string, error)
 	registerProject          func(models.Project) error
+	readFleetState           func(context.Context, *models.Config) (fleet.FleetState, error)
+	now                      func() time.Time
 }
 
 func newTUIBackend(cfg *models.Config) *tuiBackend {
@@ -50,6 +55,8 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
 		registerProject:          config.RegisterProject,
+		readFleetState:           readTUIFleetState,
+		now:                      time.Now,
 	}
 }
 
@@ -90,7 +97,47 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, error) {
 		}
 		rows = append(rows, buildTUIRow(entry, st, liveSessions))
 	}
+	rows = b.mergeFleetRows(ctx, rows)
 	return rows, nil
+}
+
+func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) []dashboard.Row {
+	if b.cfg == nil || !b.cfg.Fleet.Enabled || b.readFleetState == nil {
+		return rows
+	}
+	state, err := b.readFleetState(ctx, b.cfg)
+	if err != nil {
+		return rows
+	}
+	currentHost, err := currentFleetHostID(b.cfg)
+	if err != nil {
+		return rows
+	}
+
+	byKey := make(map[string]int, len(rows))
+	for i := range rows {
+		if key := tuiFleetKeyForRow(rows[i]); key != "" {
+			byKey[key] = i
+		}
+	}
+
+	rendered := fleet.BuildStatusRows(state, currentHost, b.now())
+	for i, fleetRow := range state.Rows {
+		info := dashboardFleetInfo(fleetRow, renderedStatusRow(rendered, i), currentHost)
+		if info == nil {
+			continue
+		}
+		key := tuiFleetKey(info.ProjectIdentity, info.Kind, info.Ref)
+		if rowIndex, ok := byKey[key]; ok {
+			rows[rowIndex].Fleet = info
+			continue
+		}
+		if info.Local {
+			continue
+		}
+		rows = append(rows, dashboard.Row{Fleet: info})
+	}
+	return rows
 }
 
 func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
@@ -443,11 +490,187 @@ func buildTUIRow(
 	}
 }
 
+func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetState, error) {
+	client, err := newFleetClientFromConfig(cfg)
+	if err != nil {
+		return fleet.FleetState{}, err
+	}
+	state, _, notModified, err := client.State(ctx, "")
+	if err != nil {
+		return fleet.FleetState{}, err
+	}
+	if notModified {
+		return fleet.FleetState{}, nil
+	}
+	return state, nil
+}
+
+func tuiFleetKeyForRow(row dashboard.Row) string {
+	if row.Fleet != nil {
+		return tuiFleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
+	}
+	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
+		return ""
+	}
+	identity := row.Entry.RepositoryInfo.FullPath
+	if identity == "" && row.Entry.RepositoryInfo.Host != "" && row.Entry.RepositoryInfo.Owner != "" && row.Entry.RepositoryInfo.Repository != "" {
+		identity = path.Join(row.Entry.RepositoryInfo.Host, row.Entry.RepositoryInfo.Owner, row.Entry.RepositoryInfo.Repository)
+	}
+	if identity == "" || row.Entry.Branch == "" {
+		return ""
+	}
+	return tuiFleetKey(identity, "branch", row.Entry.Branch)
+}
+
+func tuiFleetKey(projectIdentity string, kind string, ref string) string {
+	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	ref = strings.TrimSpace(ref)
+	if projectIdentity == "" || kind == "" || ref == "" {
+		return ""
+	}
+	return projectIdentity + "\x00" + kind + "\x00" + ref
+}
+
+func renderedStatusRow(rows []fleet.StatusRow, index int) fleet.StatusRow {
+	if index < 0 || index >= len(rows) {
+		return fleet.StatusRow{}
+	}
+	return rows[index]
+}
+
+func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string) *dashboard.FleetInfo {
+	ref := strings.TrimSpace(row.Ref)
+	if ref == "" {
+		ref = strings.TrimSpace(row.Branch)
+	}
+	if row.ProjectIdentity == "" || row.Kind == "" || ref == "" {
+		return nil
+	}
+	info := &dashboard.FleetInfo{
+		ProjectIdentity: row.ProjectIdentity,
+		ProjectName:     rendered.Project,
+		Kind:            row.Kind,
+		Ref:             ref,
+		Branch:          strings.TrimSpace(row.Branch),
+		Local:           fleetRowHasHost(row.Observations, currentHost),
+		Hosts:           fleetDisplayHosts(row.Observations, currentHost),
+		Sync:            rendered.Sync,
+		Dirty:           rendered.Dirty,
+		Freshness:       rendered.Freshness,
+	}
+	if info.ProjectName == "" {
+		info.ProjectName = strings.TrimSpace(row.ProjectName)
+	}
+	if info.ProjectName == "" {
+		info.ProjectName = row.ProjectIdentity
+	}
+	if info.Branch == "" && row.Kind == "branch" {
+		info.Branch = ref
+	}
+	info.MaterializeLabel = info.Branch
+	if info.MaterializeLabel == "" {
+		info.MaterializeLabel = info.Ref
+	}
+	if !info.Local {
+		if observation, ok := fleetMaterializeObservation(row.Observations); ok {
+			info.MaterializeHost = observation.HostID
+			info.RemotePath = observation.Path
+		}
+		info.CanMaterialize = row.Kind == "branch" && info.Branch != ""
+	}
+	return info
+}
+
+func fleetRowHasHost(observations []fleet.Observation, hostID string) bool {
+	hostID = strings.TrimSpace(hostID)
+	for _, observation := range observations {
+		if observation.HostID == hostID {
+			return true
+		}
+	}
+	return false
+}
+
+func fleetDisplayHosts(observations []fleet.Observation, currentHost string) []string {
+	seen := make(map[string]struct{}, len(observations))
+	for _, observation := range observations {
+		hostID := strings.TrimSpace(observation.HostID)
+		if hostID == "" {
+			continue
+		}
+		if hostID == currentHost {
+			hostID = "local"
+		}
+		seen[hostID] = struct{}{}
+	}
+	hosts := make([]string, 0, len(seen))
+	for hostID := range seen {
+		hosts = append(hosts, hostID)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func fleetMaterializeObservation(observations []fleet.Observation) (fleet.Observation, bool) {
+	if len(observations) == 0 {
+		return fleet.Observation{}, false
+	}
+	for _, observation := range observations {
+		if strings.TrimSpace(observation.HostID) != "" {
+			return observation, true
+		}
+	}
+	return observations[0], true
+}
+
 func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, branch string) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
 	return worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+}
+
+func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {
+	if row.Fleet == nil {
+		return "", fmt.Errorf("no fleet worktree selected")
+	}
+	if row.Fleet.Local {
+		return "", fmt.Errorf("worktree already materialized")
+	}
+	if row.Fleet.Kind != "branch" || strings.TrimSpace(row.Fleet.Branch) == "" {
+		return "", fmt.Errorf("only branch worktrees can be materialized")
+	}
+	project, ok := b.projectForFleetInfo(row.Fleet)
+	if !ok {
+		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
+	}
+	path, err := worktree.New(git.New(project.Path), b.cfg).Add(row.Fleet.Branch, "", false)
+	if err != nil {
+		return "", err
+	}
+	if b.cfg != nil && b.cfg.Fleet.Enabled {
+		_ = publishFleetBestEffort(ctx, b.cfg, newFleetManifestBuilder(), nil)
+	}
+	return path, nil
+}
+
+func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Project, bool) {
+	if b == nil || b.cfg == nil || info == nil {
+		return models.Project{}, false
+	}
+	for _, project := range b.cfg.Projects {
+		if strings.TrimSpace(project.Path) == "" {
+			continue
+		}
+		if strings.EqualFold(project.Repository, info.ProjectIdentity) {
+			return project, true
+		}
+		if info.ProjectName != "" && strings.EqualFold(project.Name, info.ProjectName) {
+			return project, true
+		}
+	}
+	return models.Project{}, false
 }
 
 func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) error {

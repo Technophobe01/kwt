@@ -15,7 +15,7 @@ func TestManifestJSONWireShape(t *testing.T) {
 		HostID:        "host-a",
 		Host:          HostInfo{Hostname: "Host-A", Platform: "darwin/arm64"},
 		ObservedAt:    time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC),
-		Projects:      []ProjectManifest{{Identity: "github.com/kenn-io/kwt", Name: "kwt", LocalRoot: "/home/user-a/code/kwt", RemoteURL: "git@github.com:kenn-io/kwt.git"}},
+		Projects:      []ProjectManifest{{Identity: "github.com/kenn-io/kwt", Name: "kwt", LocalRoot: "/workspace/user-a/code/kwt", RemoteURL: "git@github.com:kenn-io/kwt.git"}},
 		Worktrees: []WorktreeManifest{{
 			ProjectIdentity: "github.com/kenn-io/kwt",
 			Kind:            "branch",

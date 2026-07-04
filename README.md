@@ -145,6 +145,9 @@ bearer token through `token_env` or `token_file`.
 The hub is a dumb store for signed-in hosts' latest worktree manifests.
 Multi-machine status is advisory: it helps compare branch, commit, dirty-state,
 and freshness across hosts, but it does not lock worktrees or enforce ownership.
+When enabled, the dashboard includes a `MACHINES` column so rows that only exist
+on another host are visible from this machine. Select a remote-only branch row
+and press `m` to materialize that branch locally.
 
 Useful commands:
 

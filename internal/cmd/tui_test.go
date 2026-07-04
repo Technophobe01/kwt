@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/fleet"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
@@ -279,6 +281,98 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 		rowPathForHandoff(rows[0]),
 		rowPathForHandoff(rows[1]),
 	})
+}
+
+func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
+	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       "/repos/kwt",
+		}},
+	}
+	localEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "kwt",
+			FullPath:   "github.com/example/kwt",
+		},
+		Branch: "main",
+		Path:   "/repos/kwt",
+		IsMain: true,
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(baseDir string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{localEntry}, nil
+	}
+	backend.discoverProjectWorktrees = func(projectPath string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.discoverLaunchWorktrees = func(launchDir string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return map[string]*models.WorktreeStatus{
+			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
+		}, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Rows: []fleet.FleetRow{
+			{
+				ProjectIdentity: "github.com/example/kwt",
+				ProjectName:     "kwt",
+				Kind:            "branch",
+				Ref:             "main",
+				Branch:          "main",
+				Observations: []fleet.Observation{{
+					HostID:     "host-a",
+					Path:       "/repos/kwt",
+					Head:       "aaa",
+					ObservedAt: observedAt,
+				}},
+			},
+			{
+				ProjectIdentity: "github.com/example/kwt",
+				ProjectName:     "kwt",
+				Kind:            "branch",
+				Ref:             "feature/studio-only",
+				Branch:          "feature/studio-only",
+				Observations: []fleet.Observation{{
+					HostID:     "host-b",
+					Path:       "/work/host-b/kwt/feature-studio-only",
+					Head:       "bbb",
+					ObservedAt: observedAt,
+				}},
+			},
+		}}, nil
+	}
+
+	rows, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	remote := rows[0]
+	if remote.Fleet == nil || remote.Fleet.Ref != "feature/studio-only" {
+		remote = rows[1]
+	}
+	require.NotNil(t, remote.Fleet)
+	assert.Nil(t, remote.Entry)
+	assert.Equal(t, "kwt", remote.Fleet.ProjectName)
+	assert.Equal(t, "feature/studio-only", remote.Fleet.Branch)
+	assert.False(t, remote.Fleet.Local)
+	assert.Equal(t, []string{"host-b"}, remote.Fleet.Hosts)
+	assert.Equal(t, "host-b", remote.Fleet.MaterializeHost)
+	assert.Equal(t, "/work/host-b/kwt/feature-studio-only", remote.Fleet.RemotePath)
 }
 
 func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
@@ -628,6 +722,40 @@ func TestTUIBackendRemoveWorktreeFallsBackToRegisteredProjectRoot(t *testing.T) 
 	require.NoError(t, err)
 	output := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
 	assert.NotContains(t, output, worktreePath)
+}
+
+func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "branch", "feature/studio-only")
+	baseDir := filepath.Join(t.TempDir(), "worktrees")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir, AutoMkdir: true},
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       repoPath,
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+	}}
+
+	path, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.NoError(t, err)
+	assert.DirExists(t, path)
+	assert.True(t, strings.HasPrefix(path, baseDir), path)
+	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
+	assert.Equal(t, "feature/studio-only", branch)
 }
 
 func TestTUIBackendRemoveWorktreeRepairsBrokenGitFile(t *testing.T) {

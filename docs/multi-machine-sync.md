@@ -9,8 +9,8 @@ trusted machines you use for development. It answers practical questions:
 - Which machine last saw dirty or untracked files?
 
 It is advisory. `kwt` publishes worktree manifests and renders the combined
-state, but it does not sync file contents, clone repositories, create worktrees,
-delete worktrees, or lock branches on other hosts.
+state, but it does not sync file contents, clone repositories, delete worktrees,
+or lock branches on other hosts.
 
 ## How it works
 
@@ -30,6 +30,22 @@ kwt sync forget <host-id>
 `kwt sync status` publishes this host best-effort before reading the hub. Worktree
 mutation commands also publish after successful local changes when multi-machine
 sync is enabled.
+
+## Dashboard workflow
+
+The dashboard is the main day-to-day surface. When multi-machine sync is enabled,
+`kwt tui` includes fleet observations alongside local worktrees:
+
+- `MACHINES` shows whether a row is local, remote-only, or present on multiple
+  hosts.
+- `SYNC` reports whether another host observed a different head for the same
+  branch.
+- `CHANGES` reports dirty state from any observed host.
+- `WORKSPACE` shows `remote` for rows that exist somewhere else but not here.
+
+Select a remote-only branch row and press `m` to materialize it on the current
+machine using the matching local project root and normal worktree naming rules.
+Detached-head rows are shown for awareness but are not materialized by v1.
 
 ## Configure it
 

@@ -150,6 +150,12 @@ func TestFormatChanges(t *testing.T) {
 	}))
 }
 
+func TestFormatRowChangesUsesFleetDirtyForRemoteOnlyRows(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{Dirty: "clean"}}
+
+	assert.Equal(t, "clean", formatRowChanges(row))
+}
+
 func TestFormatSync(t *testing.T) {
 	assert.Equal(t, "?", formatSync(nil))
 	assert.Equal(t, "?", formatSync(&models.WorktreeStatus{Status: models.WorktreeStatusUnknown}))
@@ -161,6 +167,16 @@ func TestFormatSync(t *testing.T) {
 		Status:    models.WorktreeStatusModified,
 		GitStatus: models.GitStatus{Ahead: 2, Behind: 3},
 	}))
+}
+
+func TestFormatMachinesShowsLocalAndRemoteHosts(t *testing.T) {
+	row := testRow("kwt", "main", "/w/kwt/main")
+	row.Fleet = &FleetInfo{
+		Local: true,
+		Hosts: []string{"local", "host-b"},
+	}
+
+	assert.Equal(t, "local, host-b", formatMachines(row))
 }
 
 func TestFormatActivityAt(t *testing.T) {

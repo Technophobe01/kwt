@@ -271,6 +271,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.cycleLayout()
 	case key.Matches(msg, m.keys.New):
 		return m.startNewBranch()
+	case key.Matches(msg, m.keys.Materialize):
+		return m.materializeSelected()
 	case key.Matches(msg, m.keys.Delete):
 		return m.startDelete()
 	case key.Matches(msg, m.keys.Shell):
@@ -483,6 +485,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
+		if row.Fleet != nil && row.Fleet.CanMaterialize {
+			m.message = "press m to materialize this worktree"
+			return m, nil
+		}
 		m.message = "no worktree selected"
 		return m, nil
 	}
@@ -496,6 +502,10 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
+		if row.Fleet != nil && row.Fleet.CanMaterialize {
+			m.message = "press m to materialize this worktree"
+			return m, nil
+		}
 		m.message = "no worktree selected"
 		return m, nil
 	}
@@ -538,6 +548,23 @@ func (m Model) startNewBranch() (Model, tea.Cmd) {
 	m.input.Prompt = fmt.Sprintf("new branch in %s: ", rowRepoName(row))
 	m.input.SetValue("")
 	return m, m.input.Focus()
+}
+
+func (m Model) materializeSelected() (Model, tea.Cmd) {
+	row := m.selectedRow()
+	if row.Fleet == nil {
+		m.message = "no fleet worktree selected"
+		return m, nil
+	}
+	if row.Fleet.Local {
+		m.message = "worktree already materialized"
+		return m, nil
+	}
+	if !row.Fleet.CanMaterialize {
+		m.message = "cannot materialize this worktree"
+		return m, nil
+	}
+	return m, m.materializeWorktreeCmd(row)
 }
 
 func (m Model) startFilter() (Model, tea.Cmd) {
@@ -649,6 +676,20 @@ func (m Model) createWorktreeCmd(row Row, branch string) tea.Cmd {
 	}
 }
 
+func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		path, err := m.backend.MaterializeWorktree(context.Background(), row)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{
+			message:    fmt.Sprintf("materialized %s", rowLabel(row)),
+			refresh:    true,
+			anchorPath: path,
+		}
+	}
+}
+
 func (m Model) removeWorktreeCmd(row Row) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.backend.RemoveWorktree(context.Background(), row); err != nil {
@@ -725,12 +766,11 @@ func (m Model) renderRows() string {
 		if i == selected {
 			cursor = "▸"
 		}
-		activity := "-"
-		if row.Status != nil {
-			activity = formatActivityAt(row.Status.LastActivity, now)
-		}
+		activity := formatRowActivity(row, now)
 		ws := "offline"
-		if row.SessionLive {
+		if row.Entry == nil && row.Fleet != nil {
+			ws = m.theme.dim.Render("remote")
+		} else if row.SessionLive {
 			ws = m.theme.live.Render("live")
 		} else {
 			ws = m.theme.dim.Render(ws)
@@ -738,8 +778,9 @@ func (m Model) renderRows() string {
 		line := cursor + " " + renderDashboardCells([]string{
 			rowRepoName(row),
 			rowBranch(row),
-			formatChanges(row.Status),
-			formatSync(row.Status),
+			formatMachines(row),
+			formatRowChanges(row),
+			formatRowSync(row),
 			activity,
 			ws,
 		})
@@ -808,6 +849,17 @@ func (m Model) renderStatusLine() string {
 
 func (m Model) renderSelectionDetails() string {
 	row := m.selectedRow()
+	if row.Entry == nil && row.Fleet != nil {
+		location := "remote"
+		if row.Fleet.MaterializeHost != "" {
+			location = "remote on " + row.Fleet.MaterializeHost
+		}
+		detail := location
+		if row.Fleet.RemotePath != "" {
+			detail += "\n" + abbreviateHome(row.Fleet.RemotePath)
+		}
+		return fmt.Sprintf("selected %s · %s", rowLabel(row), detail)
+	}
 	path := rowPath(row)
 	if path == "" {
 		return ""

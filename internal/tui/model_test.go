@@ -13,19 +13,22 @@ import (
 )
 
 type fakeBackend struct {
-	rows        []Row
-	layoutNames []string
-	insideTmux  bool
-	createPath  string
-	createErr   error
-	removeErr   error
-	killErr     error
-	openErr     error
-	listCalls   int
-	createCalls []string
-	removeCalls []string
-	killCalls   []string
-	openCalls   []string
+	rows            []Row
+	layoutNames     []string
+	insideTmux      bool
+	createPath      string
+	createErr       error
+	materializePath string
+	materializeErr  error
+	removeErr       error
+	killErr         error
+	openErr         error
+	listCalls       int
+	createCalls     []string
+	materializeRows []string
+	removeCalls     []string
+	killCalls       []string
+	openCalls       []string
 }
 
 func (b *fakeBackend) List(ctx context.Context) ([]Row, error) {
@@ -41,6 +44,13 @@ func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string
 func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row) error {
 	b.removeCalls = append(b.removeCalls, rowPath(row))
 	return b.removeErr
+}
+
+func (b *fakeBackend) MaterializeWorktree(ctx context.Context, row Row) (string, error) {
+	if row.Fleet != nil {
+		b.materializeRows = append(b.materializeRows, row.Fleet.ProjectIdentity+":"+row.Fleet.Ref)
+	}
+	return b.materializePath, b.materializeErr
 }
 
 func (b *fakeBackend) KillSession(row Row) error {
@@ -161,6 +171,39 @@ func TestModelPolishesSingleRowDashboard(t *testing.T) {
 	assert.Contains(t, content, "layout default")
 	assert.Contains(t, content, "selected kwt:test/layouts")
 	assert.Contains(t, content, "/worktrees/github.com/example/kwt/test-layouts")
+}
+
+func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{
+		ProjectIdentity:  "github.com/example/kwt",
+		ProjectName:      "kwt",
+		Kind:             "branch",
+		Ref:              "feature/studio-only",
+		Branch:           "feature/studio-only",
+		Local:            false,
+		Hosts:            []string{"host-b"},
+		Sync:             "same",
+		Dirty:            "clean",
+		Freshness:        "just now",
+		MaterializeHost:  "host-b",
+		RemotePath:       "/work/host-b/kwt/feature-studio-only",
+		CanMaterialize:   true,
+		MaterializeLabel: "feature/studio-only",
+	}}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	content := stripANSI(viewContent(model))
+
+	assert.Contains(t, content, "MACHINES")
+	assert.Contains(t, content, "kwt")
+	assert.Contains(t, content, "feature/studio-only")
+	assert.Contains(t, content, "host-b only")
+	assert.Contains(t, content, "remote")
+	assert.Contains(t, content, "m materialize")
+	assert.Contains(t, content, "selected kwt:feature/studio-only")
+	assert.Contains(t, content, "remote on host-b")
+	assert.Contains(t, content, "/work/host-b/kwt/feature-studio-only")
 }
 
 func TestModelCyclesLayoutSelection(t *testing.T) {
@@ -458,6 +501,32 @@ func TestModelNewBranchAcceptsPaste(t *testing.T) {
 	require.NotNil(t, cmd)
 	_ = cmd()
 	assert.Equal(t, []string{"/w/kwt/main:feature/pasted"}, backend.createCalls)
+}
+
+func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+		CanMaterialize:  true,
+	}}
+	backend := &fakeBackend{materializePath: "/worktrees/github.com/example/kwt/feature-studio-only"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	_, cmd := updateModel(t, model, press("m"))
+
+	require.NotNil(t, cmd)
+	msg := cmd()
+	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.Equal(t, []string{"github.com/example/kwt:feature/studio-only"}, backend.materializeRows)
+	done := msg.(actionDoneMsg)
+	assert.True(t, done.refresh)
+	assert.Equal(t, "/worktrees/github.com/example/kwt/feature-studio-only", done.anchorPath)
+	assert.Contains(t, done.message, "materialized kwt:feature/studio-only")
 }
 
 func TestModelCancelNewBranchInputKeepsExistingFilter(t *testing.T) {

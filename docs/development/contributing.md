@@ -48,7 +48,7 @@ make docs-serve
 ```
 
 `make docs-check` runs the same strict Zensical build used for docs
-verification.
+verification. `make docs-deploy` deploys the docs site with Vercel.
 
 ## Test discipline
 

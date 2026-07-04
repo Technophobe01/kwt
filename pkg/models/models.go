@@ -36,7 +36,7 @@ type CdConfig struct {
 // Config represents the application configuration.
 type Config struct {
 	Worktree           WorktreeConfig      `mapstructure:"worktree"`            // Worktree-related configuration
-	Fleet              FleetConfig         `mapstructure:"fleet" toml:"fleet"`  // Fleet sync configuration
+	Fleet              FleetConfig         `mapstructure:"fleet" toml:"fleet"`  // Multi-machine sync configuration
 	Cd                 CdConfig            `mapstructure:"cd"`                  // Cd command configuration
 	Finder             FinderConfig        `mapstructure:"finder"`              // Fuzzy finder configuration
 	UI                 UIConfig            `mapstructure:"ui"`                  // UI-related configuration
@@ -47,9 +47,9 @@ type Config struct {
 	Layouts            LayoutsConfig       `mapstructure:"layouts"`             // Named tmux workspace layout library
 }
 
-// FleetConfig contains optional fleet sync configuration.
+// FleetConfig contains optional multi-machine sync configuration.
 type FleetConfig struct {
-	Enabled   bool           `mapstructure:"enabled" toml:"enabled"`       // Enable fleet sync behavior
+	Enabled   bool           `mapstructure:"enabled" toml:"enabled"`       // Enable multi-machine sync behavior
 	HostID    string         `mapstructure:"host_id" toml:"host_id"`       // Stable identity for this host
 	HubURL    string         `mapstructure:"hub_url" toml:"hub_url"`       // Hub API base URL
 	TokenFile string         `mapstructure:"token_file" toml:"token_file"` // Path to bearer token file

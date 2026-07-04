@@ -83,7 +83,7 @@ Each publish sends a versioned manifest:
     {
       "identity": "github.com/kenn-io/kwt",
       "name": "kwt",
-      "local_root": "/home/user-a/code/kwt",
+      "local_root": "/workspace/user-a/code/kwt",
       "remote_url": "git@github.com:kenn-io/kwt.git"
     }
   ],
@@ -93,7 +93,7 @@ Each publish sends a versioned manifest:
       "kind": "branch",
       "ref": "feature/machine-view",
       "branch": "feature/machine-view",
-      "path": "/home/user-a/worktrees/github.com/kenn-io/kwt/feature-machine-view",
+      "path": "/workspace/user-a/worktrees/github.com/kenn-io/kwt/feature-machine-view",
       "head": "abcdef123456",
       "head_time": "2026-07-04T11:30:00Z",
       "upstream": "origin/feature/machine-view",
@@ -133,6 +133,13 @@ Existing worktree mutation commands should publish after successful local
 mutations when multi-machine sync is enabled. Publish failures must not fail the
 mutation.
 
+The TUI consumes the same hub state as `kwt sync status`. It adds machine
+presence to dashboard rows, includes remote-only branch rows, and lets the user
+materialize a remote-only branch on the current host. Materialization is local:
+it uses the configured project root and normal worktree naming rules, then
+publishes best-effort. Detached-head rows remain visible but are not
+materialized in v1.
+
 ## Hub API
 
 The planned v1 API is intentionally small:
@@ -158,7 +165,7 @@ then rename over `state.json`.
 
 ## Multi-machine view
 
-For each row, `kwt sync status` can show:
+For each row, `kwt sync status` and the TUI can show:
 
 - project identity and display name;
 - branch or detached head;

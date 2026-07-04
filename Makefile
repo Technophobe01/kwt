@@ -10,7 +10,7 @@ BUILD_DIR := build
 GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
-.PHONY: all build clean test test-verbose test-coverage lint fmt vet install help docs-install docs-build docs-serve docs-check
+.PHONY: all build clean test test-verbose test-coverage lint fmt vet install help docs-install docs-build docs-serve docs-check docs-deploy
 
 # Default target
 all: clean build
@@ -84,6 +84,10 @@ docs-serve:
 
 ## docs-check: Verify docs build
 docs-check: docs-build
+
+## docs-deploy: Deploy docs to Vercel
+docs-deploy:
+	@vercel deploy --prod
 
 ## lint: Run golangci-lint
 lint:
