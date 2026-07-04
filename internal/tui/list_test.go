@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/url"
@@ -261,6 +262,10 @@ var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
+}
+
+func visibleWidth(s string) int {
+	return runewidth.StringWidth(stripANSI(s))
 }
 
 func visualIndex(line, needle string) int {

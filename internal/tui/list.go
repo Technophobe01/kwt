@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -250,9 +251,20 @@ func formatRowChanges(row Row) string {
 
 func formatRowSync(row Row) string {
 	if row.Fleet != nil && row.Fleet.Sync != "" {
-		return "hosts " + row.Fleet.Sync
+		return formatFleetSync(row.Fleet.Sync)
 	}
 	return "git " + formatSync(row.Status)
+}
+
+func formatFleetSync(sync string) string {
+	sync = strings.TrimSpace(sync)
+	if sync == "same" {
+		return "same"
+	}
+	if different, ok := strings.CutPrefix(sync, "different: "); ok {
+		return "diff " + different
+	}
+	return sync
 }
 
 func formatMachines(row Row) string {
@@ -344,42 +356,208 @@ func plural(n int, singular, many string) string {
 }
 
 type tableColumn struct {
+	key    string
 	header string
 	width  int
 }
 
-var dashboardColumns = []tableColumn{
-	{header: "REPO", width: 14},
-	{header: "BRANCH", width: 22},
-	{header: "MACHINES", width: 20},
-	{header: "CHANGES", width: 11},
-	{header: "HEADS", width: 22},
-	{header: "ACTIVITY", width: 10},
-	{header: "WORKSPACE"},
+type tableColumnSpec struct {
+	key      string
+	header   string
+	minWidth int
+	maxWidth int
+	wideOnly bool
 }
 
-func renderDashboardCells(values []string) string {
+const (
+	dashboardColumnRepo      = "repo"
+	dashboardColumnBranch    = "branch"
+	dashboardColumnMachines  = "machines"
+	dashboardColumnChanges   = "changes"
+	dashboardColumnHeads     = "heads"
+	dashboardColumnActivity  = "activity"
+	dashboardColumnWorkspace = "workspace"
+)
+
+var dashboardColumnSpecs = []tableColumnSpec{
+	{key: dashboardColumnRepo, header: "REPO", minWidth: 9, maxWidth: 14},
+	{key: dashboardColumnBranch, header: "BRANCH", minWidth: 16, maxWidth: 32},
+	{key: dashboardColumnMachines, header: "MACHINES", minWidth: 10, maxWidth: 16, wideOnly: true},
+	{key: dashboardColumnChanges, header: "CHANGES", minWidth: 7, maxWidth: 11},
+	{key: dashboardColumnHeads, header: "HEADS", minWidth: 8, maxWidth: 18},
+	{key: dashboardColumnActivity, header: "ACTIVITY", minWidth: 8, maxWidth: 9},
+	{key: dashboardColumnWorkspace, header: "WORKSPACE", minWidth: 6, maxWidth: 9},
+}
+
+func dashboardColumnsForWidth(width int) []tableColumn {
+	specs := make([]tableColumnSpec, 0, len(dashboardColumnSpecs))
+	showWideColumns := width <= 0 || width >= 118
+	for _, spec := range dashboardColumnSpecs {
+		if spec.wideOnly && !showWideColumns {
+			continue
+		}
+		specs = append(specs, spec)
+	}
+
+	columns := make([]tableColumn, 0, len(specs))
+	for _, spec := range specs {
+		columnWidth := spec.maxWidth
+		if width > 0 {
+			columnWidth = spec.minWidth
+		}
+		columns = append(columns, tableColumn{key: spec.key, header: spec.header, width: columnWidth})
+	}
+	if width <= 0 || len(columns) == 0 {
+		return columns
+	}
+
+	available := width - 2 - (len(columns) - 1)
+	if available < 0 {
+		available = 0
+	}
+	total := dashboardColumnsWidth(columns)
+	if total > available {
+		shrinkDashboardColumns(columns, total-available)
+		return columns
+	}
+
+	extra := available - total
+	growDashboardColumns(columns, specs, extra)
+	return columns
+}
+
+func dashboardColumnsWidth(columns []tableColumn) int {
+	total := 0
+	for _, column := range columns {
+		total += column.width
+	}
+	return total
+}
+
+func shrinkDashboardColumns(columns []tableColumn, excess int) {
+	order := []string{
+		dashboardColumnBranch,
+		dashboardColumnHeads,
+		dashboardColumnRepo,
+		dashboardColumnChanges,
+		dashboardColumnActivity,
+		dashboardColumnWorkspace,
+		dashboardColumnMachines,
+	}
+	for excess > 0 {
+		shrank := false
+		for _, key := range order {
+			index := dashboardColumnIndex(columns, key)
+			if index < 0 {
+				continue
+			}
+			if columns[index].width <= 3 {
+				continue
+			}
+			columns[index].width--
+			excess--
+			shrank = true
+			if excess == 0 {
+				break
+			}
+		}
+		if !shrank {
+			return
+		}
+	}
+}
+
+func growDashboardColumns(columns []tableColumn, specs []tableColumnSpec, extra int) {
+	order := []string{
+		dashboardColumnBranch,
+		dashboardColumnRepo,
+		dashboardColumnHeads,
+		dashboardColumnMachines,
+		dashboardColumnChanges,
+		dashboardColumnActivity,
+		dashboardColumnWorkspace,
+	}
+	for _, key := range order {
+		index := dashboardColumnIndex(columns, key)
+		if index < 0 {
+			continue
+		}
+		maxWidth := dashboardColumnMaxWidth(specs, key)
+		for extra > 0 && columns[index].width < maxWidth {
+			columns[index].width++
+			extra--
+		}
+		if extra == 0 {
+			return
+		}
+	}
+}
+
+func dashboardColumnIndex(columns []tableColumn, key string) int {
+	for i, column := range columns {
+		if column.key == key {
+			return i
+		}
+	}
+	return -1
+}
+
+func dashboardColumnMaxWidth(specs []tableColumnSpec, key string) int {
+	for _, spec := range specs {
+		if spec.key == key {
+			return spec.maxWidth
+		}
+	}
+	return 0
+}
+
+func renderDashboardCells(columns []tableColumn, values map[string]string) string {
 	var b strings.Builder
-	for i, value := range values {
+	for i, column := range columns {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		width := dashboardColumns[i].width
-		if width > 0 {
-			_, _ = fmt.Fprintf(&b, "%-*s", width, truncateWithEllipsis(value, width))
-		} else {
-			b.WriteString(value)
-		}
+		b.WriteString(padRight(truncateWithEllipsis(values[column.key], column.width), column.width))
 	}
 	return b.String()
 }
 
-func renderDashboardHeader() string {
-	values := make([]string, 0, len(dashboardColumns))
-	for _, column := range dashboardColumns {
-		values = append(values, column.header)
+func renderDashboardHeader(columns []tableColumn) string {
+	values := make(map[string]string, len(columns))
+	for _, column := range columns {
+		values[column.key] = column.header
 	}
-	return "  " + renderDashboardCells(values)
+	return "  " + renderDashboardCells(columns, values)
+}
+
+func dashboardCellValues(row Row, now time.Time) map[string]string {
+	return map[string]string{
+		dashboardColumnRepo:      rowRepoName(row),
+		dashboardColumnBranch:    rowBranch(row),
+		dashboardColumnMachines:  formatMachines(row),
+		dashboardColumnChanges:   formatRowChanges(row),
+		dashboardColumnHeads:     formatRowSync(row),
+		dashboardColumnActivity:  formatRowActivity(row, now),
+		dashboardColumnWorkspace: formatWorkspace(row),
+	}
+}
+
+func padRight(s string, width int) string {
+	padding := width - runewidth.StringWidth(s)
+	if padding <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", padding)
+}
+
+func formatWorkspace(row Row) string {
+	if row.Entry == nil && row.Fleet != nil {
+		return "remote"
+	}
+	if row.SessionLive {
+		return "live"
+	}
+	return "offline"
 }
 
 func anchorCursorByPath(oldRows []Row, oldCursor int, newRows []Row) int {
@@ -429,14 +607,24 @@ func truncateWithEllipsis(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= width {
+	if runewidth.StringWidth(s) <= width {
 		return s
 	}
 	if width <= 3 {
 		return strings.Repeat(".", width)
 	}
-	return string(runes[:width-3]) + "..."
+	target := width - 3
+	used := 0
+	var b strings.Builder
+	for _, r := range s {
+		runeWidth := runewidth.RuneWidth(r)
+		if used+runeWidth > target {
+			break
+		}
+		b.WriteRune(r)
+		used += runeWidth
+	}
+	return b.String() + "..."
 }
 
 func abbreviateHome(path string) string {

@@ -791,6 +791,7 @@ func TestTUIBackendMaterializeWorktreeExplainsUnavailableBranch(t *testing.T) {
 	_, err := backend.MaterializeWorktree(context.Background(), row)
 
 	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "materialize")
 	assert.Contains(t, err.Error(), "branch must exist locally or on a fetched remote")
 	assert.Contains(t, err.Error(), "push or fetch it first")
 }

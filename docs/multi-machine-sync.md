@@ -3,7 +3,7 @@
 Multi-machine sync gives `kwt` a shared view of active worktrees across the
 trusted machines you use for development. It answers practical questions:
 
-- Which branches did I materialize on the desktop?
+- Which branches did I sync onto the desktop?
 - Is this worktree missing on the laptop?
 - Did another host observe a different head for the same branch?
 - Which machine last saw dirty or untracked files?
@@ -34,21 +34,23 @@ sync is enabled.
 ## Dashboard workflow
 
 The dashboard is the main day-to-day surface. When multi-machine sync is enabled,
-`kwt tui` includes fleet observations alongside local worktrees:
+`kwt tui` includes multi-machine observations alongside local worktrees:
 
-- `MACHINES` shows whether a row is local, remote-only, or present on multiple
-  hosts.
+- `WORKSPACE` shows `remote` for rows that exist somewhere else but not here.
+- Selected-row details show the source machine and path for remote-only rows.
+- Wide terminals may also show `MACHINES`; narrower terminals prioritize the
+  worktree status columns and keep the table within roughly 100 columns.
 - `HEADS` reports Git upstream state for local-only rows and whether another
   host observed a different head for multi-machine rows.
 - `CHANGES` reports dirty state from any observed host.
-- `WORKSPACE` shows `remote` for rows that exist somewhere else but not here.
 
-Select a remote-only branch row and press `m` to materialize it on the current
+Select a remote-only branch row and press `s` to sync it onto the current
 machine using the matching local project root and normal worktree naming rules.
+On local rows, `s` still opens a shell.
 This checks out a branch that is already available in the current repository or
 on a fetched remote; if the source machine has unpushed commits, push or fetch
 those commits first. `kwt` does not transfer commit objects or dirty files.
-Detached-head rows are shown for awareness but are not materialized by v1.
+Detached-head rows are shown for awareness but are not synced by v1.
 
 ## Configure it
 

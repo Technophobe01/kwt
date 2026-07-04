@@ -76,7 +76,8 @@ func TestFleetStatusPublishesBeforeRenderingAndContinuesOnPublishWarning(t *test
 	assert.Equal(t, []string{"builder", "publish", "client", "state"}, sequence)
 	assert.Contains(t, stderr.String(), "warning: sync publish failed: publish failed")
 	assert.Contains(t, stdout.String(), "kwt")
-	assert.Contains(t, stdout.String(), "differs from host-b")
+	assert.Contains(t, stdout.String(), "different: host-b")
+	assert.NotContains(t, stdout.String(), "differs from")
 }
 
 func TestFleetForgetDeletesHost(t *testing.T) {

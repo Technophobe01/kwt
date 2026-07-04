@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -119,7 +120,7 @@ func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
 }
 
 func TestRenderHelpTableReflowsToFitWidth(t *testing.T) {
-	got := stripANSI(renderHelpTable(defaultHelpRows(), 34))
+	got := stripANSI(renderHelpTable(defaultHelpRows(Row{}), 34))
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
 
 	require.Greater(t, len(lines), 1)
@@ -171,6 +172,8 @@ func TestModelPolishesSingleRowDashboard(t *testing.T) {
 	assert.Contains(t, content, "layout default")
 	assert.Contains(t, content, "selected kwt:test/layouts")
 	assert.Contains(t, content, "/worktrees/github.com/example/kwt/test-layouts")
+	assert.Contains(t, stripANSI(content), "s shell")
+	assert.NotContains(t, stripANSI(content), "s sync")
 }
 
 func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
@@ -198,18 +201,50 @@ func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 
 	content := stripANSI(viewContent(model))
 
-	assert.Contains(t, content, "MACHINES")
+	assert.NotContains(t, content, "MACHINES")
 	assert.Contains(t, content, "kwt")
 	assert.Contains(t, content, "feature/studio-only")
-	assert.Contains(t, content, "host-b only")
-	assert.Contains(t, content, "hosts same")
+	assert.Contains(t, content, "same")
+	assert.NotContains(t, content, "hosts same")
 	assert.Contains(t, content, "remote")
-	assert.Contains(t, content, "m materialize")
+	assert.Contains(t, content, "s sync")
+	assert.NotContains(t, content, "m materialize")
 	assert.Contains(t, content, "selected kwt:feature/studio-only")
 	assert.Contains(t, content, "remote on host-b")
-	assert.Contains(t, content, "press m to materialize (branch must be pushed/fetched here)")
+	assert.Contains(t, content, "press s to sync (branch must be pushed/fetched here)")
 	assert.Contains(t, content, "source is 2 commits ahead of origin/feature/studio-only")
 	assert.Contains(t, content, "/work/host-b/kwt/feature-studio-only")
+}
+
+func TestModelDashboardFitsHundredColumnTerminal(t *testing.T) {
+	row := testRow("example-service", "very-long-feature-branch-that-needs-truncation", "/w/example-service/feature")
+	row.SessionLive = true
+	row.Status.LastActivity = timeNow().Add(-8 * time.Hour)
+	row.Status.GitStatus.Modified = 3
+	row.Fleet = &FleetInfo{
+		ProjectName: "example-service",
+		Local:       true,
+		Hosts:       []string{"local", "host-b"},
+		Sync:        "different: host-b 18h",
+		Dirty:       "host-b (~3 ?3)",
+		Freshness:   "18h",
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 100, Height: 12})
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	header := findLineContaining(lines, "REPO")
+	body := findLineContaining(lines, "diff host-b")
+
+	require.NotEmpty(t, header)
+	require.NotEmpty(t, body)
+	assert.Contains(t, header, "WORKSPACE")
+	assert.NotContains(t, header, "MACHINES")
+	assert.Contains(t, body, "live")
+	assert.Contains(t, stripANSI(viewContent(model)), "machines local, host-b")
+	assert.LessOrEqual(t, visibleWidth(header), 100, header)
+	assert.LessOrEqual(t, visibleWidth(body), 100, body)
 }
 
 func TestModelCyclesLayoutSelection(t *testing.T) {
@@ -523,17 +558,17 @@ func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
 	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
 
-	model, cmd := updateModel(t, model, press("m"))
+	model, cmd := updateModel(t, model, press("s"))
 
 	require.NotNil(t, cmd)
-	assert.Contains(t, model.message, "materializing kwt:feature/studio-only")
+	assert.Contains(t, model.message, "syncing kwt:feature/studio-only")
 	msg := cmd()
 	assert.IsType(t, actionDoneMsg{}, msg)
 	assert.Equal(t, []string{"github.com/example/kwt:feature/studio-only"}, backend.materializeRows)
 	done := msg.(actionDoneMsg)
 	assert.True(t, done.refresh)
 	assert.Equal(t, "/worktrees/github.com/example/kwt/feature-studio-only", done.anchorPath)
-	assert.Contains(t, done.message, "materialized kwt:feature/studio-only")
+	assert.Contains(t, done.message, "synced kwt:feature/studio-only")
 }
 
 func TestModelCancelNewBranchInputKeepsExistingFilter(t *testing.T) {

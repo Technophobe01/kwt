@@ -639,10 +639,10 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		return "", fmt.Errorf("no fleet worktree selected")
 	}
 	if row.Fleet.Local {
-		return "", fmt.Errorf("worktree already materialized")
+		return "", fmt.Errorf("worktree already synced")
 	}
 	if row.Fleet.Kind != "branch" || strings.TrimSpace(row.Fleet.Branch) == "" {
-		return "", fmt.Errorf("only branch worktrees can be materialized")
+		return "", fmt.Errorf("only branch worktrees can be synced")
 	}
 	project, ok := b.projectForFleetInfo(row.Fleet)
 	if !ok {
@@ -651,7 +651,7 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	path, err := worktree.New(git.New(project.Path), b.cfg).Add(row.Fleet.Branch, "", false)
 	if err != nil {
 		return "", fmt.Errorf(
-			"could not materialize %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
+			"could not sync %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
 			row.Fleet.Branch,
 			err,
 		)

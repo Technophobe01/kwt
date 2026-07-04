@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRenderRowsMarksMissingMaterializedAndDiffering(t *testing.T) {
+func TestRenderRowsMarksLocalPresenceAndDifferentHeads(t *testing.T) {
 	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	state := FleetState{Rows: []FleetRow{{
 		ProjectIdentity: "github.com/kenn-io/kwt",
@@ -25,8 +25,9 @@ func TestRenderRowsMarksMissingMaterializedAndDiffering(t *testing.T) {
 
 	rows := BuildStatusRows(state, "host-a", now)
 	require.Len(t, rows, 1)
-	assert.Equal(t, "materialized", rows[0].Local)
-	assert.Contains(t, rows[0].Sync, "differs from host-b")
+	assert.Equal(t, "present", rows[0].Local)
+	assert.Contains(t, rows[0].Sync, "different: host-b")
+	assert.NotContains(t, rows[0].Sync, "differs from")
 	assert.Contains(t, rows[0].Dirty, "host-b")
 
 	rows = BuildStatusRows(state, "air", now)

@@ -17,8 +17,9 @@ or require background daemons for single-machine users.
 - Spokes do not need a daemon in v1. Publish on successful `add`, `remove`, and
   `prune`, and publish before multi-machine reads with a short best-effort
   timeout.
-- The UI language is advisory: "missing on this host" and "differs from host X"
-  are honest; "behind host X" is only valid when local Git data proves ancestry.
+- The UI language is advisory: "missing on this host" and "different head on
+  host X" are honest; "behind host X" is only valid when local Git data proves
+  ancestry.
 
 ## Configuration shape
 
@@ -133,14 +134,16 @@ Existing worktree mutation commands should publish after successful local
 mutations when multi-machine sync is enabled. Publish failures must not fail the
 mutation.
 
-The TUI consumes the same hub state as `kwt sync status`. It adds machine
-presence to dashboard rows, includes remote-only branch rows, and lets the user
-materialize a remote-only branch on the current host. Materialization is local:
-it uses the configured project root and normal worktree naming rules, then
-publishes best-effort. It can only check out branches whose commits are already
-available locally or through a fetched remote; machines with unpushed commits
-must push or otherwise transfer those commits first. Detached-head rows remain
-visible but are not materialized in v1.
+The TUI consumes the same hub state as `kwt sync status`. It includes
+remote-only branch rows, shows machine presence in selected-row details, and may
+show a `MACHINES` column on wide terminals. At roughly 100 columns the table
+prioritizes worktree status over host lists so `WORKSPACE` remains visible. The
+user can sync a remote-only branch onto the current host. The sync action is
+local: it uses the configured project root and normal worktree naming rules,
+then publishes best-effort. It can only check out branches whose commits are
+already available locally or through a fetched remote; machines with unpushed
+commits must push or otherwise transfer those commits first. Detached-head rows
+remain visible but are not synced in v1.
 
 ## Hub API
 
@@ -160,7 +163,7 @@ identities, oversized bodies, and public or unspecified listen addresses.
 `GET /api/v1/fleet/state` returns grouped rows and an `ETag` equal to the
 `state_version`, where `state_version` is derived from canonical stored manifests
 and warnings. Clients own interpretation such as freshness thresholds and
-whether a row is materialized locally.
+whether a row is present locally.
 
 The hub store write must be atomic: write a temporary file, fsync as practical,
 then rename over `state.json`.
@@ -173,7 +176,7 @@ For each row, `kwt sync status` and the TUI can show:
 - branch or detached head;
 - hosts where the worktree exists;
 - whether this host has it;
-- whether this host's head differs from another observed host;
+- whether this host has a different head from another observed host;
 - whether any observed copy has uncommitted changes;
 - host freshness derived from `observed_at`.
 
@@ -200,5 +203,5 @@ launchd, systemd, or an external daemon.
 The tests should protect observable contracts: the disabled subsystem is inert,
 token loading works, listen validation rejects public binds, URL normalization is
 stable, manifest validation rejects bad payloads, the hub groups state correctly,
-ETags change when state changes, and local reconciliation reports materialized,
+ETags change when state changes, and local reconciliation reports present,
 missing, and different rows without inventing cross-host ancestry.

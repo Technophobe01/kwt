@@ -271,8 +271,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.cycleLayout()
 	case key.Matches(msg, m.keys.New):
 		return m.startNewBranch()
-	case key.Matches(msg, m.keys.Materialize):
-		return m.materializeSelected()
 	case key.Matches(msg, m.keys.Delete):
 		return m.startDelete()
 	case key.Matches(msg, m.keys.Shell):
@@ -486,7 +484,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
 		if row.Fleet != nil && row.Fleet.CanMaterialize {
-			m.message = "press m to materialize this worktree"
+			m.message = "press s to sync this worktree"
 			return m, nil
 		}
 		m.message = "no worktree selected"
@@ -502,9 +500,8 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
-		if row.Fleet != nil && row.Fleet.CanMaterialize {
-			m.message = "press m to materialize this worktree"
-			return m, nil
+		if rowCanSync(row) {
+			return m.syncSelected(row)
 		}
 		m.message = "no worktree selected"
 		return m, nil
@@ -550,21 +547,20 @@ func (m Model) startNewBranch() (Model, tea.Cmd) {
 	return m, m.input.Focus()
 }
 
-func (m Model) materializeSelected() (Model, tea.Cmd) {
-	row := m.selectedRow()
+func (m Model) syncSelected(row Row) (Model, tea.Cmd) {
 	if row.Fleet == nil {
-		m.message = "no fleet worktree selected"
+		m.message = "no sync worktree selected"
 		return m, nil
 	}
 	if row.Fleet.Local {
-		m.message = "worktree already materialized"
+		m.message = "worktree already synced"
 		return m, nil
 	}
 	if !row.Fleet.CanMaterialize {
-		m.message = "cannot materialize this worktree"
+		m.message = "cannot sync this worktree"
 		return m, nil
 	}
-	m.message = fmt.Sprintf("materializing %s", rowLabel(row))
+	m.message = fmt.Sprintf("syncing %s", rowLabel(row))
 	return m, m.materializeWorktreeCmd(row)
 }
 
@@ -684,7 +680,7 @@ func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{
-			message:    fmt.Sprintf("materialized %s", rowLabel(row)),
+			message:    fmt.Sprintf("synced %s", rowLabel(row)),
 			refresh:    true,
 			anchorPath: path,
 		}
@@ -756,7 +752,8 @@ func (m Model) renderRows() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderDashboardHeader())
+	columns := dashboardColumnsForWidth(m.width)
+	b.WriteString(renderDashboardHeader(columns))
 	b.WriteString("\n")
 	now := timeNow()
 	selected := clampCursor(m.cursor, len(rows))
@@ -767,24 +764,7 @@ func (m Model) renderRows() string {
 		if i == selected {
 			cursor = "▸"
 		}
-		activity := formatRowActivity(row, now)
-		ws := "offline"
-		if row.Entry == nil && row.Fleet != nil {
-			ws = m.theme.dim.Render("remote")
-		} else if row.SessionLive {
-			ws = m.theme.live.Render("live")
-		} else {
-			ws = m.theme.dim.Render(ws)
-		}
-		line := cursor + " " + renderDashboardCells([]string{
-			rowRepoName(row),
-			rowBranch(row),
-			formatMachines(row),
-			formatRowChanges(row),
-			formatRowSync(row),
-			activity,
-			ws,
-		})
+		line := cursor + " " + renderDashboardCells(columns, dashboardCellValues(row, now))
 		if i == selected {
 			line = m.theme.cursor.Render(line)
 		}
@@ -860,7 +840,7 @@ func (m Model) renderSelectionDetails() string {
 			detail += "\n" + abbreviateHome(row.Fleet.RemotePath)
 		}
 		if row.Fleet.CanMaterialize {
-			detail += "\npress m to materialize (branch must be pushed/fetched here)"
+			detail += "\npress s to sync (branch must be pushed/fetched here)"
 		}
 		if row.Fleet.RemoteAhead > 0 {
 			upstream := strings.TrimSpace(row.Fleet.RemoteUpstream)
@@ -883,8 +863,28 @@ func (m Model) renderSelectionDetails() string {
 	if row.SessionLive {
 		workspace = "workspace live"
 	}
-	return fmt.Sprintf("selected %s · layout %s · %s\n%s",
-		rowLabel(row), m.layoutLabel(), workspace, abbreviateHome(path))
+	detail := fmt.Sprintf("selected %s · layout %s · %s", rowLabel(row), m.layoutLabel(), workspace)
+	if fleetDetail := renderLocalFleetDetails(row); fleetDetail != "" {
+		detail += "\n" + fleetDetail
+	}
+	return detail + "\n" + abbreviateHome(path)
+}
+
+func renderLocalFleetDetails(row Row) string {
+	if row.Fleet == nil {
+		return ""
+	}
+	details := make([]string, 0, 3)
+	if machines := strings.TrimSpace(formatMachines(row)); machines != "" {
+		details = append(details, "machines "+machines)
+	}
+	if sync := strings.TrimSpace(row.Fleet.Sync); sync != "" && sync != "same" {
+		details = append(details, "heads "+sync)
+	}
+	if dirty := strings.TrimSpace(row.Fleet.Dirty); dirty != "" && dirty != "clean" {
+		details = append(details, "changes "+dirty)
+	}
+	return strings.Join(details, " · ")
 }
 
 func (m Model) layoutLabel() string {

@@ -13,15 +13,18 @@ type helpItem struct {
 	desc string
 }
 
-func defaultHelpRows() [][]helpItem {
+func defaultHelpRows(row Row) [][]helpItem {
+	action := helpItem{key: "s", desc: "shell"}
+	if rowCanSync(row) {
+		action = helpItem{key: "s", desc: "sync"}
+	}
 	return [][]helpItem{{
 		{key: "↑↓", desc: "move"},
 		{key: "↵", desc: "attach"},
-		{key: "m", desc: "materialize"},
+		action,
 		{key: "P", desc: "project"},
 		{key: "n", desc: "new"},
 		{key: "L", desc: "layout"},
-		{key: "s", desc: "shell"},
 		{key: "d", desc: "delete"},
 		{key: "K", desc: "kill"},
 		{key: "p", desc: "filter"},
@@ -70,7 +73,11 @@ func (m Model) helpRows() [][]helpItem {
 	if m.inputMode != inputNone {
 		return inputHelpRows(m.inputMode)
 	}
-	return defaultHelpRows()
+	return defaultHelpRows(m.selectedRow())
+}
+
+func rowCanSync(row Row) bool {
+	return row.Entry == nil && row.Fleet != nil && !row.Fleet.Local && row.Fleet.CanMaterialize
 }
 
 func (m Model) renderFooter() string {

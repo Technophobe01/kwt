@@ -71,7 +71,7 @@ func renderLocal(observations []Observation, currentHost string) string {
 	currentHost = strings.TrimSpace(currentHost)
 	for _, observation := range observations {
 		if observation.HostID == currentHost {
-			return "materialized"
+			return "present"
 		}
 	}
 	return "missing"
@@ -96,7 +96,7 @@ func renderSync(observations []Observation, currentHost string, now time.Time) s
 	}
 	for _, observation := range observations {
 		if observation.Head != baseHead {
-			return fmt.Sprintf("differs from %s (%s)", observation.HostID, renderAge(observation.ObservedAt, now))
+			return fmt.Sprintf("different: %s %s", observation.HostID, renderAge(observation.ObservedAt, now))
 		}
 	}
 	return "same"
