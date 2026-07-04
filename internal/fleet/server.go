@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultFleetService     = "kwt-fleet"
+	defaultFleetService     = "kwt-sync"
 	defaultMaxManifestBytes = 1 << 20
 )
 

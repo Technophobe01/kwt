@@ -52,7 +52,7 @@ func TestAddPublishesBestEffortAfterSuccessfulCreation(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"builder", "publish"}, sequence)
-	assert.Contains(t, stderr.String(), "warning: fleet publish failed: publish failed")
+	assert.Contains(t, stderr.String(), "warning: sync publish failed: publish failed")
 }
 
 func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {

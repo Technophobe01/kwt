@@ -149,13 +149,13 @@ and freshness across hosts, but it does not lock worktrees or enforce ownership.
 Useful commands:
 
 ```bash
-kwt fleet serve
-kwt fleet publish
-kwt fleet status
-kwt fleet forget <host-id>
+kwt sync serve
+kwt sync publish
+kwt sync status
+kwt sync forget <host-id>
 ```
 
-When multi-machine sync is enabled, `kwt fleet status` publishes this host before
+When multi-machine sync is enabled, `kwt sync status` publishes this host before
 reading the hub. Successful mutations also publish best-effort: `kwt add`, local
 and global `kwt remove`, and `kwt prune --expired` when it actually removes or
 unregisters an expired worktree. Normal `kwt prune` publishes after every
@@ -204,7 +204,7 @@ spaces.
 | `kwt exec`       | Run a command in a matching worktree      |
 | `kwt remove`     | Delete a worktree, optionally its branch  |
 | `kwt prune`      | Clean up stale Git worktree metadata      |
-| `kwt fleet`      | Publish and inspect multi-machine status  |
+| `kwt sync`       | Publish and inspect multi-machine status  |
 | `kwt tmux`       | Manage standalone tmux sessions           |
 | `kwt config`     | Read and write config values              |
 | `kwt completion` | Generate shell completion and integration |

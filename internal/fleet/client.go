@@ -37,25 +37,25 @@ type ManifestBuildProvider interface {
 	Build(context.Context, *models.Config) (*Manifest, error)
 }
 
-// LoadToken loads the fleet bearer token from the configured source.
+// LoadToken loads the sync bearer token from the configured source.
 func LoadToken(cfg models.FleetConfig) (string, error) {
 	if tokenFile := strings.TrimSpace(cfg.TokenFile); tokenFile != "" {
 		body, err := os.ReadFile(tokenFile)
 		if err != nil {
-			return "", fmt.Errorf("read fleet token file: %w", err)
+			return "", fmt.Errorf("read sync token file: %w", err)
 		}
-		return nonEmptyToken(string(body), "fleet token file")
+		return nonEmptyToken(string(body), "sync token file")
 	}
 
 	if tokenEnv := strings.TrimSpace(cfg.TokenEnv); tokenEnv != "" {
 		value, ok := os.LookupEnv(tokenEnv)
 		if !ok {
-			return "", fmt.Errorf("fleet token environment variable %q is not set", tokenEnv)
+			return "", fmt.Errorf("sync token environment variable %q is not set", tokenEnv)
 		}
-		return nonEmptyToken(value, "fleet token environment variable "+tokenEnv)
+		return nonEmptyToken(value, "sync token environment variable "+tokenEnv)
 	}
 
-	return "", errors.New("fleet token is not configured")
+	return "", errors.New("sync token is not configured")
 }
 
 // EffectiveHubURL returns the configured hub URL, falling back to the local hub listener.
@@ -91,7 +91,7 @@ func NewClient(opts ClientOptions) *Client {
 func (c *Client) Publish(ctx context.Context, manifest Manifest) error {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(manifest); err != nil {
-		return fmt.Errorf("encode fleet manifest: %w", err)
+		return fmt.Errorf("encode sync manifest: %w", err)
 	}
 
 	req, err := c.newRequest(
@@ -107,11 +107,11 @@ func (c *Client) Publish(ctx context.Context, manifest Manifest) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("publish fleet manifest: %w", err)
+		return fmt.Errorf("publish sync manifest: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if !successStatus(resp.StatusCode) {
-		return responseError("publish fleet manifest", resp)
+		return responseError("publish sync manifest", resp)
 	}
 	return nil
 }
@@ -128,7 +128,7 @@ func (c *Client) State(ctx context.Context, etag string) (FleetState, string, bo
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return FleetState{}, "", false, fmt.Errorf("read fleet state: %w", err)
+		return FleetState{}, "", false, fmt.Errorf("read sync state: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -137,12 +137,12 @@ func (c *Client) State(ctx context.Context, etag string) (FleetState, string, bo
 		return FleetState{}, responseETag, true, nil
 	}
 	if !successStatus(resp.StatusCode) {
-		return FleetState{}, responseETag, false, responseError("read fleet state", resp)
+		return FleetState{}, responseETag, false, responseError("read sync state", resp)
 	}
 
 	var state FleetState
 	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
-		return FleetState{}, responseETag, false, fmt.Errorf("decode fleet state: %w", err)
+		return FleetState{}, responseETag, false, fmt.Errorf("decode sync state: %w", err)
 	}
 	return state, responseETag, false, nil
 }
@@ -156,16 +156,16 @@ func (c *Client) Forget(ctx context.Context, hostID string) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("forget fleet host: %w", err)
+		return fmt.Errorf("forget sync host: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if !successStatus(resp.StatusCode) {
-		return responseError("forget fleet host", resp)
+		return responseError("forget sync host", resp)
 	}
 	return nil
 }
 
-// PublishBestEffort attempts to publish local fleet state without failing callers.
+// PublishBestEffort attempts to publish local sync state without failing callers.
 func PublishBestEffort(ctx context.Context, cfg *models.Config, builder ManifestBuildProvider, warn io.Writer) error {
 	if cfg == nil || !cfg.Fleet.Enabled {
 		return nil
@@ -197,21 +197,21 @@ func PublishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 func publishBestEffort(ctx context.Context, cfg *models.Config, builder ManifestBuildProvider) error {
 	hubURL := EffectiveHubURL(cfg.Fleet)
 	if hubURL == "" {
-		return errors.New("fleet hub URL is not configured")
+		return errors.New("sync hub URL is not configured")
 	}
 	token, err := LoadToken(cfg.Fleet)
 	if err != nil {
 		return err
 	}
 	if builder == nil {
-		return errors.New("fleet manifest builder is not configured")
+		return errors.New("sync manifest builder is not configured")
 	}
 	manifest, err := builder.Build(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	if manifest == nil {
-		return errors.New("fleet manifest builder returned nil manifest")
+		return errors.New("sync manifest builder returned nil manifest")
 	}
 	return NewClient(ClientOptions{
 		HubURL:  hubURL,
@@ -222,18 +222,18 @@ func publishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 
 func (c *Client) newRequest(ctx context.Context, method string, path string, body io.Reader) (*http.Request, error) {
 	if c == nil {
-		return nil, errors.New("fleet client is not configured")
+		return nil, errors.New("sync client is not configured")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if c.hubURL == "" {
-		return nil, errors.New("fleet hub URL is not configured")
+		return nil, errors.New("sync hub URL is not configured")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.hubURL+path, body)
 	if err != nil {
-		return nil, fmt.Errorf("create fleet request: %w", err)
+		return nil, fmt.Errorf("create sync request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	return req, nil
@@ -264,5 +264,5 @@ func writeFleetWarning(warn io.Writer, err error) {
 	if warn == nil || err == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(warn, "warning: fleet publish failed: %v\n", err)
+	_, _ = fmt.Fprintf(warn, "warning: sync publish failed: %v\n", err)
 }

@@ -122,12 +122,12 @@ Worktree identity is `(project_identity, kind, ref)`. Branch worktrees use
 
 The planned v1 commands are:
 
-| Command                      | Purpose                                                                   |
-| ---------------------------- | ------------------------------------------------------------------------- |
-| `kwt fleet serve`            | Run the hub HTTP server in the foreground.                                |
-| `kwt fleet publish`          | Build and publish the local manifest.                                     |
-| `kwt fleet status`           | Publish best-effort, fetch hub state, and render the multi-machine table. |
-| `kwt fleet forget <host_id>` | Ask the hub to delete a retired host.                                     |
+| Command                     | Purpose                                                                   |
+| --------------------------- | ------------------------------------------------------------------------- |
+| `kwt sync serve`            | Run the hub HTTP server in the foreground.                                |
+| `kwt sync publish`          | Build and publish the local manifest.                                     |
+| `kwt sync status`           | Publish best-effort, fetch hub state, and render the multi-machine table. |
+| `kwt sync forget <host_id>` | Ask the hub to delete a retired host.                                     |
 
 Existing worktree mutation commands should publish after successful local
 mutations when multi-machine sync is enabled. Publish failures must not fail the
@@ -158,7 +158,7 @@ then rename over `state.json`.
 
 ## Multi-machine view
 
-For each row, `kwt fleet status` can show:
+For each row, `kwt sync status` can show:
 
 - project identity and display name;
 - branch or detached head;

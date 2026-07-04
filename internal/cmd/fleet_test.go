@@ -14,12 +14,13 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
-func TestFleetCmdRegisteredWithSubcommands(t *testing.T) {
-	cmd := findFleetSubcommand(rootCmd, "fleet")
+func TestSyncCmdRegisteredWithSubcommands(t *testing.T) {
+	cmd := findFleetSubcommand(rootCmd, "sync")
 	require.NotNil(t, cmd)
+	assert.Nil(t, findFleetSubcommand(rootCmd, "fleet"))
 
 	for _, name := range []string{"serve", "publish", "status", "forget"} {
-		assert.NotNil(t, findFleetSubcommand(cmd, name), "missing fleet %s subcommand", name)
+		assert.NotNil(t, findFleetSubcommand(cmd, name), "missing sync %s subcommand", name)
 	}
 }
 
@@ -73,7 +74,7 @@ func TestFleetStatusPublishesBeforeRenderingAndContinuesOnPublishWarning(t *test
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"builder", "publish", "client", "state"}, sequence)
-	assert.Contains(t, stderr.String(), "warning: fleet publish failed: publish failed")
+	assert.Contains(t, stderr.String(), "warning: sync publish failed: publish failed")
 	assert.Contains(t, stdout.String(), "kwt")
 	assert.Contains(t, stdout.String(), "differs from host-b")
 }
@@ -115,7 +116,7 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 		err := runFleetPublish(cmd, nil)
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "fleet sync is disabled")
+		assert.Contains(t, err.Error(), "multi-machine sync is disabled")
 	})
 
 	t.Run("missing token", func(t *testing.T) {
@@ -136,7 +137,7 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 		err := runFleetPublish(cmd, nil)
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "fleet token is not configured")
+		assert.Contains(t, err.Error(), "sync token is not configured")
 	})
 }
 

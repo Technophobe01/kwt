@@ -18,16 +18,16 @@ One machine runs the hub. Every enabled machine, including the hub machine,
 publishes a local manifest. The hub stores the latest manifest for each host and
 serves a grouped multi-machine view.
 
-The public command namespace is `kwt fleet` for now:
+The public command namespace is `kwt sync`:
 
 ```sh
-kwt fleet serve
-kwt fleet publish
-kwt fleet status
-kwt fleet forget <host-id>
+kwt sync serve
+kwt sync publish
+kwt sync status
+kwt sync forget <host-id>
 ```
 
-`kwt fleet status` publishes this host best-effort before reading the hub. Worktree
+`kwt sync status` publishes this host best-effort before reading the hub. Worktree
 mutation commands also publish after successful local changes when multi-machine
 sync is enabled.
 
@@ -67,7 +67,7 @@ the commits needed to prove that relationship.
 The hub keeps the latest manifest per host until you remove it:
 
 ```sh
-kwt fleet forget old-host
+kwt sync forget old-host
 ```
 
 Use this when a machine is retired or renamed so old observations stop appearing

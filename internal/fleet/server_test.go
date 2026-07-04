@@ -28,7 +28,7 @@ func TestServerPingUnauthenticated(t *testing.T) {
 	srv := NewServer(ServerOptions{
 		Store:   NewMemoryStoreForTest(),
 		Token:   "secret",
-		Service: "kwt-fleet-test",
+		Service: "kwt-sync-test",
 		Version: "test-version",
 		PID:     123,
 	})
@@ -42,9 +42,22 @@ func TestServerPingUnauthenticated(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, true, body["ok"])
-	assert.Equal(t, "kwt-fleet-test", body["service"])
+	assert.Equal(t, "kwt-sync-test", body["service"])
 	assert.Equal(t, "test-version", body["version"])
 	assert.Equal(t, float64(123), body["pid"])
+}
+
+func TestServerPingDefaultsToSyncService(t *testing.T) {
+	srv := NewServer(ServerOptions{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil)
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "kwt-sync", body["service"])
 }
 
 func TestServerStoresManifestAndReturnsGroupedStateWithETag(t *testing.T) {

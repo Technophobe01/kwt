@@ -178,7 +178,7 @@ func TestPublishBestEffortWarnsAndReturnsNilOnUnreachableHub(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, builder.calls)
-	assert.Contains(t, warn.String(), "warning: fleet publish failed:")
+	assert.Contains(t, warn.String(), "warning: sync publish failed:")
 	assert.Less(t, len(warn.String()), 240)
 }
 
@@ -210,7 +210,7 @@ func TestPublishBestEffortWarnsOnBuilderFailure(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, builder.calls)
-	assert.Contains(t, warn.String(), "warning: fleet publish failed:")
+	assert.Contains(t, warn.String(), "warning: sync publish failed:")
 	assert.Contains(t, warn.String(), "build failed")
 }
 
@@ -233,7 +233,7 @@ func TestPublishBestEffortReturnsOnCallerDeadlineWhenBuilderIgnoresContext(t *te
 
 	require.NoError(t, err)
 	assert.Less(t, elapsed, 80*time.Millisecond)
-	assert.Contains(t, warn.String(), "warning: fleet publish failed:")
+	assert.Contains(t, warn.String(), "warning: sync publish failed:")
 	assert.Contains(t, warn.String(), context.DeadlineExceeded.Error())
 }
 

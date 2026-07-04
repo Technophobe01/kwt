@@ -19,7 +19,7 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
-const fleetServiceName = "kwt-fleet"
+const syncServiceName = "kwt-sync"
 
 type fleetHubClient interface {
 	Publish(context.Context, fleet.Manifest) error
@@ -42,43 +42,43 @@ var (
 	fleetHostname                    = os.Hostname
 )
 
-var fleetCmd = &cobra.Command{
-	Use:   "fleet",
-	Short: "Sync worktree status across hosts",
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync worktree metadata across machines",
 	Args:  cobra.NoArgs,
 }
 
-var fleetServeCmd = &cobra.Command{
+var syncServeCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Run the fleet hub in the foreground",
+	Short: "Run the sync hub in the foreground",
 	Args:  cobra.NoArgs,
 	RunE:  runFleetServe,
 }
 
-var fleetPublishCmd = &cobra.Command{
+var syncPublishCmd = &cobra.Command{
 	Use:   "publish",
-	Short: "Publish this host's fleet manifest",
+	Short: "Publish this host's sync manifest",
 	Args:  cobra.NoArgs,
 	RunE:  runFleetPublish,
 }
 
-var fleetStatusCmd = &cobra.Command{
+var syncStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show fleet worktree status",
+	Short: "Show multi-machine sync status",
 	Args:  cobra.NoArgs,
 	RunE:  runFleetStatus,
 }
 
-var fleetForgetCmd = &cobra.Command{
+var syncForgetCmd = &cobra.Command{
 	Use:   "forget <host-id>",
-	Short: "Remove a host from the fleet hub",
+	Short: "Remove a host from the sync hub",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runFleetForget,
 }
 
 func init() {
-	rootCmd.AddCommand(fleetCmd)
-	fleetCmd.AddCommand(fleetServeCmd, fleetPublishCmd, fleetStatusCmd, fleetForgetCmd)
+	rootCmd.AddCommand(syncCmd)
+	syncCmd.AddCommand(syncServeCmd, syncPublishCmd, syncStatusCmd, syncForgetCmd)
 }
 
 func runFleetServe(cmd *cobra.Command, args []string) error {
@@ -107,14 +107,14 @@ func runFleetPublish(cmd *cobra.Command, args []string) error {
 	}
 	builder := newFleetManifestBuilder()
 	if builder == nil {
-		return errors.New("fleet manifest builder is not configured")
+		return errors.New("sync manifest builder is not configured")
 	}
 	manifest, err := builder.Build(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
 	if manifest == nil {
-		return errors.New("fleet manifest builder returned nil manifest")
+		return errors.New("sync manifest builder returned nil manifest")
 	}
 	return client.Publish(cmd.Context(), *manifest)
 }
@@ -166,7 +166,7 @@ func runFleetForget(cmd *cobra.Command, args []string) error {
 
 func requireFleetEnabled(cfg *models.Config) error {
 	if cfg == nil || !cfg.Fleet.Enabled {
-		return errors.New("fleet sync is disabled")
+		return errors.New("multi-machine sync is disabled")
 	}
 	return nil
 }
@@ -182,7 +182,7 @@ func defaultPublishFleetBestEffortForCommand(cmd *cobra.Command, cfg *models.Con
 	}
 	var publishWarning bytes.Buffer
 	if publishErr := publishFleetBestEffort(ctx, cfg, builder, &publishWarning); publishErr != nil {
-		_, _ = fmt.Fprintf(&publishWarning, "warning: fleet publish failed: %v\n", publishErr)
+		_, _ = fmt.Fprintf(&publishWarning, "warning: sync publish failed: %v\n", publishErr)
 	}
 	if publishWarning.Len() > 0 {
 		_, _ = publishWarning.WriteTo(cmd.ErrOrStderr())
@@ -191,11 +191,11 @@ func defaultPublishFleetBestEffortForCommand(cmd *cobra.Command, cfg *models.Con
 
 func defaultNewFleetClientFromConfig(cfg *models.Config) (fleetHubClient, error) {
 	if cfg == nil {
-		return nil, errors.New("fleet config is not loaded")
+		return nil, errors.New("sync config is not loaded")
 	}
 	hubURL := fleet.EffectiveHubURL(cfg.Fleet)
 	if strings.TrimSpace(hubURL) == "" {
-		return nil, errors.New("fleet hub URL is not configured")
+		return nil, errors.New("sync hub URL is not configured")
 	}
 	token, err := fleet.LoadToken(cfg.Fleet)
 	if err != nil {
@@ -215,15 +215,15 @@ func currentFleetHostID(cfg *models.Config) (string, error) {
 
 func defaultServeFleetHub(ctx context.Context, cfg *models.Config) error {
 	if cfg == nil {
-		return errors.New("fleet config is not loaded")
+		return errors.New("sync config is not loaded")
 	}
 	listenAddr := strings.TrimSpace(cfg.Fleet.Hub.ListenAddr)
 	if listenAddr == "" {
-		return errors.New("fleet hub listen_addr is not configured")
+		return errors.New("sync hub listen_addr is not configured")
 	}
 	storePath := strings.TrimSpace(cfg.Fleet.Hub.StorePath)
 	if storePath == "" {
-		return errors.New("fleet hub store_path is not configured")
+		return errors.New("sync hub store_path is not configured")
 	}
 	token, err := fleet.LoadToken(cfg.Fleet)
 	if err != nil {
@@ -236,19 +236,19 @@ func defaultServeFleetHub(ctx context.Context, cfg *models.Config) error {
 
 	runtimeStore := daemon.RuntimeStore{
 		Dir:    filepath.Join(filepath.Dir(storePath), "runtime"),
-		Prefix: fleetServiceName,
+		Prefix: syncServiceName,
 	}
 	listener, err := daemon.Listen(ctx, endpoint, daemon.WithRuntimeStore(runtimeStore))
 	if err != nil {
-		return fmt.Errorf("listen fleet hub: %w", err)
+		return fmt.Errorf("listen sync hub: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
 
-	record := daemon.NewRuntimeRecord(fleetServiceName, version, endpoint)
+	record := daemon.NewRuntimeRecord(syncServiceName, version, endpoint)
 	record.Address = endpoint.ConfigAddress()
 	runtimePath, err := runtimeStore.Write(record)
 	if err != nil {
-		return fmt.Errorf("write fleet runtime record: %w", err)
+		return fmt.Errorf("write sync runtime record: %w", err)
 	}
 	defer func() { _ = os.Remove(runtimePath) }()
 
@@ -265,7 +265,7 @@ func defaultServeFleetHub(ctx context.Context, cfg *models.Config) error {
 	server := fleet.NewServer(fleet.ServerOptions{
 		Store:   fleet.NewFileStore(storePath),
 		Token:   token,
-		Service: fleetServiceName,
+		Service: syncServiceName,
 		Version: version,
 	})
 	if err := http.Serve(listener, server); err != nil {

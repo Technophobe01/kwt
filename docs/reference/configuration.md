@@ -82,7 +82,7 @@ spaces.
 ## Multi-machine sync config
 
 Multi-machine sync is an opt-in subsystem. The public command namespace is
-`kwt fleet`, and the config section is `[fleet]`.
+`kwt sync`, and the config section is `[fleet]`.
 
 ```toml
 [fleet]
