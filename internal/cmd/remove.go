@@ -346,7 +346,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 		if entry.RepositoryInfo != nil {
 			// Try to find repository in common locations
 			g := git.New(entry.Path)
-			if repoRootPath, err := g.GetRepositoryPath(); err == nil {
+			if repoRootPath, err := g.GetMainRepositoryPath(); err == nil {
 				repoPath = repoRootPath
 			}
 		}

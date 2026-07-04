@@ -729,6 +729,7 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
 	runTUITestGit(t, repoPath, "branch", "feature/studio-only")
 	baseDir := filepath.Join(t.TempDir(), "worktrees")
 	cfg := &models.Config{
