@@ -8,6 +8,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
@@ -157,17 +158,28 @@ func TestFormatRowChangesUsesFleetDirtyForRemoteOnlyRows(t *testing.T) {
 	assert.Equal(t, "clean", formatRowChanges(row))
 }
 
-func TestFormatSync(t *testing.T) {
-	assert.Equal(t, "?", formatSync(nil))
-	assert.Equal(t, "?", formatSync(&models.WorktreeStatus{Status: models.WorktreeStatusUnknown}))
-	assert.Equal(t, "↑0 ↓0", formatSync(&models.WorktreeStatus{
+func TestFormatPushPullStatus(t *testing.T) {
+	got, ok := formatPushPullStatus(nil)
+	assert.True(t, ok)
+	assert.Equal(t, "?", got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{Status: models.WorktreeStatusUnknown})
+	assert.True(t, ok)
+	assert.Equal(t, "?", got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{
 		Status:    models.WorktreeStatusClean,
 		GitStatus: models.GitStatus{},
-	}))
-	assert.Equal(t, "↑2 ↓3", formatSync(&models.WorktreeStatus{
+	})
+	assert.False(t, ok)
+	assert.Empty(t, got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{
 		Status:    models.WorktreeStatusModified,
 		GitStatus: models.GitStatus{Ahead: 2, Behind: 3},
-	}))
+	})
+	assert.True(t, ok)
+	assert.Equal(t, "↑2 ↓3", got)
 }
 
 func TestFormatMachinesShowsLocalAndRemoteHosts(t *testing.T) {
@@ -227,9 +239,23 @@ func TestRenderRowsAlignsBodyToHeaderColumns(t *testing.T) {
 	header := findLineContaining(lines, "REPO")
 	body := findLineContaining(lines, "test/layouts")
 
-	for _, value := range []string{"kwt", "test/layouts", "clean", "git ↑2 ↓1", "live"} {
+	for _, value := range []string{"kwt", "test/layouts", "clean", "↑2 ↓1", "live"} {
 		assert.Equal(t, visualIndex(header, columnForValue(value)), visualIndex(body, value), value)
 	}
+}
+
+func TestRenderRowsShowsLocalOnlyWhenPushPullIsZero(t *testing.T) {
+	row := testRow("kwt", "main", "/w/kwt/main")
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	body := findLineContaining(lines, "main")
+
+	require.NotEmpty(t, body)
+	assert.Contains(t, body, "local only")
+	assert.NotContains(t, body, "↑0 ↓0")
+	assert.NotContains(t, body, "git")
 }
 
 func columnForValue(value string) string {
@@ -240,7 +266,7 @@ func columnForValue(value string) string {
 		return "BRANCH"
 	case "clean":
 		return "CHANGES"
-	case "git ↑2 ↓1":
+	case "↑2 ↓1":
 		return "HEADS"
 	case "live":
 		return "WORKSPACE"

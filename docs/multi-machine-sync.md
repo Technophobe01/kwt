@@ -40,8 +40,10 @@ The dashboard is the main day-to-day surface. When multi-machine sync is enabled
 - Selected-row details show the source machine and path for remote-only rows.
 - Wide terminals may also show `MACHINES`; narrower terminals prioritize the
   worktree status columns and keep the table within roughly 100 columns.
-- `HEADS` reports Git upstream state for local-only rows and whether another
-  host observed a different head for multi-machine rows.
+- `HEADS` reports observed machine state. It shows `local only` or
+  `remote only` when a branch exists on only one side, `same` or `diff <host>`
+  when more than one machine reports the row, and nonzero Git push/pull counts
+  such as `↑2` or `↓1` for local-only rows.
 - `CHANGES` reports dirty state. Local dirty state is shown as counts such as
   `~3 ?2`; dirty state observed only on another machine is summarized as
   `remote ~3 ?2`, with the selected-row details naming the source host.

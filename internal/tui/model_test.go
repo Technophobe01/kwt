@@ -206,7 +206,7 @@ func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 	assert.NotContains(t, content, "MACHINES")
 	assert.Contains(t, content, "kwt")
 	assert.Contains(t, content, "feature/studio-only")
-	assert.Contains(t, content, "same")
+	assert.Contains(t, content, "remote only")
 	assert.NotContains(t, content, "hosts same")
 	assert.Contains(t, content, "remote")
 	assert.Contains(t, content, "s sync")

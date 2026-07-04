@@ -234,11 +234,23 @@ func formatChanges(status *models.WorktreeStatus) string {
 	return strings.Join(parts, " ")
 }
 
-func formatSync(status *models.WorktreeStatus) string {
+func formatPushPullStatus(status *models.WorktreeStatus) (string, bool) {
 	if status == nil || status.Status == models.WorktreeStatusUnknown {
-		return "?"
+		return "?", true
 	}
-	return fmt.Sprintf("↑%d ↓%d", status.GitStatus.Ahead, status.GitStatus.Behind)
+	ahead := status.GitStatus.Ahead
+	behind := status.GitStatus.Behind
+	if ahead == 0 && behind == 0 {
+		return "", false
+	}
+	parts := make([]string, 0, 2)
+	if ahead > 0 {
+		parts = append(parts, fmt.Sprintf("↑%d", ahead))
+	}
+	if behind > 0 {
+		parts = append(parts, fmt.Sprintf("↓%d", behind))
+	}
+	return strings.Join(parts, " "), true
 }
 
 func formatRowChanges(row Row) string {
@@ -316,10 +328,21 @@ func compactFleetDirtySummary(summary string) string {
 }
 
 func formatRowSync(row Row) string {
-	if row.Fleet != nil && row.Fleet.Sync != "" {
-		return formatFleetSync(row.Fleet.Sync)
+	if row.Fleet != nil {
+		if !row.Fleet.Local {
+			return "remote only"
+		}
+		if rowHasOtherHosts(row) {
+			if row.Fleet.Sync != "" {
+				return formatFleetSync(row.Fleet.Sync)
+			}
+			return "same"
+		}
 	}
-	return "git " + formatSync(row.Status)
+	if pushPull, ok := formatPushPullStatus(row.Status); ok {
+		return pushPull
+	}
+	return "local only"
 }
 
 func formatFleetSync(sync string) string {
@@ -354,6 +377,19 @@ func formatMachines(row Row) string {
 		return "local"
 	}
 	return strings.Join(hosts, ", ")
+}
+
+func rowHasOtherHosts(row Row) bool {
+	if row.Fleet == nil {
+		return false
+	}
+	for _, host := range row.Fleet.Hosts {
+		host = strings.TrimSpace(host)
+		if host != "" && host != "local" {
+			return true
+		}
+	}
+	return false
 }
 
 func formatRowActivity(row Row, now time.Time) string {
