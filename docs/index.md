@@ -13,8 +13,6 @@ tmux layouts, and small CLI commands that compose well in shell scripts. The
 default loop is intentionally direct: pick a branch, enter a workspace, and keep
 the code, shell, and agents close together.
 
-![kwt dashboard](assets/usage.gif)
-
 ## Start here
 
 ```sh
