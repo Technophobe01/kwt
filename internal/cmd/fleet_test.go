@@ -30,7 +30,7 @@ func TestFleetStatusPublishesBeforeRenderingAndContinuesOnPublishWarning(t *test
 	cfg := &models.Config{Fleet: models.FleetConfig{
 		Enabled: true,
 		HostID:  "host-a",
-		HubURL:  "http://fleet.example.test",
+		HubURL:  "http://hub.example.test",
 	}}
 	state := fleet.FleetState{Rows: []fleet.FleetRow{{
 		ProjectIdentity: "github.com/kenn-io/kwt",
@@ -85,7 +85,7 @@ func TestFleetForgetDeletesHost(t *testing.T) {
 	loadFleetConfig = func() (*models.Config, error) {
 		return &models.Config{Fleet: models.FleetConfig{
 			Enabled: true,
-			HubURL:  "http://fleet.example.test",
+			HubURL:  "http://hub.example.test",
 		}}, nil
 	}
 	newFleetClientFromConfig = func(*models.Config) (fleetHubClient, error) {
@@ -124,7 +124,7 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 		loadFleetConfig = func() (*models.Config, error) {
 			return &models.Config{Fleet: models.FleetConfig{
 				Enabled: true,
-				HubURL:  "http://fleet.example.test",
+				HubURL:  "http://hub.example.test",
 			}}, nil
 		}
 		newFleetManifestBuilder = func() fleet.ManifestBuildProvider {

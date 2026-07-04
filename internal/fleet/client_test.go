@@ -145,8 +145,8 @@ func TestClientForgetSendsDeleteWithBearerToken(t *testing.T) {
 }
 
 func TestClientEffectiveHubURL(t *testing.T) {
-	assert.Equal(t, "https://fleet.example.test", EffectiveHubURL(models.FleetConfig{
-		HubURL: " https://fleet.example.test ",
+	assert.Equal(t, "https://hub.example.test", EffectiveHubURL(models.FleetConfig{
+		HubURL: " https://hub.example.test ",
 		Hub:    models.FleetHubConfig{ListenAddr: "127.0.0.1:8787"},
 	}))
 	assert.Equal(t, "http://127.0.0.1:8787", EffectiveHubURL(models.FleetConfig{

@@ -3,7 +3,7 @@
 Multi-machine sync gives `kwt` a shared view of active worktrees across the
 trusted machines you use for development. It answers practical questions:
 
-- Which branches did I materialize on the Mac Studio?
+- Which branches did I materialize on the desktop?
 - Is this worktree missing on the laptop?
 - Did another host observe a different head for the same branch?
 - Which machine last saw dirty or untracked files?

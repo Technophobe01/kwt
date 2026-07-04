@@ -206,7 +206,7 @@ auto_mkdir = true
 [fleet]
 enabled = true
 host_id = "test-host"
-hub_url = "http://fleet.example.test"
+hub_url = "http://hub.example.test"
 token_env = "KWT_FLEET_TOKEN"
 
 [layouts]
