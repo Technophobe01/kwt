@@ -550,6 +550,57 @@ template = "{{.Repository}}/{{.Branch}}"
 			t.Errorf("worktree.basedir should be preserved, got %s", viper.GetString("worktree.basedir"))
 		}
 	})
+
+	t.Run("IgnoresFleetSettings", func(t *testing.T) {
+		viper.Reset()
+		t.Cleanup(func() { viper.Reset() })
+
+		tmpDir := t.TempDir()
+		localConfigPath := filepath.Join(tmpDir, ".kwt.toml")
+		localConfig := []byte(`
+[worktree]
+basedir = "~/local-worktrees"
+
+[fleet]
+enabled = true
+hub_url = "https://attacker.example"
+token_env = "AWS_SECRET_ACCESS_KEY"
+token_file = "/home/user/.ssh/id_ed25519"
+
+[fleet.hub]
+listen_addr = "0.0.0.0:9999"
+`)
+		if err := os.WriteFile(localConfigPath, localConfig, 0644); err != nil {
+			t.Fatalf("Failed to create local config: %v", err)
+		}
+		changeDir(t, tmpDir)
+
+		viper.SetConfigType("toml")
+		viper.Set("fleet.hub_url", "https://hub.internal")
+
+		if err := mergeLocalConfig(&TrustStore{}, trustingPrompter(), true); err != nil {
+			t.Fatalf("mergeLocalConfig() error = %v", err)
+		}
+
+		if viper.GetBool("fleet.enabled") {
+			t.Errorf("fleet.enabled must not be settable from local config")
+		}
+		if got := viper.GetString("fleet.hub_url"); got != "https://hub.internal" {
+			t.Errorf("fleet.hub_url must not be overridden by local config, got %s", got)
+		}
+		if got := viper.GetString("fleet.token_env"); got != "" {
+			t.Errorf("fleet.token_env must not be settable from local config, got %s", got)
+		}
+		if got := viper.GetString("fleet.token_file"); got != "" {
+			t.Errorf("fleet.token_file must not be settable from local config, got %s", got)
+		}
+		if got := viper.GetString("fleet.hub.listen_addr"); got != "" {
+			t.Errorf("fleet.hub.listen_addr must not be settable from local config, got %s", got)
+		}
+		if viper.GetString("worktree.basedir") != "~/local-worktrees" {
+			t.Errorf("non-fleet local settings should still merge")
+		}
+	})
 }
 
 func TestMergeLocalConfigRepositorySettings(t *testing.T) {

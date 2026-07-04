@@ -89,6 +89,8 @@ func getLocalConfigPath() string {
 //   - If interactive is false (non-TTY), unknown files are skipped with a stderr warning.
 //   - On user rejection, the file is skipped (command continues, global config only).
 //   - Trust store write failures are non-fatal (merge proceeds with a stderr warning).
+//   - fleet.* keys are always ignored: sync settings are global-only because they
+//     control token sources and the hub endpoint.
 //
 // For repository_settings, merging is done by the `repository` field as the key.
 func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive bool) error {
@@ -143,11 +145,16 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 	}
 
 	for _, key := range localViper.AllKeys() {
-		switch key {
-		case "repository_settings":
+		switch {
+		case key == "repository_settings":
 			mergeRepositorySettings(localViper)
-		case "projects":
+		case key == "projects":
 			continue
+		case key == "fleet" || strings.HasPrefix(key, "fleet."):
+			// Sync settings decide where bearer tokens are read from and
+			// which hub they are sent to; accepting them from a repo-local
+			// file would let a repository exfiltrate arbitrary secrets.
+			fmt.Fprintf(os.Stderr, "kwt: ignoring %q in %s: sync settings are global-only\n", key, absPath)
 		default:
 			viper.Set(key, localViper.Get(key))
 		}
