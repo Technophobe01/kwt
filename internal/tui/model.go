@@ -885,16 +885,71 @@ func renderLocalFleetDetails(row Row) string {
 		return ""
 	}
 	details := make([]string, 0, 3)
-	if machines := strings.TrimSpace(formatMachines(row)); machines != "" {
-		details = append(details, "machines "+machines)
+	otherHosts := localFleetOtherHosts(row)
+	if len(otherHosts) > 0 {
+		details = append(details, "also on "+strings.Join(otherHosts, ", "))
 	}
-	if sync := strings.TrimSpace(row.Fleet.Sync); sync != "" && sync != "same" {
-		details = append(details, "heads "+sync)
+	if sync := renderFleetSyncDetail(row.Fleet.Sync, otherHosts); sync != "" {
+		details = append(details, sync)
 	}
-	if dirty := strings.TrimSpace(row.Fleet.Dirty); dirty != "" && dirty != "clean" {
-		details = append(details, "changes "+dirty)
+	if dirty := renderFleetDirtyDetail(row.Fleet.Dirty, otherHosts); dirty != "" {
+		details = append(details, dirty)
 	}
 	return strings.Join(details, " · ")
+}
+
+func localFleetOtherHosts(row Row) []string {
+	if row.Fleet == nil {
+		return nil
+	}
+	hosts := make([]string, 0, len(row.Fleet.Hosts))
+	for _, host := range row.Fleet.Hosts {
+		host = strings.TrimSpace(host)
+		if host == "" || host == "local" {
+			continue
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+func renderFleetSyncDetail(sync string, otherHosts []string) string {
+	sync = strings.TrimSpace(sync)
+	if sync == "" || sync == "same" {
+		return ""
+	}
+	if different, ok := strings.CutPrefix(sync, "different: "); ok {
+		host, rest, _ := strings.Cut(strings.TrimSpace(different), " ")
+		rest = strings.TrimSpace(rest)
+		if len(otherHosts) == 1 && host == otherHosts[0] {
+			if rest == "" {
+				return "head differs"
+			}
+			return "head differs " + rest
+		}
+		return "head differs from " + strings.TrimSpace(different)
+	}
+	return "heads " + sync
+}
+
+func renderFleetDirtyDetail(dirty string, otherHosts []string) string {
+	dirty = strings.TrimSpace(dirty)
+	if dirty == "" || dirty == "clean" {
+		return ""
+	}
+	entries := parseFleetDirtyEntries(dirty)
+	if len(entries) == 0 {
+		return "changes " + dirty
+	}
+	if len(entries) == 1 {
+		entry := entries[0]
+		summary := compactFleetDirtySummary(entry.summary)
+		if len(otherHosts) == 1 && entry.host == otherHosts[0] {
+			return "remote changes " + summary
+		}
+		return fmt.Sprintf("changes on %s %s", entry.host, summary)
+	}
+	return fmt.Sprintf("remote changes on %d hosts", len(entries))
 }
 
 func (m Model) layoutLabel() string {

@@ -44,7 +44,7 @@ The dashboard is the main day-to-day surface. When multi-machine sync is enabled
   host observed a different head for multi-machine rows.
 - `CHANGES` reports dirty state. Local dirty state is shown as counts such as
   `~3 ?2`; dirty state observed only on another machine is summarized as
-  `host ~3 ?2`, with the selected-row details naming the source host.
+  `remote ~3 ?2`, with the selected-row details naming the source host.
 
 Select a remote-only branch row and press `s` to sync it onto the current
 machine using the matching local project root and normal worktree naming rules.

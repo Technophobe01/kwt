@@ -250,21 +250,69 @@ func formatRowChanges(row Row) string {
 	return formatChanges(row.Status)
 }
 
-var fleetDirtySummaryPattern = regexp.MustCompile(`\(([^()]*)\)`)
+var fleetDirtyEntryPattern = regexp.MustCompile(`([^,()]+)\s+\(([^()]*)\)`)
 
 func formatFleetDirty(dirty string) string {
 	dirty = strings.TrimSpace(dirty)
 	if dirty == "" || dirty == "clean" {
 		return dirty
 	}
-	matches := fleetDirtySummaryPattern.FindAllStringSubmatch(dirty, -1)
-	if len(matches) == 0 {
+	entries := parseFleetDirtyEntries(dirty)
+	if len(entries) == 0 {
 		return dirty
 	}
-	if len(matches) == 1 {
-		return "host " + strings.TrimSpace(matches[0][1])
+	if len(entries) == 1 {
+		return "remote " + compactFleetDirtySummary(entries[0].summary)
 	}
-	return fmt.Sprintf("%d hosts", len(matches))
+	return fmt.Sprintf("%d hosts dirty", len(entries))
+}
+
+type fleetDirtyEntry struct {
+	host    string
+	summary string
+}
+
+func parseFleetDirtyEntries(dirty string) []fleetDirtyEntry {
+	matches := fleetDirtyEntryPattern.FindAllStringSubmatch(dirty, -1)
+	entries := make([]fleetDirtyEntry, 0, len(matches))
+	for _, match := range matches {
+		host := strings.TrimSpace(match[1])
+		summary := strings.TrimSpace(match[2])
+		if host == "" || summary == "" {
+			continue
+		}
+		entries = append(entries, fleetDirtyEntry{host: host, summary: summary})
+	}
+	return entries
+}
+
+func compactFleetDirtySummary(summary string) string {
+	parts := strings.Split(summary, ", ")
+	compact := make([]string, 0, len(parts))
+	for _, part := range parts {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) < 2 {
+			compact = append(compact, part)
+			continue
+		}
+		count := fields[0]
+		label := strings.TrimSuffix(strings.ToLower(fields[1]), "s")
+		switch label {
+		case "staged", "added":
+			compact = append(compact, "+"+count)
+		case "modified":
+			compact = append(compact, "~"+count)
+		case "deleted":
+			compact = append(compact, "-"+count)
+		case "untracked":
+			compact = append(compact, "?"+count)
+		case "conflict":
+			compact = append(compact, "!"+count)
+		default:
+			compact = append(compact, part)
+		}
+	}
+	return strings.Join(compact, " ")
 }
 
 func formatRowSync(row Row) string {
@@ -401,10 +449,10 @@ var dashboardColumnSpecs = []tableColumnSpec{
 	{key: dashboardColumnRepo, header: "REPO", minWidth: 9, maxWidth: 14},
 	{key: dashboardColumnBranch, header: "BRANCH", minWidth: 16, maxWidth: 32},
 	{key: dashboardColumnMachines, header: "MACHINES", minWidth: 10, maxWidth: 16, wideOnly: true},
-	{key: dashboardColumnChanges, header: "CHANGES", minWidth: 7, maxWidth: 11},
+	{key: dashboardColumnChanges, header: "CHANGES", minWidth: 7, maxWidth: 12},
 	{key: dashboardColumnHeads, header: "HEADS", minWidth: 8, maxWidth: 18},
 	{key: dashboardColumnActivity, header: "ACTIVITY", minWidth: 8, maxWidth: 9},
-	{key: dashboardColumnWorkspace, header: "WORKSPACE", minWidth: 6, maxWidth: 9},
+	{key: dashboardColumnWorkspace, header: "WORKSPACE", minWidth: 9, maxWidth: 9},
 }
 
 func dashboardColumnsForWidth(width int) []tableColumn {

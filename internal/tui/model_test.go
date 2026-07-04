@@ -245,7 +245,11 @@ func TestModelDashboardFitsHundredColumnTerminal(t *testing.T) {
 	assert.Contains(t, header, "WORKSPACE")
 	assert.NotContains(t, header, "MACHINES")
 	assert.Contains(t, body, "live")
-	assert.Contains(t, stripANSI(viewContent(model)), "machines local, host-b")
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "also on host-b")
+	assert.Contains(t, content, "head differs 18h")
+	assert.Contains(t, content, "remote changes ~3 ?3")
+	assert.NotContains(t, content, "machines local")
 	assert.LessOrEqual(t, visibleWidth(header), 100, header)
 	assert.LessOrEqual(t, visibleWidth(body), 100, body)
 }
@@ -267,9 +271,12 @@ func TestModelSummarizesRemoteChangesInTableAndDetailsNameHost(t *testing.T) {
 	body := findLineContaining(lines, "feature/remote-dirty")
 
 	require.NotEmpty(t, body)
-	assert.Contains(t, body, "host ~3 ?3")
+	assert.Contains(t, body, "remote ~3 ?3")
 	assert.NotContains(t, body, "host-b")
-	assert.Contains(t, stripANSI(viewContent(model)), "changes host-b (~3 ?3)")
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "also on host-b")
+	assert.Contains(t, content, "remote changes ~3 ?3")
+	assert.NotContains(t, content, "changes host-b")
 }
 
 func TestModelCyclesLayoutSelection(t *testing.T) {
