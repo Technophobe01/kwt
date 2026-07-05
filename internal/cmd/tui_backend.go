@@ -534,10 +534,15 @@ func tuiFleetKeyForRow(row dashboard.Row) string {
 	if identity == "" && row.Entry.RepositoryInfo.Host != "" && row.Entry.RepositoryInfo.Owner != "" && row.Entry.RepositoryInfo.Repository != "" {
 		identity = path.Join(row.Entry.RepositoryInfo.Host, row.Entry.RepositoryInfo.Owner, row.Entry.RepositoryInfo.Repository)
 	}
-	if identity == "" || row.Entry.Branch == "" {
+	if identity == "" {
 		return ""
 	}
-	return tuiFleetKey(identity, "branch", row.Entry.Branch)
+	branch := strings.TrimSpace(row.Entry.Branch)
+	if branch == "" || branch == "HEAD" {
+		// Hub manifests key detached worktrees by commit SHA.
+		return tuiFleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
+	}
+	return tuiFleetKey(identity, "branch", branch)
 }
 
 func tuiFleetKey(projectIdentity string, kind string, ref string) string {

@@ -542,6 +542,63 @@ func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 	assert.Equal(t, "ddd", remote.Fleet.RemoteHead)
 }
 
+func TestTUIBackendListMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
+	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	headSHA := strings.Repeat("a", 40)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+	}
+	detachedEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "kwt",
+			FullPath:   "github.com/example/kwt",
+		},
+		Branch:     "HEAD",
+		CommitHash: headSHA,
+		Path:       "/repos/kwt-detached",
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{detachedEntry}, nil
+	}
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return map[string]*models.WorktreeStatus{
+			detachedEntry.Path: {Path: detachedEntry.Path},
+		}, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Rows: []fleet.FleetRow{{
+			ProjectIdentity: "github.com/example/kwt",
+			Kind:            "detached",
+			Ref:             headSHA,
+			Observations: []fleet.Observation{
+				{HostID: "host-a", Path: detachedEntry.Path, Head: headSHA, ObservedAt: observedAt},
+				{HostID: "host-b", Path: "/work/host-b/kwt-detached", Head: headSHA, ObservedAt: observedAt},
+			},
+		}}}, nil
+	}
+
+	rows, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "detached fleet row must merge with the local row, not duplicate it")
+	require.NotNil(t, rows[0].Entry)
+	require.NotNil(t, rows[0].Fleet)
+	assert.True(t, rows[0].Fleet.Local)
+	assert.Equal(t, []string{"host-b", "local"}, rows[0].Fleet.Hosts)
+}
+
 func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
 	repoPath := newTUITestRepo(t)
 	cfg := &models.Config{
