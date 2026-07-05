@@ -122,13 +122,18 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) [
 		}
 	}
 
-	rendered := fleet.BuildStatusRows(state, currentHost, b.now())
-	for i, fleetRow := range state.Rows {
+	now := b.now()
+	for _, fleetRow := range state.Rows {
 		// Local presence is decided by the rows just discovered on disk, not
 		// by hub observations for this host, which can be stale when a
 		// publish fails.
 		rowIndex, local := byKey[tuiFleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
-		info := dashboardFleetInfo(fleetRow, renderedStatusRow(rendered, i), currentHost, local)
+		var localRow dashboard.Row
+		if local {
+			localRow = rows[rowIndex]
+		}
+		fleetRow = localAwareFleetRow(fleetRow, currentHost, local, localRow, now)
+		info := dashboardFleetInfo(fleetRow, fleet.BuildStatusRow(fleetRow, currentHost, now), currentHost, local)
 		if info == nil {
 			continue
 		}
@@ -159,6 +164,55 @@ func fleetRowRef(row fleet.FleetRow) string {
 		ref = strings.TrimSpace(row.Branch)
 	}
 	return ref
+}
+
+// localAwareFleetRow rebuilds a hub row's observations around local
+// discovery: this host's hub observation is dropped (it may be stale when a
+// publish failed) and, when the row exists locally, replaced with what is on
+// disk right now, so Sync/Dirty/Freshness reflect reality.
+func localAwareFleetRow(
+	row fleet.FleetRow,
+	currentHost string,
+	local bool,
+	localRow dashboard.Row,
+	now time.Time,
+) fleet.FleetRow {
+	observations := make([]fleet.Observation, 0, len(row.Observations)+1)
+	for _, observation := range row.Observations {
+		if strings.TrimSpace(observation.HostID) == currentHost {
+			continue
+		}
+		observations = append(observations, observation)
+	}
+	if local {
+		if observation, ok := localFleetObservation(currentHost, localRow, now); ok {
+			observations = append(observations, observation)
+		}
+	}
+	row.Observations = observations
+	return row
+}
+
+func localFleetObservation(currentHost string, localRow dashboard.Row, now time.Time) (fleet.Observation, bool) {
+	if localRow.Entry == nil {
+		return fleet.Observation{}, false
+	}
+	head := strings.TrimSpace(localRow.Entry.CommitHash)
+	if head == "" {
+		return fleet.Observation{}, false
+	}
+	observation := fleet.Observation{
+		HostID:     currentHost,
+		Path:       localRow.Entry.Path,
+		Head:       head,
+		ObservedAt: now,
+	}
+	if localRow.Status != nil {
+		observation.LastActivity = localRow.Status.LastActivity
+	}
+	// Status is deliberately left zero: local dirt renders from the on-disk
+	// worktree status, keeping host-labeled fleet dirt scoped to other hosts.
+	return observation, true
 }
 
 func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
@@ -584,13 +638,6 @@ func tuiFleetKey(projectIdentity string, kind string, ref string) string {
 		return ""
 	}
 	return projectIdentity + "\x00" + kind + "\x00" + ref
-}
-
-func renderedStatusRow(rows []fleet.StatusRow, index int) fleet.StatusRow {
-	if index < 0 || index >= len(rows) {
-		return fleet.StatusRow{}
-	}
-	return rows[index]
 }
 
 func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string, local bool) *dashboard.FleetInfo {

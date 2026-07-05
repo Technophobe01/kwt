@@ -25,17 +25,22 @@ type StatusRow struct {
 func BuildStatusRows(state FleetState, currentHost string, now time.Time) []StatusRow {
 	rows := make([]StatusRow, 0, len(state.Rows))
 	for _, row := range state.Rows {
-		rows = append(rows, StatusRow{
-			Project:   renderProject(row),
-			Ref:       renderRef(row),
-			Local:     renderLocal(row.Observations, currentHost),
-			Hosts:     renderHosts(row.Observations),
-			Sync:      renderSync(row.Observations, currentHost, now),
-			Dirty:     renderDirty(row.Observations),
-			Freshness: renderFreshness(row.Observations, now),
-		})
+		rows = append(rows, BuildStatusRow(row, currentHost, now))
 	}
 	return rows
+}
+
+// BuildStatusRow converts one fleet row into a user-facing status row.
+func BuildStatusRow(row FleetRow, currentHost string, now time.Time) StatusRow {
+	return StatusRow{
+		Project:   renderProject(row),
+		Ref:       renderRef(row),
+		Local:     renderLocal(row.Observations, currentHost),
+		Hosts:     renderHosts(row.Observations),
+		Sync:      renderSync(row.Observations, currentHost, now),
+		Dirty:     renderDirty(row.Observations),
+		Freshness: renderFreshness(row.Observations, now),
+	}
 }
 
 // RenderStatusTable writes fleet status rows as a table.

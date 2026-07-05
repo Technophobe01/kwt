@@ -588,6 +588,107 @@ func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 	assert.Equal(t, "ddd", remote.Fleet.RemoteHead)
 }
 
+func TestTUIBackendListRendersFleetStatusFromLocalObservations(t *testing.T) {
+	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	headSHA := strings.Repeat("a", 40)
+	staleSHA := strings.Repeat("e", 40)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+	}
+	localEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "kwt",
+			FullPath:   "github.com/example/kwt",
+		},
+		Branch:     "main",
+		CommitHash: headSHA,
+		Path:       "/repos/kwt",
+		IsMain:     true,
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{localEntry}, nil
+	}
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return map[string]*models.WorktreeStatus{
+			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
+		}, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Rows: []fleet.FleetRow{
+			{
+				// Hub kept a stale head and phantom dirt for this host after
+				// a failed publish; host-b actually matches the on-disk head.
+				ProjectIdentity: "github.com/example/kwt",
+				Kind:            "branch",
+				Ref:             "main",
+				Branch:          "main",
+				Observations: []fleet.Observation{
+					{
+						HostID:     "host-a",
+						Path:       "/repos/kwt",
+						Head:       staleSHA,
+						Status:     fleet.ChangeStatus{Modified: 3},
+						ObservedAt: observedAt,
+					},
+					{HostID: "host-b", Path: "/work/host-b/kwt", Head: headSHA, ObservedAt: observedAt},
+				},
+			},
+			{
+				// Deleted locally; only the stale self-observation is dirty.
+				ProjectIdentity: "github.com/example/kwt",
+				Kind:            "branch",
+				Ref:             "feature/remote",
+				Branch:          "feature/remote",
+				Observations: []fleet.Observation{
+					{
+						HostID:     "host-a",
+						Path:       "/repos/kwt-feature-remote",
+						Head:       staleSHA,
+						Status:     fleet.ChangeStatus{Modified: 2},
+						ObservedAt: observedAt,
+					},
+					{HostID: "host-b", Path: "/work/host-b/kwt-feature-remote", Head: staleSHA, ObservedAt: observedAt},
+				},
+			},
+		}}, nil
+	}
+
+	rows, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	var local, remote dashboard.Row
+	for _, row := range rows {
+		if row.Entry != nil {
+			local = row
+		} else {
+			remote = row
+		}
+	}
+	require.NotNil(t, local.Fleet)
+	assert.Equal(t, "same", local.Fleet.Sync,
+		"sync must anchor at the on-disk head, not the stale hub head for this host")
+	assert.Equal(t, "clean", local.Fleet.Dirty,
+		"phantom dirt from a stale self-observation must not be rendered")
+	require.NotNil(t, remote.Fleet)
+	assert.Equal(t, "feature/remote", remote.Fleet.Ref)
+	assert.Equal(t, "clean", remote.Fleet.Dirty,
+		"a stale self-observation must not dirty a remote-only row")
+	assert.Equal(t, "same", remote.Fleet.Sync)
+}
+
 func TestTUIBackendListMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	headSHA := strings.Repeat("a", 40)
