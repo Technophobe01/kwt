@@ -202,6 +202,18 @@ func TestStorePutRejectsInvalidManifest(t *testing.T) {
 	}
 }
 
+func TestStorePutIdentityErrorDoesNotEchoSubmittedValue(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	manifest := testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")
+	manifest.Projects[0].Identity = "https://user:sekret-token@github.com/kenn-io/kwt.git"
+
+	err := store.Put(context.Background(), manifest)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "sekret-token",
+		"validation errors travel back in HTTP responses and must not echo credentials")
+}
+
 func TestStoreStateVersionDeterministicRegardlessOfWriteOrder(t *testing.T) {
 	ctx := context.Background()
 	first := testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")

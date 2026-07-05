@@ -350,11 +350,11 @@ func validateCanonicalIdentity(field string, identity string) error {
 		return fmt.Errorf("%s is required", field)
 	}
 	normalized, err := NormalizeRepositoryIdentity(identity)
-	if err != nil {
-		return fmt.Errorf("%s %q is not a canonical repository identity: %w", field, identity, err)
-	}
-	if normalized != identity {
-		return fmt.Errorf("%s %q must be normalized as %q", field, identity, normalized)
+	if err != nil || normalized != identity {
+		// The submitted value is deliberately omitted and the parse error is
+		// not wrapped: raw remote URLs can embed credentials, and this
+		// message travels back in the hub's HTTP response.
+		return fmt.Errorf("%s must be a canonical repository identity such as github.com/owner/repo", field)
 	}
 	return nil
 }
