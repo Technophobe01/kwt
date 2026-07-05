@@ -85,8 +85,8 @@ docs-serve:
 ## docs-check: Verify docs build
 docs-check: docs-build
 
-## docs-deploy: Deploy docs to Vercel
-docs-deploy:
+## docs-deploy: Build docs and deploy to Vercel
+docs-deploy: docs-build
 	@vercel deploy --prod
 
 ## lint: Run golangci-lint
