@@ -243,7 +243,9 @@ func TestParseHubEndpoint(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "loopback", raw: "127.0.0.1:8787"},
-		{name: "tailscale cgnat", raw: "100.64.1.2:8787"},
+		{name: "localhost", raw: "localhost:8787"},
+		{name: "tailscale cgnat", raw: "100.64.1.2:8787", wantErr: true},
+		{name: "private lan", raw: "192.168.1.10:8787", wantErr: true},
 		{name: "unspecified", raw: "0.0.0.0:8787", wantErr: true},
 		{name: "public", raw: "8.8.8.8:8787", wantErr: true},
 	}

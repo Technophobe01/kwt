@@ -59,10 +59,15 @@ func NewServer(opts ServerOptions) http.Handler {
 }
 
 // ParseHubEndpoint parses and validates a fleet hub listen endpoint.
+// TCP listeners are restricted to loopback: the hub speaks plain HTTP with
+// bearer auth, and clients refuse plaintext to non-loopback hosts, so a wider
+// bind would only expose the token-authenticated API in cleartext.
+// Multi-machine hubs are reached through a TLS endpoint (reverse proxy,
+// tailscale serve) that forwards to the loopback listener.
 func ParseHubEndpoint(raw string) (daemon.Endpoint, error) {
 	return daemon.ParseEndpoint(raw, daemon.ParseEndpointOptions{
 		DefaultTCPAddress: "",
-		TCPPolicy:         daemon.RequireNonPublic,
+		TCPPolicy:         daemon.RequireLoopback,
 	})
 }
 

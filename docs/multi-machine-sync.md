@@ -81,8 +81,8 @@ store_path = "~/.local/share/kwt/fleet/state.json"
 Use `token_file` or `token_env`; do not put the token inline in `config.toml`.
 Plain `http://` hub URLs are allowed only for loopback hosts. Use HTTPS for
 multi-machine hub URLs, typically by putting the loopback hub behind Tailscale
-Serve, Caddy, or an equivalent private TLS endpoint. The hub rejects public and
-unspecified listen addresses by default.
+Serve, Caddy, or an equivalent private TLS endpoint. The hub only accepts
+loopback listen addresses.
 
 ## Freshness and differences
 

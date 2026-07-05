@@ -44,10 +44,9 @@ node. For a loopback-only hub it may default an empty `hub_url` from
 that reaches the hub through a private TLS endpoint.
 
 Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
-deployment keeps the daemon listener private and exposes it through HTTPS for
-other machines. Plain HTTP bearer-token requests are valid only for loopback
-hub URLs, and the hub should reject public and unspecified listen addresses by
-default.
+deployment keeps the daemon listener on loopback and exposes it through HTTPS
+for other machines. Plain HTTP bearer-token requests are valid only for
+loopback hub URLs, and the hub rejects non-loopback listen addresses.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail
