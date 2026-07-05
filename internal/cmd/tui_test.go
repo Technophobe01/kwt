@@ -429,11 +429,57 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 	assert.Equal(t, "feature/studio-only", remote.Fleet.Branch)
 	assert.False(t, remote.Fleet.Local)
 	assert.Equal(t, []string{"host-b"}, remote.Fleet.Hosts)
+	assert.True(t, remote.Fleet.CanMaterialize,
+		"a registered project matches this identity, so sync must be offered")
 	assert.Equal(t, "host-b", remote.Fleet.MaterializeHost)
 	assert.Equal(t, "/work/host-b/kwt/feature-studio-only", remote.Fleet.RemotePath)
 	assert.Equal(t, "bbb", remote.Fleet.RemoteHead)
 	assert.Equal(t, "origin/feature/studio-only", remote.Fleet.RemoteUpstream)
 	assert.Equal(t, 2, remote.Fleet.RemoteAhead)
+}
+
+func TestTUIBackendListDoesNotOfferSyncWithoutRegisteredProject(t *testing.T) {
+	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Rows: []fleet.FleetRow{{
+			ProjectIdentity: "github.com/example/kwt",
+			ProjectName:     "kwt",
+			Kind:            "branch",
+			Ref:             "feature/studio-only",
+			Branch:          "feature/studio-only",
+			Observations: []fleet.Observation{{
+				HostID:     "host-b",
+				Path:       "/work/host-b/kwt/feature-studio-only",
+				Head:       "bbb",
+				ObservedAt: observedAt,
+			}},
+		}}}, nil
+	}
+
+	rows, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].Fleet)
+	assert.False(t, rows[0].Fleet.CanMaterialize,
+		"sync must not be offered when no registered project can host the worktree")
 }
 
 func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
@@ -943,6 +989,63 @@ func TestApplyProjectIdentityFallbackPrefersConfiguredIdentityOverForkOrigin(t *
 	require.NotNil(t, entries[0].RepositoryInfo)
 	assert.Equal(t, "github.com/kenn-io/kwt", entries[0].RepositoryInfo.FullPath,
 		"manifest publishing keys rows by project.Repository, so discovery must too")
+}
+
+func TestApplyProjectIdentityFallbackKeepsOriginForLocalPathLikeIdentity(t *testing.T) {
+	forkInfo, err := url.ParseRepositoryURL("https://github.com/fork/kwt.git")
+	require.NoError(t, err)
+	entries := []*discovery.GlobalWorktreeEntry{{
+		RepositoryURL:  "https://github.com/fork/kwt.git",
+		RepositoryInfo: forkInfo,
+		Branch:         "main",
+		Path:           "/repos/kwt",
+	}}
+
+	entries = applyProjectIdentityFallback(entries, models.Project{
+		Repository: "local/Users/test/kwt",
+		Name:       "kwt",
+		Path:       "/repos/kwt",
+	})
+
+	require.NotNil(t, entries[0].RepositoryInfo)
+	assert.Equal(t, "github.com/fork/kwt", entries[0].RepositoryInfo.FullPath,
+		"identities that never reach the hub must not displace the origin identity that does")
+}
+
+func TestTUIBackendLaunchRegistrationUpgradesLocalPathLikeIdentityToOrigin(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+		Projects: []models.Project{{
+			Repository: "local/Users/test/service-api",
+			Name:       "service-api",
+			Path:       repoPath,
+		}},
+	}
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryURL: "https://github.com/example/service-api.git",
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "example",
+			Repository: "service-api",
+			FullPath:   "github.com/example/service-api",
+		},
+		Branch: "main",
+		Path:   repoPath,
+		IsMain: true,
+	}
+	var registered []models.Project
+	backend := newTUIBackendWithLaunchDir(cfg, repoPath)
+	backend.registerProject = func(project models.Project) error {
+		registered = append(registered, project)
+		return nil
+	}
+
+	backend.registerLaunchProject([]*discovery.GlobalWorktreeEntry{launchEntry})
+
+	require.Len(t, registered, 1)
+	assert.Equal(t, "github.com/example/service-api", registered[0].Repository,
+		"local/... identities never reach the hub and should upgrade to the origin identity")
 }
 
 func TestApplyProjectIdentityFallbackKeepsOriginForPathBackedProjects(t *testing.T) {

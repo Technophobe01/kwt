@@ -136,6 +136,13 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) [
 			rows[rowIndex].Fleet = info
 			continue
 		}
+		if info.CanMaterialize {
+			// MaterializeWorktree needs a registered local project to add
+			// the worktree from; do not advertise sync without one.
+			if _, ok := b.projectForFleetInfo(info); !ok {
+				info.CanMaterialize = false
+			}
+		}
 		if len(info.Hosts) == 0 {
 			// Only this host's own stale observation backs the row and the
 			// worktree is gone locally; nothing real to show.
@@ -178,7 +185,7 @@ func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEn
 	if !ok {
 		return
 	}
-	if existing, found := b.projectByPath(project.Path); found && shouldReuseExistingProject(existing) {
+	if existing, found := b.projectByPath(project.Path); found && shouldReuseExistingProject(existing, project) {
 		project = existing
 	}
 	if err := b.registerProject(project); err != nil {
@@ -252,11 +259,22 @@ func sameRegisteredProject(a, b models.Project) bool {
 	return false
 }
 
-func shouldReuseExistingProject(existing models.Project) bool {
-	// A stable registered identity is authoritative: manifest publishing
+func shouldReuseExistingProject(existing, discovered models.Project) bool {
+	// A publish-canonical identity is authoritative: manifest publishing
 	// prefers project.Repository over origin, so launch registration must
 	// not replace it with an origin-derived identity (e.g. a fork remote).
-	return hasStableProjectIdentity(existing)
+	// Weaker identities (path-like, local/...) never reach the hub, so an
+	// origin-derived identity may upgrade them — but a path fallback must
+	// not downgrade a stable one.
+	if hasPublishableProjectIdentity(existing) {
+		return true
+	}
+	return hasStableProjectIdentity(existing) && !hasStableProjectIdentity(discovered)
+}
+
+func hasPublishableProjectIdentity(project models.Project) bool {
+	_, ok := fleet.CanonicalRepositoryIdentity(project.Repository)
+	return ok
 }
 
 func hasStableProjectIdentity(project models.Project) bool {
@@ -311,10 +329,12 @@ func applyProjectIdentityFallback(
 		return entries
 	}
 	// Manifest publishing prefers the configured project.Repository over the
-	// origin URL. Mirror that precedence here so local rows and hub rows
-	// agree on identity even when origin points at a fork; origin-derived
-	// info only survives when the configured identity is path-backed.
-	override := hasStableProjectIdentity(project)
+	// origin URL only when it is publish-canonical. Mirror that precedence
+	// here so local rows and hub rows agree on identity: a canonical
+	// configured identity overrides a fork origin, while path-like or
+	// local/... identities never reach the hub and must not displace the
+	// origin-derived identity that does.
+	override := hasPublishableProjectIdentity(project)
 	for _, entry := range entries {
 		if entry == nil {
 			continue
