@@ -178,7 +178,7 @@ func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEn
 	if !ok {
 		return
 	}
-	if existing, found := b.projectByPath(project.Path); found && shouldReuseExistingProject(existing, project) {
+	if existing, found := b.projectByPath(project.Path); found && shouldReuseExistingProject(existing) {
 		project = existing
 	}
 	if err := b.registerProject(project); err != nil {
@@ -252,8 +252,11 @@ func sameRegisteredProject(a, b models.Project) bool {
 	return false
 }
 
-func shouldReuseExistingProject(existing, discovered models.Project) bool {
-	return hasStableProjectIdentity(existing) && !hasStableProjectIdentity(discovered)
+func shouldReuseExistingProject(existing models.Project) bool {
+	// A stable registered identity is authoritative: manifest publishing
+	// prefers project.Repository over origin, so launch registration must
+	// not replace it with an origin-derived identity (e.g. a fork remote).
+	return hasStableProjectIdentity(existing)
 }
 
 func hasStableProjectIdentity(project models.Project) bool {
@@ -303,15 +306,23 @@ func applyProjectIdentityFallback(
 	entries []*discovery.GlobalWorktreeEntry,
 	project models.Project,
 ) []*discovery.GlobalWorktreeEntry {
-	fallback := repositoryInfoFromProject(project)
-	if fallback == nil {
+	info := repositoryInfoFromProject(project)
+	if info == nil {
 		return entries
 	}
+	// Manifest publishing prefers the configured project.Repository over the
+	// origin URL. Mirror that precedence here so local rows and hub rows
+	// agree on identity even when origin points at a fork; origin-derived
+	// info only survives when the configured identity is path-backed.
+	override := hasStableProjectIdentity(project)
 	for _, entry := range entries {
-		if entry == nil || entry.RepositoryURL != "" {
+		if entry == nil {
 			continue
 		}
-		entry.RepositoryInfo = fallback
+		if entry.RepositoryURL != "" && !override {
+			continue
+		}
+		entry.RepositoryInfo = info
 	}
 	return entries
 }

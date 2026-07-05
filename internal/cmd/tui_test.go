@@ -886,6 +886,86 @@ func TestTUIBackendLaunchRegistrationUpgradesPathFallbackToRemoteIdentity(t *tes
 	assert.Equal(t, "github.com/example/service-api", cfg.Projects[0].Repository)
 }
 
+func TestTUIBackendLaunchRegistrationKeepsConfiguredIdentityOverForkOrigin(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+		Projects: []models.Project{{
+			Repository: "github.com/kenn-io/service-api",
+			Name:       "service-api",
+			Path:       repoPath,
+		}},
+	}
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryURL: "https://github.com/fork/service-api.git",
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "fork",
+			Repository: "service-api",
+			FullPath:   "github.com/fork/service-api",
+		},
+		Branch: "main",
+		Path:   repoPath,
+		IsMain: true,
+	}
+	var registered []models.Project
+	backend := newTUIBackendWithLaunchDir(cfg, repoPath)
+	backend.registerProject = func(project models.Project) error {
+		registered = append(registered, project)
+		return nil
+	}
+
+	backend.registerLaunchProject([]*discovery.GlobalWorktreeEntry{launchEntry})
+
+	require.Len(t, registered, 1)
+	assert.Equal(t, "github.com/kenn-io/service-api", registered[0].Repository,
+		"a stable configured identity must not be replaced by a fork origin")
+	require.Len(t, cfg.Projects, 1)
+	assert.Equal(t, "github.com/kenn-io/service-api", cfg.Projects[0].Repository)
+}
+
+func TestApplyProjectIdentityFallbackPrefersConfiguredIdentityOverForkOrigin(t *testing.T) {
+	forkInfo, err := url.ParseRepositoryURL("https://github.com/fork/kwt.git")
+	require.NoError(t, err)
+	entries := []*discovery.GlobalWorktreeEntry{{
+		RepositoryURL:  "https://github.com/fork/kwt.git",
+		RepositoryInfo: forkInfo,
+		Branch:         "main",
+		Path:           "/repos/kwt",
+	}}
+
+	entries = applyProjectIdentityFallback(entries, models.Project{
+		Repository: "github.com/kenn-io/kwt",
+		Name:       "kwt",
+		Path:       "/repos/kwt",
+	})
+
+	require.NotNil(t, entries[0].RepositoryInfo)
+	assert.Equal(t, "github.com/kenn-io/kwt", entries[0].RepositoryInfo.FullPath,
+		"manifest publishing keys rows by project.Repository, so discovery must too")
+}
+
+func TestApplyProjectIdentityFallbackKeepsOriginForPathBackedProjects(t *testing.T) {
+	forkInfo, err := url.ParseRepositoryURL("https://github.com/fork/kwt.git")
+	require.NoError(t, err)
+	entries := []*discovery.GlobalWorktreeEntry{{
+		RepositoryURL:  "https://github.com/fork/kwt.git",
+		RepositoryInfo: forkInfo,
+		Branch:         "main",
+		Path:           "/repos/kwt",
+	}}
+
+	entries = applyProjectIdentityFallback(entries, models.Project{
+		Repository: "/repos/kwt",
+		Name:       "kwt",
+		Path:       "/repos/kwt",
+	})
+
+	require.NotNil(t, entries[0].RepositoryInfo)
+	assert.Equal(t, "github.com/fork/kwt", entries[0].RepositoryInfo.FullPath,
+		"a path-backed configured identity must not displace a real remote identity")
+}
+
 func TestHasStableProjectIdentityRejectsAbsolutePathFallbacks(t *testing.T) {
 	tests := []struct {
 		name       string
