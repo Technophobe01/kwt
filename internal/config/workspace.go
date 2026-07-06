@@ -21,7 +21,10 @@ func RegisterWorkspace(workspace models.Workspace) (models.Workspace, error) {
 		return models.Workspace{}, err
 	}
 	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
+	if err != nil {
+		return models.Workspace{}, fmt.Errorf("workspace path %s: %w", workspace.Path, err)
+	}
+	if !info.IsDir() {
 		return models.Workspace{}, fmt.Errorf("workspace path %s is not a directory", workspace.Path)
 	}
 	workspace.Path = path

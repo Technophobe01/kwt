@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,7 +52,33 @@ func TestRegisterWorkspaceRejectsMissingPath(t *testing.T) {
 	_, err := RegisterWorkspace(models.Workspace{Path: filepath.Join(t.TempDir(), "absent")})
 
 	require.Error(t, err)
+	assert.True(t, os.IsNotExist(errors.Unwrap(err)),
+		"a missing path must wrap the underlying stat error, not report it as a non-directory")
+}
+
+func TestRegisterWorkspaceRejectsFile(t *testing.T) {
+	workspaceTestEnv(t)
+	file := filepath.Join(t.TempDir(), "notes.txt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+
+	_, err := RegisterWorkspace(models.Workspace{Path: file})
+
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
+}
+
+func TestRegisterWorkspaceWrapsStatErrorWhenParentIsFile(t *testing.T) {
+	workspaceTestEnv(t)
+	file := filepath.Join(t.TempDir(), "notes.txt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+
+	_, err := RegisterWorkspace(models.Workspace{Path: filepath.Join(file, "child")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workspace path")
+	assert.NotContains(t, err.Error(), "is not a directory",
+		"a stat failure must report the underlying error, not the not-a-directory message")
+	assert.Error(t, errors.Unwrap(err), "the stat error must be wrapped for errors.Is/As")
 }
 
 func TestRegisterWorkspaceUpdatesNameForSamePath(t *testing.T) {

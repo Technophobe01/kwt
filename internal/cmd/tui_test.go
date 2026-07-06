@@ -1930,6 +1930,116 @@ func TestTUIBackendAutoRegistersNonGitLaunchDir(t *testing.T) {
 	assert.Equal(t, launchDir, registered[0].Path)
 }
 
+func TestTUIBackendSkipsAutoRegisterWhenAlreadyRegisteredWithCustomName(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: "/global"},
+		Workspaces: []models.Workspace{{Name: "mynotes", Path: launchDir}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	called := false
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		called = true
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.False(t, called, "an already-registered launch dir must not be re-registered")
+	require.Len(t, cfg.Workspaces, 1)
+	assert.Equal(t, "mynotes", cfg.Workspaces[0].Name,
+		"a custom workspace name must survive the auto-registration refresh")
+}
+
+func TestTUIBackendAutoRegistersLaunchWorkspaceOnlyOnce(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	registrations := 0
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		registrations++
+		return workspace, nil
+	}
+	backend.unregisterWorkspace = func(name string) error { return nil }
+
+	_, _, err := backend.List(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, registrations)
+
+	require.NoError(t, backend.UnregisterWorkspace(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: filepath.Base(launchDir), Path: launchDir},
+	}))
+	assert.Empty(t, cfg.Workspaces, "unregister must drop the in-memory entry")
+
+	_, _, err = backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, registrations,
+		"a second refresh must not re-register the launch workspace after it was unregistered")
+	assert.Empty(t, cfg.Workspaces,
+		"the unregistered launch workspace must not reappear on the next refresh")
+}
+
+func TestTUIBackendNeverRegistersWorkspaceForGitLaunchDir(t *testing.T) {
+	launchDir := "/repos/other"
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{Host: "github.com", Owner: "example", Repository: "other"},
+		Branch:         "main",
+		Path:           launchDir,
+		IsMain:         true,
+	}
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{launchEntry}, nil
+	}
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		t.Fatalf("a git launch directory must never be registered as a workspace, got %v", workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Workspaces)
+}
+
 func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2028,6 +2138,7 @@ func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("KWT_HOME", filepath.Join(home, ".config", "kwt"))
 
 	workspaceDir := t.TempDir()
 	localTOML := []byte("[layouts]\ndefault = \"focus\"\n")

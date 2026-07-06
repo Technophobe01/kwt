@@ -26,19 +26,20 @@ import (
 )
 
 type tuiBackend struct {
-	cfg                      *models.Config
-	tmux                     *tmux.TmuxCommand
-	launchDir                string
-	discoverGlobalWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
-	discoverProjectWorktrees func(string) ([]*discovery.GlobalWorktreeEntry, error)
-	discoverLaunchWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
-	collectStatuses          func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
-	listSessions             func() ([]string, error)
-	registerProject          func(models.Project) error
-	registerWorkspace        func(models.Workspace) (models.Workspace, error)
-	unregisterWorkspace      func(name string) error
-	readFleetState           func(context.Context, *models.Config) (fleet.FleetState, error)
-	now                      func() time.Time
+	cfg                       *models.Config
+	tmux                      *tmux.TmuxCommand
+	launchDir                 string
+	launchWorkspaceRegistered bool
+	discoverGlobalWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
+	discoverProjectWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
+	discoverLaunchWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
+	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
+	listSessions              func() ([]string, error)
+	registerProject           func(models.Project) error
+	registerWorkspace         func(models.Workspace) (models.Workspace, error)
+	unregisterWorkspace       func(name string) error
+	readFleetState            func(context.Context, *models.Config) (fleet.FleetState, error)
+	now                       func() time.Time
 }
 
 func newTUIBackend(cfg *models.Config) *tuiBackend {
@@ -284,12 +285,25 @@ func (b *tuiBackend) workspaceRows(sessions []string) []dashboard.Row {
 // registerLaunchWorkspace records a non-git launch directory as a workspace,
 // best-effort, mirroring launch-repo project registration. The home directory
 // is never auto-registered: running kwt from ~ is common and would create a
-// junk entry.
+// junk entry. Registration is attempted at most once per backend lifetime, so
+// a later refresh never re-registers a workspace the user just unregistered
+// in the TUI, and the global config is not rewritten on every List call.
 func (b *tuiBackend) registerLaunchWorkspace(launchEntries []*discovery.GlobalWorktreeEntry) {
+	if b.launchWorkspaceRegistered {
+		return
+	}
+	b.launchWorkspaceRegistered = true
+
 	if b.registerWorkspace == nil || b.launchDir == "" || len(launchEntries) > 0 {
 		return
 	}
 	if home, err := os.UserHomeDir(); err == nil && samePath(home, b.launchDir) {
+		return
+	}
+	if launchDirAlreadyRegistered(b.cfg, b.launchDir) {
+		// Preserve a custom name set via `kwt workspace add --name`: the
+		// same-path branch of config.RegisterWorkspace would otherwise
+		// overwrite it with the directory's defaulted base name.
 		return
 	}
 	stored, err := b.registerWorkspace(models.Workspace{Path: b.launchDir})
@@ -297,6 +311,18 @@ func (b *tuiBackend) registerLaunchWorkspace(launchEntries []*discovery.GlobalWo
 		return
 	}
 	b.cfg.Workspaces = upsertWorkspace(b.cfg.Workspaces, stored)
+}
+
+func launchDirAlreadyRegistered(cfg *models.Config, launchDir string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, workspace := range cfg.Workspaces {
+		if samePath(workspace.Path, launchDir) {
+			return true
+		}
+	}
+	return false
 }
 
 func upsertWorkspace(workspaces []models.Workspace, workspace models.Workspace) []models.Workspace {
