@@ -80,6 +80,35 @@ func TestFleetStatusPublishesBeforeRenderingAndContinuesOnPublishWarning(t *test
 	assert.NotContains(t, stdout.String(), "differs from")
 }
 
+func TestFleetStatusSurfacesHubWarnings(t *testing.T) {
+	resetFleetCommandDeps(t)
+
+	cfg := &models.Config{Fleet: models.FleetConfig{
+		Enabled: true,
+		HostID:  "host-a",
+		HubURL:  "http://hub.example.test",
+	}}
+	state := fleet.FleetState{Warnings: []fleet.Warning{{
+		Code:    "host_id_collision",
+		HostID:  "same",
+		Message: "multiple machines are publishing as host ID \"same\"",
+	}}}
+	client := &stubFleetClient{state: state}
+
+	loadFleetConfig = func() (*models.Config, error) { return cfg, nil }
+	publishFleetBestEffort = func(context.Context, *models.Config, fleet.ManifestBuildProvider, *bytes.Buffer) error {
+		return nil
+	}
+	newFleetClientFromConfig = func(*models.Config) (fleetHubClient, error) { return client, nil }
+
+	cmd, _, stderr := fleetTestCommand()
+	err := runFleetStatus(cmd, nil)
+
+	require.NoError(t, err)
+	assert.Contains(t, stderr.String(),
+		`warning: multiple machines are publishing as host ID "same" (host same)`)
+}
+
 func TestFleetForgetDeletesHost(t *testing.T) {
 	resetFleetCommandDeps(t)
 

@@ -39,8 +39,9 @@ type confirmState struct {
 }
 
 type rowsMsg struct {
-	rows []Row
-	err  error
+	rows     []Row
+	warnings []string
+	err      error
 }
 
 type actionDoneMsg struct {
@@ -58,6 +59,7 @@ type Model struct {
 	input   textinput.Model
 
 	rows                []Row
+	warnings            []string
 	cursor              int
 	filter              string
 	projectPerspective  string
@@ -134,6 +136,10 @@ func (m Model) View() tea.View {
 		b.WriteString("\n\n")
 		b.WriteString(m.renderRows())
 		b.WriteString("\n")
+		if warnings := m.renderWarnings(); warnings != "" {
+			b.WriteString(warnings)
+			b.WriteString("\n")
+		}
 		b.WriteString(m.renderStatusLine())
 		b.WriteString("\n")
 		b.WriteString(m.renderFooter())
@@ -172,6 +178,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		return m.startPendingRefresh()
 	}
+	m.warnings = msg.warnings
 
 	oldRows := m.filteredRows()
 	oldCursor := m.cursor
@@ -682,8 +689,8 @@ func (m Model) startKill() (Model, tea.Cmd) {
 
 func (m Model) fetchRowsCmd() tea.Cmd {
 	return func() tea.Msg {
-		rows, err := m.backend.List(context.Background())
-		return rowsMsg{rows: rows, err: err}
+		rows, warnings, err := m.backend.List(context.Background())
+		return rowsMsg{rows: rows, warnings: warnings, err: err}
 	}
 }
 
@@ -847,6 +854,13 @@ func currentRowIndex(rows []Row) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func (m Model) renderWarnings() string {
+	if len(m.warnings) == 0 {
+		return ""
+	}
+	return m.theme.warning.Render("warning: " + strings.Join(m.warnings, "; "))
 }
 
 func (m Model) renderStatusLine() string {

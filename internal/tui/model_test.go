@@ -34,9 +34,9 @@ type fakeBackend struct {
 	openCalls       []string
 }
 
-func (b *fakeBackend) List(ctx context.Context) ([]Row, error) {
+func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
 	b.listCalls++
-	return append([]Row(nil), b.rows...), nil
+	return append([]Row(nil), b.rows...), nil, nil
 }
 
 func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
@@ -120,6 +120,23 @@ func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
 	assert.Contains(t, content, "? help")
 	assert.Less(t, strings.Index(content, "kata"), strings.Index(content, "alpha"))
 	assert.True(t, model.View().AltScreen)
+}
+
+func TestModelRendersBackendWarnings(t *testing.T) {
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{
+		rows:     []Row{testRow("kwt", "main", "/w/kwt/main")},
+		warnings: []string{`multiple machines are publishing as host ID "same" (host same)`},
+	})
+
+	content := viewContent(model)
+	assert.Contains(t, content, `warning: multiple machines are publishing as host ID "same" (host same)`)
+
+	model, _ = updateModel(t, model, rowsMsg{
+		rows: []Row{testRow("kwt", "main", "/w/kwt/main")},
+	})
+	assert.NotContains(t, viewContent(model), "warning:",
+		"warnings must clear once the hub state is healthy again")
 }
 
 func TestRenderHelpTableReflowsToFitWidth(t *testing.T) {

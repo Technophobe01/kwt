@@ -269,7 +269,7 @@ func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
@@ -329,7 +329,7 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
@@ -415,7 +415,7 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 		}}, nil
 	}
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
@@ -473,7 +473,7 @@ func TestTUIBackendListDoesNotOfferSyncWithoutRegisteredProject(t *testing.T) {
 		}}}, nil
 	}
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -564,7 +564,7 @@ func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 		}}, nil
 	}
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
@@ -665,7 +665,7 @@ func TestTUIBackendListRendersFleetStatusFromLocalObservations(t *testing.T) {
 		}}, nil
 	}
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
@@ -736,7 +736,7 @@ func TestTUIBackendListMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
 		}}}, nil
 	}
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "detached fleet row must merge with the local row, not duplicate it")
@@ -776,7 +776,7 @@ func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -835,7 +835,7 @@ func TestTUIBackendListPrefersRegisteredIdentityForGlobalLocalOnlyDuplicate(t *t
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -883,7 +883,7 @@ func TestTUIBackendListRegistersLaunchRepositoryBestEffort(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -930,7 +930,7 @@ func TestTUIBackendListAddsLaunchRepositoryToInMemoryProjects(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	rows, err := backend.List(context.Background())
+	rows, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -982,7 +982,7 @@ func TestTUIBackendLaunchRegistrationReusesExistingProjectByPath(t *testing.T) {
 	}
 	backend.listSessions = func() ([]string, error) { return nil, nil }
 
-	_, err := backend.List(context.Background())
+	_, _, err := backend.List(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, registered, 1)
@@ -1823,4 +1823,37 @@ func runTUITestGitOutput(t *testing.T, dir string, args ...string) string {
 
 func stubTUIProjectRegistration(backend *tuiBackend) {
 	backend.registerProject = func(models.Project) error { return nil }
+}
+
+func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		return fleet.FleetState{Warnings: []fleet.Warning{{
+			Code:    "host_id_collision",
+			HostID:  "same",
+			Message: "multiple machines are publishing as host ID \"same\"",
+		}}}, nil
+	}
+
+	_, warnings, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, warnings, 1)
+	assert.Equal(t, `multiple machines are publishing as host ID "same" (host same)`, warnings[0])
 }

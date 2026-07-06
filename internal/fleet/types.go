@@ -1,6 +1,10 @@
 package fleet
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 const (
 	// ManifestSchemaVersion is the current fleet manifest wire schema version.
@@ -109,4 +113,16 @@ type Warning struct {
 	Code    string `json:"code"`
 	HostID  string `json:"host_id,omitempty"`
 	Message string `json:"message"`
+}
+
+// String renders a warning for terminal display.
+func (w Warning) String() string {
+	text := strings.TrimSpace(w.Message)
+	if text == "" {
+		text = w.Code
+	}
+	if hostID := strings.TrimSpace(w.HostID); hostID != "" {
+		return fmt.Sprintf("%s (host %s)", text, hostID)
+	}
+	return text
 }

@@ -61,29 +61,29 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 	}
 }
 
-func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, error) {
+func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
 	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover worktrees: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
 	}
 
 	entries = mergeTUIEntries(entries, b.discoverRegisteredProjectWorktrees())
 
 	launchEntries, err := b.discoverLaunchWorktrees(b.launchDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
 	}
 	b.registerLaunchProject(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
 	statusByPath, err := b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sessions, err := b.listSessions()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	liveSessions := make(map[string]bool, len(sessions))
 	for _, session := range sessions {
@@ -98,21 +98,25 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, error) {
 		}
 		rows = append(rows, buildTUIRow(entry, st, liveSessions))
 	}
-	rows = b.mergeFleetRows(ctx, rows)
-	return rows, nil
+	rows, warnings := b.mergeFleetRows(ctx, rows)
+	return rows, warnings, nil
 }
 
-func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) []dashboard.Row {
+func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
 	if b.cfg == nil || !b.cfg.Fleet.Enabled || b.readFleetState == nil {
-		return rows
+		return rows, nil
 	}
 	state, err := b.readFleetState(ctx, b.cfg)
 	if err != nil {
-		return rows
+		return rows, nil
 	}
 	currentHost, err := currentFleetHostID(b.cfg)
 	if err != nil {
-		return rows
+		return rows, nil
+	}
+	warnings := make([]string, 0, len(state.Warnings))
+	for _, warning := range state.Warnings {
+		warnings = append(warnings, warning.String())
 	}
 
 	byKey := make(map[string]int, len(rows))
@@ -155,7 +159,7 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) [
 		}
 		rows = append(rows, dashboard.Row{Fleet: info})
 	}
-	return rows
+	return rows, warnings
 }
 
 func fleetRowRef(row fleet.FleetRow) string {

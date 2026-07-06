@@ -145,6 +145,9 @@ func runFleetStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, warning := range state.Warnings {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+	}
 	rows := fleet.BuildStatusRows(state, currentHost, fleetNow())
 	return fleet.RenderStatusTable(cmd.OutOrStdout(), rows)
 }

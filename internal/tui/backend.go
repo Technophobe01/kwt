@@ -51,7 +51,9 @@ type FleetInfo struct {
 }
 
 type Backend interface {
-	List(ctx context.Context) ([]Row, error)
+	// List returns dashboard rows plus non-fatal warnings (e.g. fleet hub
+	// state issues) that should be surfaced to the user.
+	List(ctx context.Context) ([]Row, []string, error)
 	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
 	RemoveWorktree(ctx context.Context, row Row, force bool) error
