@@ -36,6 +36,7 @@ type tuiBackend struct {
 	listSessions             func() ([]string, error)
 	registerProject          func(models.Project) error
 	registerWorkspace        func(models.Workspace) (models.Workspace, error)
+	unregisterWorkspace      func(name string) error
 	readFleetState           func(context.Context, *models.Config) (fleet.FleetState, error)
 	now                      func() time.Time
 }
@@ -58,6 +59,7 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		listSessions:             tmuxCmd.ListSessions,
 		registerProject:          config.RegisterProject,
 		registerWorkspace:        config.RegisterWorkspace,
+		unregisterWorkspace:      config.UnregisterWorkspace,
 		readFleetState:           readTUIFleetState,
 		now:                      time.Now,
 	}
@@ -1164,7 +1166,7 @@ func (b *tuiBackend) InsideTmux() bool {
 }
 
 func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, layoutName string, insideTmux bool, interactive bool) error {
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		return fmt.Errorf("no worktree selected")
 	}
 	sessionName, err := b.sessionName(row)
@@ -1175,7 +1177,17 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 	if err != nil {
 		return err
 	}
-	return tmux.NewWorkspaceRunner(b.tmux).EnsureAndAttach(ctx, sessionName, row.Entry.Path, layout, insideTmux)
+	return tmux.NewWorkspaceRunner(b.tmux).EnsureAndAttach(ctx, sessionName, rowPaneRoot(row), layout, insideTmux)
+}
+
+func rowPaneRoot(row dashboard.Row) string {
+	if row.Workspace != nil {
+		return row.Workspace.Path
+	}
+	if row.Entry != nil {
+		return row.Entry.Path
+	}
+	return ""
 }
 
 func (b *tuiBackend) resolveLayout(row dashboard.Row, layoutName string, interactive bool) (models.Layout, error) {
@@ -1184,13 +1196,17 @@ func (b *tuiBackend) resolveLayout(row dashboard.Row, layoutName string, interac
 	if layoutName != "" {
 		layout, err = tmux.ResolveLayout(b.cfg.Layouts, layoutName, false, "", nil)
 	} else {
-		var repoRoot string
-		repoRoot, err = b.repositoryRootForRow(row)
-		if err != nil {
-			return models.Layout{}, err
+		var layoutRoot string
+		if row.Workspace != nil {
+			layoutRoot = row.Workspace.Path
+		} else {
+			layoutRoot, err = b.repositoryRootForRow(row)
+			if err != nil {
+				return models.Layout{}, err
+			}
 		}
 		var targetDefault string
-		targetDefault, err = config.LoadRepoLayoutDefault(repoRoot, interactive)
+		targetDefault, err = config.LoadRepoLayoutDefault(layoutRoot, interactive)
 		if err != nil {
 			return models.Layout{}, err
 		}
@@ -1206,10 +1222,32 @@ func (b *tuiBackend) sessionName(row dashboard.Row) (string, error) {
 	if row.SessionName != "" {
 		return row.SessionName, nil
 	}
+	if row.Workspace != nil {
+		return tmux.DirWorkspaceSessionName(row.Workspace.Name, row.Workspace.Path), nil
+	}
 	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
 		return "", fmt.Errorf("could not resolve repository info for %s", rowPathForHandoff(row))
 	}
 	return tmux.WorkspaceSessionName(row.Entry.RepositoryInfo, row.Entry.Branch, row.Entry.Path), nil
+}
+
+func (b *tuiBackend) UnregisterWorkspace(row dashboard.Row) error {
+	if row.Workspace == nil {
+		return fmt.Errorf("no workspace selected")
+	}
+	if err := b.unregisterWorkspace(row.Workspace.Name); err != nil {
+		return err
+	}
+	if b.cfg != nil {
+		kept := b.cfg.Workspaces[:0]
+		for _, workspace := range b.cfg.Workspaces {
+			if !samePath(workspace.Path, row.Workspace.Path) {
+				kept = append(kept, workspace)
+			}
+		}
+		b.cfg.Workspaces = kept
+	}
+	return nil
 }
 
 func unknownStatusForEntry(entry *discovery.GlobalWorktreeEntry) *models.WorktreeStatus {

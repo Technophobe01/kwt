@@ -1953,3 +1953,38 @@ func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+func TestTUIBackendSessionNameAndHandoffPathForWorkspaceRow(t *testing.T) {
+	row := dashboard.Row{
+		Workspace:   &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+		SessionName: tmux.DirWorkspaceSessionName("notes", "/Users/me/notes"),
+	}
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	name, err := backend.sessionName(row)
+
+	require.NoError(t, err)
+	assert.Equal(t, row.SessionName, name)
+	assert.Equal(t, "/Users/me/notes", rowPathForHandoff(row))
+}
+
+func TestTUIBackendUnregisterWorkspace(t *testing.T) {
+	cfg := &models.Config{Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	var removed []string
+	backend.unregisterWorkspace = func(name string) error {
+		removed = append(removed, name)
+		return nil
+	}
+
+	err := backend.UnregisterWorkspace(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"notes"}, removed)
+	assert.Empty(t, cfg.Workspaces, "unregister must also drop the in-memory entry")
+
+	err = backend.UnregisterWorkspace(dashboard.Row{})
+	require.Error(t, err)
+}

@@ -69,6 +69,9 @@ func executeTUIHandoff(backend *tuiBackend, handoff dashboard.Handoff) error {
 }
 
 func rowPathForHandoff(row dashboard.Row) string {
+	if row.Workspace != nil {
+		return row.Workspace.Path
+	}
 	if row.Entry != nil {
 		return row.Entry.Path
 	}

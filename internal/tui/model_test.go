@@ -32,6 +32,7 @@ type fakeBackend struct {
 	removeForces    []bool
 	killCalls       []string
 	openCalls       []string
+	unregistered    []Row
 }
 
 func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
@@ -65,6 +66,11 @@ func (b *fakeBackend) KillSession(row Row) error {
 func (b *fakeBackend) OpenInTmux(ctx context.Context, row Row, layoutName string) error {
 	b.openCalls = append(b.openCalls, rowPath(row)+":"+layoutName)
 	return b.openErr
+}
+
+func (b *fakeBackend) UnregisterWorkspace(row Row) error {
+	b.unregistered = append(b.unregistered, row)
+	return nil
 }
 
 func (b *fakeBackend) LayoutNames() []string { return append([]string(nil), b.layoutNames...) }
