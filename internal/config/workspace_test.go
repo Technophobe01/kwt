@@ -1,0 +1,101 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/pkg/models"
+)
+
+func workspaceTestEnv(t *testing.T) string {
+	t.Helper()
+	viper.Reset()
+	t.Cleanup(func() { viper.Reset() })
+	configHome := t.TempDir()
+	t.Setenv("KWT_HOME", configHome)
+	return configHome
+}
+
+func registeredWorkspaces(t *testing.T) []models.Workspace {
+	t.Helper()
+	globalViper := viper.New()
+	globalViper.SetConfigFile(filepath.Join(getConfigDir(), configName+"."+configType))
+	globalViper.SetConfigType(configType)
+	require.NoError(t, globalViper.ReadInConfig())
+	var workspaces []models.Workspace
+	require.NoError(t, globalViper.UnmarshalKey("workspaces", &workspaces))
+	return workspaces
+}
+
+func TestRegisterWorkspaceDefaultsNameAndPersists(t *testing.T) {
+	workspaceTestEnv(t)
+	dir := filepath.Join(t.TempDir(), "notes")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	stored, err := RegisterWorkspace(models.Workspace{Path: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, "notes", stored.Name)
+	workspaces := registeredWorkspaces(t)
+	require.Len(t, workspaces, 1)
+	assert.Equal(t, "notes", workspaces[0].Name)
+}
+
+func TestRegisterWorkspaceRejectsMissingPath(t *testing.T) {
+	workspaceTestEnv(t)
+
+	_, err := RegisterWorkspace(models.Workspace{Path: filepath.Join(t.TempDir(), "absent")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
+}
+
+func TestRegisterWorkspaceUpdatesNameForSamePath(t *testing.T) {
+	workspaceTestEnv(t)
+	dir := filepath.Join(t.TempDir(), "notes")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	_, err := RegisterWorkspace(models.Workspace{Name: "old", Path: dir})
+	require.NoError(t, err)
+
+	_, err = RegisterWorkspace(models.Workspace{Name: "new", Path: dir})
+
+	require.NoError(t, err)
+	workspaces := registeredWorkspaces(t)
+	require.Len(t, workspaces, 1)
+	assert.Equal(t, "new", workspaces[0].Name)
+}
+
+func TestRegisterWorkspaceRejectsDuplicateNameForDifferentPath(t *testing.T) {
+	workspaceTestEnv(t)
+	base := t.TempDir()
+	first := filepath.Join(base, "a")
+	second := filepath.Join(base, "b")
+	require.NoError(t, os.MkdirAll(first, 0o755))
+	require.NoError(t, os.MkdirAll(second, 0o755))
+	_, err := RegisterWorkspace(models.Workspace{Name: "notes", Path: first})
+	require.NoError(t, err)
+
+	_, err = RegisterWorkspace(models.Workspace{Name: "notes", Path: second})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--name")
+}
+
+func TestUnregisterWorkspace(t *testing.T) {
+	workspaceTestEnv(t)
+	dir := filepath.Join(t.TempDir(), "notes")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	_, err := RegisterWorkspace(models.Workspace{Path: dir})
+	require.NoError(t, err)
+
+	require.NoError(t, UnregisterWorkspace("notes"))
+	assert.Empty(t, registeredWorkspaces(t))
+
+	err = UnregisterWorkspace("notes")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no workspace")
+}
