@@ -63,7 +63,8 @@ kwt remove -b feature/new-ui
 | `/`       | Search rows                             |
 | `d`       | Delete selected worktree                |
 | `K`       | Kill selected live workspace            |
-| `s`       | Open a shell in the selected worktree   |
+| `s`       | Sync a remote-only branch row locally   |
+| `c`       | Open a shell in the selected worktree   |
 | `r`       | Refresh                                 |
 | `?`       | Toggle help                             |
 | `q`       | Quit                                    |
@@ -109,6 +110,18 @@ panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 name = "stack"
 arrange = "even-vertical"
 panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
+
+# Optional, opt-in multi-machine sync.
+[fleet]
+enabled = false
+host_id = "laptop"
+hub_url = "https://kwt-hub.example.net"
+token_env = "KWT_FLEET_TOKEN"
+# token_file = "~/.config/kwt/fleet.token"
+
+[fleet.hub]
+listen_addr = "127.0.0.1:8787"
+store_path = "~/.config/kwt/fleet/state.json"
 ```
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
@@ -124,6 +137,42 @@ kwt config set worktree.basedir ~/worktrees
 kwt config set --local layouts.default stack
 ```
 
+### Multi-machine Sync
+
+Multi-machine sync is opt-in and uses static config. Set `[fleet].enabled =
+true`, configure a hub URL, and provide a bearer token through `token_env` or
+`token_file`. Non-loopback hub URLs must use HTTPS; plain HTTP is reserved for
+loopback listeners.
+
+The hub is a dumb store for signed-in hosts' latest worktree manifests.
+Multi-machine status is advisory: it helps compare branch, commit, dirty-state,
+and freshness across hosts, but it does not lock worktrees or enforce ownership.
+When enabled, the dashboard shows remote-only rows with `WORKSPACE` set to
+`remote`; selected-row details show the source machine and path. Wide terminals
+may also show a `MACHINES` column, but the table keeps the worktree status
+visible at roughly 100 columns. Select a remote-only branch row and press `s` to
+sync that branch locally. Press `c` on a local row to open a shell there.
+Remote-only sync verifies the created worktree against the hub-reported commit
+when one is available, and skips repository setup (`copy_files` and
+`setup_commands`); those hooks run for locally initiated `kwt add` worktrees.
+
+Useful commands:
+
+```bash
+kwt sync serve
+kwt sync publish
+kwt sync status
+kwt sync forget <host-id>
+```
+
+When multi-machine sync is enabled, `kwt sync status` publishes this host before
+reading the hub. Successful mutations also publish best-effort: `kwt add`, local
+and global `kwt remove`, and `kwt prune --expired` when it actually removes or
+unregisters an expired worktree. Normal `kwt prune` publishes after every
+successful run. Dry-runs, expired-prune no-ops, and failed removals do not
+publish. Missing hub config, disabled multi-machine sync, or publish failures
+never make the mutation command fail; publish warnings may be written to stderr.
+
 ### Project Discovery
 
 The dashboard lists worktrees from the global base directory and from projects
@@ -134,7 +183,7 @@ worktrees even when they are outside `worktree.basedir`.
 ### Repository Setup
 
 Optional `repository_settings` copy files or run commands when new worktrees are
-created:
+created by `kwt add`:
 
 ```toml
 [[repository_settings]]
@@ -165,6 +214,7 @@ spaces.
 | `kwt exec`       | Run a command in a matching worktree      |
 | `kwt remove`     | Delete a worktree, optionally its branch  |
 | `kwt prune`      | Clean up stale Git worktree metadata      |
+| `kwt sync`       | Publish and inspect multi-machine status  |
 | `kwt tmux`       | Manage standalone tmux sessions           |
 | `kwt config`     | Read and write config values              |
 | `kwt completion` | Generate shell completion and integration |
@@ -176,6 +226,16 @@ Run `kwt <command> --help` for flags and examples.
 - Git 2.5+
 - Go 1.26+ to build from source
 - tmux for workspace launch and `kwt tmux`
+
+## Documentation
+
+The maintained docs live in [docs](docs/):
+
+```bash
+make docs-install
+make docs-build
+make docs-serve
+```
 
 ## License
 

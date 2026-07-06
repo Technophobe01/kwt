@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
@@ -150,17 +152,57 @@ func TestFormatChanges(t *testing.T) {
 	}))
 }
 
-func TestFormatSync(t *testing.T) {
-	assert.Equal(t, "?", formatSync(nil))
-	assert.Equal(t, "?", formatSync(&models.WorktreeStatus{Status: models.WorktreeStatusUnknown}))
-	assert.Equal(t, "↑0 ↓0", formatSync(&models.WorktreeStatus{
+func TestFormatRowChangesUsesFleetDirtyForRemoteOnlyRows(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{Dirty: "clean"}}
+
+	assert.Equal(t, "clean", formatRowChanges(row))
+}
+
+func TestFormatRowChangesPrefersLocalDirtyCounts(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Modified = 1
+	row.Fleet = &FleetInfo{
+		Local: true,
+		Hosts: []string{"local", "host-b"},
+		Dirty: "host-b (1 modified)",
+	}
+
+	assert.Equal(t, "~1", formatRowChanges(row))
+}
+
+func TestFormatPushPullStatus(t *testing.T) {
+	got, ok := formatPushPullStatus(nil)
+	assert.True(t, ok)
+	assert.Equal(t, "?", got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{Status: models.WorktreeStatusUnknown})
+	assert.True(t, ok)
+	assert.Equal(t, "?", got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{
 		Status:    models.WorktreeStatusClean,
 		GitStatus: models.GitStatus{},
-	}))
-	assert.Equal(t, "↑2 ↓3", formatSync(&models.WorktreeStatus{
+	})
+	assert.False(t, ok)
+	assert.Empty(t, got)
+
+	got, ok = formatPushPullStatus(&models.WorktreeStatus{
 		Status:    models.WorktreeStatusModified,
 		GitStatus: models.GitStatus{Ahead: 2, Behind: 3},
-	}))
+	})
+	assert.True(t, ok)
+	assert.Equal(t, "↑2 ↓3", got)
+}
+
+func TestFormatMachinesShowsLocalAndRemoteHosts(t *testing.T) {
+	row := testRow("kwt", "main", "/w/kwt/main")
+	row.Fleet = &FleetInfo{
+		Local: true,
+		Hosts: []string{"local", "host-b"},
+	}
+
+	assert.Equal(t, "local, host-b", formatMachines(row))
 }
 
 func TestFormatActivityAt(t *testing.T) {
@@ -215,6 +257,20 @@ func TestRenderRowsAlignsBodyToHeaderColumns(t *testing.T) {
 	}
 }
 
+func TestRenderRowsShowsLocalOnlyWhenPushPullIsZero(t *testing.T) {
+	row := testRow("kwt", "main", "/w/kwt/main")
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	body := findLineContaining(lines, "main")
+
+	require.NotEmpty(t, body)
+	assert.Contains(t, body, "local only")
+	assert.NotContains(t, body, "↑0 ↓0")
+	assert.NotContains(t, body, "git")
+}
+
 func columnForValue(value string) string {
 	switch value {
 	case "kwt":
@@ -224,7 +280,7 @@ func columnForValue(value string) string {
 	case "clean":
 		return "CHANGES"
 	case "↑2 ↓1":
-		return "SYNC"
+		return "HEADS"
 	case "live":
 		return "WORKSPACE"
 	default:
@@ -241,10 +297,23 @@ func findLineContaining(lines []string, needle string) string {
 	return ""
 }
 
+func lineIndexContaining(lines []string, needle string) int {
+	for i, line := range lines {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	return -1
+}
+
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
+}
+
+func visibleWidth(s string) int {
+	return runewidth.StringWidth(stripANSI(s))
 }
 
 func visualIndex(line, needle string) int {

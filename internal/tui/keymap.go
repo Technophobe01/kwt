@@ -11,6 +11,7 @@ type keyMap struct {
 	Layout  key.Binding
 	New     key.Binding
 	Delete  key.Binding
+	Sync    key.Binding
 	Shell   key.Binding
 	Kill    key.Binding
 	Switch  key.Binding
@@ -34,7 +35,8 @@ func newKeyMap() keyMap {
 		Layout:  key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "layout")),
 		New:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Delete:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
-		Shell:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "shell")),
+		Sync:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sync")),
+		Shell:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "shell")),
 		Kill:    key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill-ws")),
 		Switch:  key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "project")),
 		Project: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "filter")),

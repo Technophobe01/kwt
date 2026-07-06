@@ -180,6 +180,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 
 		printAddResult(os.Stdout, branch, expiresAt)
+		publishFleetBestEffortForCommand(cmd, ctx.Config)
 
 		if launch {
 			return attachWorkspace(info, branch, worktreePath, layout)

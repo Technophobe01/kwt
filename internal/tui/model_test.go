@@ -6,31 +6,37 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 type fakeBackend struct {
-	rows        []Row
-	layoutNames []string
-	insideTmux  bool
-	createPath  string
-	createErr   error
-	removeErr   error
-	killErr     error
-	openErr     error
-	listCalls   int
-	createCalls []string
-	removeCalls []string
-	killCalls   []string
-	openCalls   []string
+	rows            []Row
+	layoutNames     []string
+	insideTmux      bool
+	createPath      string
+	createErr       error
+	materializePath string
+	materializeErr  error
+	removeErr       error
+	killErr         error
+	openErr         error
+	listCalls       int
+	createCalls     []string
+	materializeRows []string
+	removeCalls     []string
+	removeForces    []bool
+	killCalls       []string
+	openCalls       []string
 }
 
-func (b *fakeBackend) List(ctx context.Context) ([]Row, error) {
+func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
 	b.listCalls++
-	return append([]Row(nil), b.rows...), nil
+	return append([]Row(nil), b.rows...), nil, nil
 }
 
 func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
@@ -38,9 +44,17 @@ func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string
 	return b.createPath, b.createErr
 }
 
-func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row) error {
+func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row, force bool) error {
 	b.removeCalls = append(b.removeCalls, rowPath(row))
+	b.removeForces = append(b.removeForces, force)
 	return b.removeErr
+}
+
+func (b *fakeBackend) MaterializeWorktree(ctx context.Context, row Row) (string, error) {
+	if row.Fleet != nil {
+		b.materializeRows = append(b.materializeRows, row.Fleet.ProjectIdentity+":"+row.Fleet.Ref)
+	}
+	return b.materializePath, b.materializeErr
 }
 
 func (b *fakeBackend) KillSession(row Row) error {
@@ -108,8 +122,25 @@ func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
 	assert.True(t, model.View().AltScreen)
 }
 
+func TestModelRendersBackendWarnings(t *testing.T) {
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{
+		rows:     []Row{testRow("kwt", "main", "/w/kwt/main")},
+		warnings: []string{`multiple machines are publishing as host ID "same" (host same)`},
+	})
+
+	content := viewContent(model)
+	assert.Contains(t, content, `warning: multiple machines are publishing as host ID "same" (host same)`)
+
+	model, _ = updateModel(t, model, rowsMsg{
+		rows: []Row{testRow("kwt", "main", "/w/kwt/main")},
+	})
+	assert.NotContains(t, viewContent(model), "warning:",
+		"warnings must clear once the hub state is healthy again")
+}
+
 func TestRenderHelpTableReflowsToFitWidth(t *testing.T) {
-	got := stripANSI(renderHelpTable(defaultHelpRows(), 34))
+	got := stripANSI(renderHelpTable(defaultHelpRows(Row{}), 34))
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
 
 	require.Greater(t, len(lines), 1)
@@ -158,28 +189,139 @@ func TestModelPolishesSingleRowDashboard(t *testing.T) {
 	assert.Contains(t, content, "kwt · 1 worktree · 1 repo")
 	assert.Contains(t, content, "WORKSPACE")
 	assert.Contains(t, content, "live")
-	assert.Contains(t, content, "layout default")
+	assert.Contains(t, content, "\x1b[92mlive")
+	assert.Contains(t, stripANSI(content), "layout default")
 	assert.Contains(t, content, "selected kwt:test/layouts")
 	assert.Contains(t, content, "/worktrees/github.com/example/kwt/test-layouts")
+	assert.Contains(t, stripANSI(content), "c shell")
+	assert.NotContains(t, stripANSI(content), "s shell")
+	assert.NotContains(t, stripANSI(content), "s sync")
+}
+
+func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{
+		ProjectIdentity:  "github.com/example/kwt",
+		ProjectName:      "kwt",
+		Kind:             "branch",
+		Ref:              "feature/studio-only",
+		Branch:           "feature/studio-only",
+		Local:            false,
+		Hosts:            []string{"host-b"},
+		Sync:             "same",
+		Dirty:            "clean",
+		Freshness:        "just now",
+		MaterializeHost:  "host-b",
+		RemotePath:       "/work/host-b/kwt/feature-studio-only",
+		RemoteHead:       "bbb",
+		RemoteUpstream:   "origin/feature/studio-only",
+		RemoteAhead:      2,
+		CanMaterialize:   true,
+		MaterializeLabel: "feature/studio-only",
+	}}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	content := stripANSI(viewContent(model))
+
+	assert.NotContains(t, content, "MACHINES")
+	assert.Contains(t, content, "kwt")
+	assert.Contains(t, content, "feature/studio-only")
+	assert.Contains(t, content, "remote only")
+	assert.NotContains(t, content, "hosts same")
+	assert.Contains(t, content, "remote")
+	assert.Contains(t, content, "s sync")
+	assert.NotContains(t, content, "c shell")
+	assert.NotContains(t, content, "m materialize")
+	assert.Contains(t, content, "selected kwt:feature/studio-only")
+	assert.Contains(t, content, "remote on host-b")
+	assert.Contains(t, content, "press s to sync (branch must be pushed/fetched here)")
+	assert.Contains(t, content, "source is 2 commits ahead of origin/feature/studio-only")
+	assert.Contains(t, content, "/work/host-b/kwt/feature-studio-only")
+}
+
+func TestModelDashboardFitsHundredColumnTerminal(t *testing.T) {
+	row := testRow("example-service", "very-long-feature-branch-that-needs-truncation", "/w/example-service/feature")
+	row.SessionLive = true
+	row.Status.LastActivity = timeNow().Add(-8 * time.Hour)
+	row.Status.GitStatus.Modified = 3
+	row.Fleet = &FleetInfo{
+		ProjectName: "example-service",
+		Local:       true,
+		Hosts:       []string{"local", "host-b"},
+		Sync:        "different: host-b 18h",
+		Dirty:       "host-b (~3 ?3)",
+		Freshness:   "18h",
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: 100, Height: 12})
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	header := findLineContaining(lines, "REPO")
+	body := findLineContaining(lines, "diff host-b")
+
+	require.NotEmpty(t, header)
+	require.NotEmpty(t, body)
+	assert.Contains(t, header, "WORKSPACE")
+	assert.NotContains(t, header, "MACHINES")
+	assert.Contains(t, body, "live")
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "also on host-b")
+	assert.Contains(t, content, "head differs 18h")
+	assert.Contains(t, content, "remote changes ~3 ?3")
+	assert.NotContains(t, content, "machines local")
+	assert.LessOrEqual(t, visibleWidth(header), 100, header)
+	assert.LessOrEqual(t, visibleWidth(body), 100, body)
+}
+
+func TestModelSummarizesRemoteChangesInTableAndDetailsNameHost(t *testing.T) {
+	row := testRow("kwt", "feature/remote-dirty", "/w/kwt/feature")
+	row.Fleet = &FleetInfo{
+		ProjectName: "kwt",
+		Local:       true,
+		Hosts:       []string{"local", "host-b"},
+		Sync:        "same",
+		Dirty:       "host-b (~3 ?3)",
+		Freshness:   "5m",
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	lines := strings.Split(stripANSI(viewContent(model)), "\n")
+	body := findLineContaining(lines, "feature/remote-dirty")
+
+	require.NotEmpty(t, body)
+	assert.Contains(t, body, "remote ~3 ?3")
+	assert.NotContains(t, body, "host-b")
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "also on host-b")
+	assert.Contains(t, content, "remote changes ~3 ?3")
+	assert.NotContains(t, content, "changes host-b")
 }
 
 func TestModelCyclesLayoutSelection(t *testing.T) {
 	model := NewModel(&fakeBackend{layoutNames: []string{"quad", "focus"}}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{testRow("kwt", "main", "/w/kwt/main")}})
 
-	assert.Contains(t, viewContent(model), "layout default")
+	assert.Contains(t, stripANSI(viewContent(model)), "layout default")
+	footerLine := lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit")
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Equal(t, "quad", model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout quad")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout quad · workspace offline")
+	assert.Contains(t, viewContent(model), "layout \x1b")
+	assert.Contains(t, viewContent(model), "/w/kwt/main")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Equal(t, "focus", model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout focus")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout focus · workspace offline")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 
 	model, _ = updateModel(t, model, press("L"))
 	assert.Empty(t, model.selectedLayout)
-	assert.Contains(t, viewContent(model), "layout default")
+	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout default · workspace offline")
+	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
 }
 
 func TestModelCursorFilterAndEscape(t *testing.T) {
@@ -460,6 +602,33 @@ func TestModelNewBranchAcceptsPaste(t *testing.T) {
 	assert.Equal(t, []string{"/w/kwt/main:feature/pasted"}, backend.createCalls)
 }
 
+func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
+	row := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/studio-only",
+		Branch:          "feature/studio-only",
+		Hosts:           []string{"host-b"},
+		CanMaterialize:  true,
+	}}
+	backend := &fakeBackend{materializePath: "/worktrees/github.com/example/kwt/feature-studio-only"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, cmd := updateModel(t, model, press("s"))
+
+	require.NotNil(t, cmd)
+	assert.Contains(t, model.message, "syncing kwt:feature/studio-only")
+	msg := cmd()
+	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.Equal(t, []string{"github.com/example/kwt:feature/studio-only"}, backend.materializeRows)
+	done := msg.(actionDoneMsg)
+	assert.True(t, done.refresh)
+	assert.Equal(t, "/worktrees/github.com/example/kwt/feature-studio-only", done.anchorPath)
+	assert.Contains(t, done.message, "synced kwt:feature/studio-only")
+}
+
 func TestModelCancelNewBranchInputKeepsExistingFilter(t *testing.T) {
 	model := NewModel(&fakeBackend{}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
@@ -507,6 +676,42 @@ func TestModelDeleteLiveWorktreeConfirmsAndCallsRemove(t *testing.T) {
 	msg := cmd()
 	assert.IsType(t, actionDoneMsg{}, msg)
 	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
+	assert.Equal(t, []bool{false}, backend.removeForces)
+}
+
+func TestModelDeleteDirtyWorktreeConfirmsDiscardAndForcesRemove(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Modified = 1
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, _ = updateModel(t, model, press("d"))
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "discard changes and delete kwt:feature? [y/N]")
+	assert.NotContains(t, content, "kwt remove --force")
+
+	_, cmd := updateModel(t, model, press("y"))
+	require.NotNil(t, cmd)
+	msg := cmd()
+	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
+	assert.Equal(t, []bool{true}, backend.removeForces)
+}
+
+func TestModelDeleteDirtyLiveWorktreeConfirmsDiscardAndKill(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	row.SessionLive = true
+	row.SessionName = "kwt-workspace-kwt-feature"
+	row.Status.Status = models.WorktreeStatusModified
+	row.Status.GitStatus.Untracked = 1
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Contains(t, stripANSI(viewContent(model)), "discard changes, delete kwt:feature, and kill its live workspace? [y/N]")
 }
 
 func TestModelKillWorkspaceConfirm(t *testing.T) {
@@ -531,7 +736,7 @@ func TestModelShellAndAttachHandoffsQuitFirst(t *testing.T) {
 	model := NewModel(&fakeBackend{layoutNames: []string{"quad", "focus"}}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
 
-	model, _ = updateModel(t, model, press("s"))
+	model, _ = updateModel(t, model, press("c"))
 	assert.Equal(t, HandoffShell, model.Handoff().Kind)
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.Handoff().Row))
 
@@ -543,6 +748,18 @@ func TestModelShellAndAttachHandoffsQuitFirst(t *testing.T) {
 	assert.Equal(t, HandoffAttach, model.Handoff().Kind)
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.Handoff().Row))
 	assert.Equal(t, "focus", model.Handoff().LayoutName)
+}
+
+func TestModelSyncKeyDoesNotOpenShellForLocalRow(t *testing.T) {
+	row := testRow("kwt", "feature", "/w/kwt/feature")
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	model, cmd := updateModel(t, model, press("s"))
+
+	require.Nil(t, cmd)
+	assert.Equal(t, HandoffNone, model.Handoff().Kind)
+	assert.Contains(t, stripANSI(viewContent(model)), "nothing to sync for this row")
 }
 
 func TestModelInsideTmuxAttachRunsResidentAction(t *testing.T) {

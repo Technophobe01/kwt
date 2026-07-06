@@ -1,0 +1,18 @@
+review_guidelines = """
+Threat model for multi-machine sync (fleet):
+
+- The hub and all spokes are the same user's machines sharing a bearer
+  token; they mutually trust each other. Do not flag attacks that require
+  a malicious or compromised authenticated peer or hub (e.g., terminal
+  escape injection via manifest fields, hub-crafted state responses).
+- Repo-local `.kwt.toml` files arrive with cloned repositories and are
+  untrusted, even after the user grants the trust prompt. They must never
+  set machine-level configuration: anything under `fleet.*` (hub endpoint,
+  token env/file sources) is global-config-only. Do flag any path that
+  lets repo content influence where tokens are read from or sent to.
+- Secrets must never leave the machine: raw git remote URLs (which can
+  embed credentials), token values, and token file paths must not be
+  published to the hub, persisted in hub state, or echoed in fleet state.
+- Plaintext HTTP to the hub is only acceptable for loopback addresses;
+  multi-machine hubs require HTTPS.
+"""

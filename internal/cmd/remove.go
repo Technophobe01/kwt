@@ -88,24 +88,38 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return ctx.WithGlobalLocalSupport(
 			removeGlobal,
 			func(ctx *CommandContext) error {
-				return removeLocalWorktree(ctx, args)
+				removed, err := removeLocalWorktree(ctx, args)
+				if err != nil {
+					return err
+				}
+				if removed > 0 {
+					publishFleetBestEffortForCommand(cmd, ctx.Config)
+				}
+				return nil
 			},
 			func(ctx *CommandContext) error {
-				return removeGlobalWorktree(ctx, args)
+				removed, err := removeGlobalWorktree(ctx, args)
+				if err != nil {
+					return err
+				}
+				if removed > 0 {
+					publishFleetBestEffortForCommand(cmd, ctx.Config)
+				}
+				return nil
 			},
 		)
 	})(cmd, args)
 }
 
-func removeLocalWorktree(ctx *CommandContext, args []string) error {
+func removeLocalWorktree(ctx *CommandContext, args []string) (int, error) {
 	worktrees, err := ctx.WorktreeManager.List()
 	if err != nil {
-		return fmt.Errorf("failed to list worktrees: %w", err)
+		return 0, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
 	nonMainWorktrees := filterNonMainWorktrees(worktrees)
 	if len(nonMainWorktrees) == 0 {
-		return fmt.Errorf("no removable worktrees found")
+		return 0, fmt.Errorf("no removable worktrees found")
 	}
 
 	var toRemove []models.Worktree
@@ -114,7 +128,7 @@ func removeLocalWorktree(ctx *CommandContext, args []string) error {
 		// Get all matching worktrees
 		matches, err := ctx.WorktreeManager.GetMatchingWorktrees(args[0])
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		// Filter out main worktrees
@@ -126,21 +140,21 @@ func removeLocalWorktree(ctx *CommandContext, args []string) error {
 		}
 
 		if len(nonMainMatches) == 0 {
-			return fmt.Errorf("no worktree found matching pattern: %s", args[0])
+			return 0, fmt.Errorf("no worktree found matching pattern: %s", args[0])
 		} else if len(nonMainMatches) == 1 {
 			toRemove = nonMainMatches
 		} else {
 			// Multiple matches - use fuzzy finder
 			selected, err := ctx.GetFinder().SelectMultipleWorktrees(nonMainMatches)
 			if err != nil {
-				return fmt.Errorf("worktree selection cancelled")
+				return 0, fmt.Errorf("worktree selection cancelled")
 			}
 			toRemove = selected
 		}
 	} else {
 		selected, err := ctx.GetFinder().SelectMultipleWorktrees(nonMainWorktrees)
 		if err != nil {
-			return fmt.Errorf("worktree selection cancelled")
+			return 0, fmt.Errorf("worktree selection cancelled")
 		}
 		toRemove = selected
 	}
@@ -153,13 +167,18 @@ func removeLocalWorktree(ctx *CommandContext, args []string) error {
 				fmt.Printf("    - Would delete branch: %s\n", wt.Branch)
 			}
 		}
-		return nil
+		return 0, nil
 	}
 
+	removed := 0
 	for _, wt := range toRemove {
 		if deleteBranch {
 			if err := ctx.WorktreeManager.RemoveWithBranch(wt.Path, wt.Branch, removeForce, deleteBranch, forceDeleteBranch); err != nil {
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
+				if worktreePathRemoved(wt.Path) {
+					removed++
+					unregisterWorktreePath(wt.Path)
+				}
 				continue
 			}
 			ctx.Printer.PrintSuccess(fmt.Sprintf("Removed worktree: %s", wt.Branch))
@@ -169,18 +188,21 @@ func removeLocalWorktree(ctx *CommandContext, args []string) error {
 		} else {
 			if err := ctx.WorktreeManager.Remove(wt.Path, removeForce); err != nil {
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
+				if worktreePathRemoved(wt.Path) {
+					removed++
+					unregisterWorktreePath(wt.Path)
+				}
 				continue
 			}
 			ctx.Printer.PrintSuccess(fmt.Sprintf("Removed worktree: %s", wt.Branch))
 		}
+		removed++
 
 		// Clean up registry entry after successful removal
-		if reg, err := registry.New(); err == nil {
-			_ = reg.Unregister(wt.Path)
-		}
+		unregisterWorktreePath(wt.Path)
 	}
 
-	return nil
+	return removed, nil
 }
 
 func filterNonMainWorktrees(worktrees []models.Worktree) []models.Worktree {
@@ -193,14 +215,14 @@ func filterNonMainWorktrees(worktrees []models.Worktree) []models.Worktree {
 	return filtered
 }
 
-func removeGlobalWorktree(ctx *CommandContext, args []string) error {
+func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 	entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir)
 	if err != nil {
-		return fmt.Errorf("failed to discover worktrees: %w", err)
+		return 0, fmt.Errorf("failed to discover worktrees: %w", err)
 	}
 
 	if len(entries) == 0 {
-		return fmt.Errorf("no worktrees found in %s", ctx.Config.Worktree.BaseDir)
+		return 0, fmt.Errorf("no worktrees found in %s", ctx.Config.Worktree.BaseDir)
 	}
 
 	// Filter out main worktrees
@@ -212,7 +234,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 	}
 
 	if len(nonMainEntries) == 0 {
-		return fmt.Errorf("no removable worktrees found")
+		return 0, fmt.Errorf("no removable worktrees found")
 	}
 
 	var toRemove []*discovery.GlobalWorktreeEntry
@@ -239,7 +261,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 		}
 
 		if len(matches) == 0 {
-			return fmt.Errorf("no worktree matches pattern: %s", args[0])
+			return 0, fmt.Errorf("no worktree matches pattern: %s", args[0])
 		} else if len(matches) == 1 {
 			toRemove = matches
 		} else {
@@ -255,7 +277,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 			f := finder.NewWithUI(g, &ctx.Config.Finder, &ctx.Config.UI)
 			selected, err := f.SelectMultipleWorktrees(worktrees)
 			if err != nil {
-				return fmt.Errorf("worktree selection cancelled")
+				return 0, fmt.Errorf("worktree selection cancelled")
 			}
 
 			// Map selected worktrees back to entries
@@ -278,7 +300,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 		f := ctx.GetGlobalFinder()
 		selected, err := f.SelectMultipleWorktrees(worktrees)
 		if err != nil {
-			return fmt.Errorf("worktree selection cancelled")
+			return 0, fmt.Errorf("worktree selection cancelled")
 		}
 
 		// Map selected worktrees back to entries
@@ -306,10 +328,11 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 				fmt.Printf("    - Would delete branch: %s\n", entry.Branch)
 			}
 		}
-		return nil
+		return 0, nil
 	}
 
 	// Remove each worktree by changing to its repository directory
+	removed := 0
 	for _, entry := range toRemove {
 		// Change to the repository directory to run git commands
 		originalDir, err := os.Getwd()
@@ -323,7 +346,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 		if entry.RepositoryInfo != nil {
 			// Try to find repository in common locations
 			g := git.New(entry.Path)
-			if repoRootPath, err := g.GetRepositoryPath(); err == nil {
+			if repoRootPath, err := g.GetMainRepositoryPath(); err == nil {
 				repoPath = repoRootPath
 			}
 		}
@@ -344,6 +367,10 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 					repoName = entry.RepositoryInfo.Repository
 				}
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s:%s: %v", repoName, entry.Branch, err))
+				if worktreePathRemoved(entry.Path) {
+					removed++
+					unregisterWorktreePath(entry.Path)
+				}
 				_ = os.Chdir(originalDir)
 				continue
 			}
@@ -354,6 +381,10 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 					repoName = entry.RepositoryInfo.Repository
 				}
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s:%s: %v", repoName, entry.Branch, err))
+				if worktreePathRemoved(entry.Path) {
+					removed++
+					unregisterWorktreePath(entry.Path)
+				}
 				_ = os.Chdir(originalDir)
 				continue
 			}
@@ -369,13 +400,23 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) error {
 		}
 
 		// Clean up registry entry after successful removal
-		if reg, err := registry.New(); err == nil {
-			_ = reg.Unregister(entry.Path)
-		}
+		unregisterWorktreePath(entry.Path)
+		removed++
 
 		// Change back to original directory
 		_ = os.Chdir(originalDir)
 	}
 
-	return nil
+	return removed, nil
+}
+
+func worktreePathRemoved(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+func unregisterWorktreePath(path string) {
+	if reg, err := registry.New(); err == nil {
+		_ = reg.Unregister(path)
+	}
 }

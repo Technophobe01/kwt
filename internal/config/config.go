@@ -89,6 +89,8 @@ func getLocalConfigPath() string {
 //   - If interactive is false (non-TTY), unknown files are skipped with a stderr warning.
 //   - On user rejection, the file is skipped (command continues, global config only).
 //   - Trust store write failures are non-fatal (merge proceeds with a stderr warning).
+//   - fleet.* keys are always ignored: sync settings are global-only because they
+//     control token sources and the hub endpoint.
 //
 // For repository_settings, merging is done by the `repository` field as the key.
 func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive bool) error {
@@ -143,11 +145,16 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 	}
 
 	for _, key := range localViper.AllKeys() {
-		switch key {
-		case "repository_settings":
+		switch {
+		case key == "repository_settings":
 			mergeRepositorySettings(localViper)
-		case "projects":
+		case key == "projects":
 			continue
+		case key == "fleet" || strings.HasPrefix(key, "fleet."):
+			// Sync settings decide where bearer tokens are read from and
+			// which hub they are sent to; accepting them from a repo-local
+			// file would let a repository exfiltrate arbitrary secrets.
+			fmt.Fprintf(os.Stderr, "kwt: ignoring %q in %s: sync settings are global-only\n", key, absPath)
 		default:
 			viper.Set(key, localViper.Get(key))
 		}
@@ -458,6 +465,21 @@ func expandConfigPaths(cfg *models.Config) error {
 		return fmt.Errorf("failed to expand worktree base dir: %w", err)
 	}
 	cfg.Worktree.BaseDir = expandedPath
+
+	if cfg.Fleet.TokenFile != "" {
+		expandedPath, err = utils.ExpandPath(cfg.Fleet.TokenFile)
+		if err != nil {
+			return fmt.Errorf("failed to expand fleet token file: %w", err)
+		}
+		cfg.Fleet.TokenFile = expandedPath
+	}
+	if cfg.Fleet.Hub.StorePath != "" {
+		expandedPath, err = utils.ExpandPath(cfg.Fleet.Hub.StorePath)
+		if err != nil {
+			return fmt.Errorf("failed to expand fleet hub store path: %w", err)
+		}
+		cfg.Fleet.Hub.StorePath = expandedPath
+	}
 
 	for i := range cfg.RepositorySettings {
 		repo := cfg.RepositorySettings[i].Repository

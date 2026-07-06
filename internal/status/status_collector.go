@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -139,8 +140,12 @@ func (c *StatusCollector) collectOne(ctx context.Context, worktree *models.Workt
 		status.Status = c.determineWorktreeState(gitStatus)
 	}
 
-	lastActivity, err := c.getLastActivity(worktree.Path)
-	if err == nil {
+	lastActivity, err := c.getLastActivity(ctx, worktree.Path)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+	} else {
 		status.LastActivity = lastActivity
 		if time.Since(lastActivity) > c.staleThreshold {
 			status.Status = models.WorktreeStatusStale
@@ -331,20 +336,32 @@ func (c *StatusCollector) determineWorktreeState(status *models.GitStatus) model
 	return models.WorktreeStatusClean
 }
 
-func (c *StatusCollector) getLastActivity(path string) (time.Time, error) {
+func (c *StatusCollector) getLastActivity(ctx context.Context, path string) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
 	// Use git ls-files to get tracked files efficiently
 	// This approach respects .gitignore patterns automatically and is much faster
 	// than walking the entire directory tree
 	g := git.New(path)
 
-	latestTime, err := c.getLastActivityFromTrackedFiles(g, path)
+	latestTime, err := c.getLastActivityFromTrackedFiles(ctx, g, path)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, ctxErr
+		}
 		// Fallback to directory walk if git command fails
-		return c.getLastActivityFallback(path)
+		return c.getLastActivityFallback(ctx, path)
+	}
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
 	}
 
 	// Also check untracked files that are not ignored
-	untrackedTime := c.getLastActivityFromUntrackedFiles(g, path)
+	untrackedTime, err := c.getLastActivityFromUntrackedFiles(ctx, g, path)
+	if err != nil {
+		return time.Time{}, err
+	}
 	if untrackedTime.After(latestTime) {
 		latestTime = untrackedTime
 	}
@@ -361,10 +378,12 @@ func (c *StatusCollector) getLastActivity(path string) (time.Time, error) {
 }
 
 // getLastActivityFromTrackedFiles gets the latest modification time from tracked files
-func (c *StatusCollector) getLastActivityFromTrackedFiles(g *git.Git, path string) (time.Time, error) {
+func (c *StatusCollector) getLastActivityFromTrackedFiles(ctx context.Context, g *git.Git, path string) (time.Time, error) {
 	// Get list of tracked files
 	// Using -z for null-terminated output to handle filenames with spaces
-	output, err := g.RunCommand("ls-files", "-z")
+	gitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := g.RunWithContext(gitCtx, "ls-files", "-z")
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -373,6 +392,9 @@ func (c *StatusCollector) getLastActivityFromTrackedFiles(g *git.Git, path strin
 	files := strings.SplitSeq(strings.TrimRight(output, "\x00"), "\x00")
 
 	for file := range files {
+		if err := ctx.Err(); err != nil {
+			return time.Time{}, err
+		}
 		if file == "" {
 			continue
 		}
@@ -392,16 +414,24 @@ func (c *StatusCollector) getLastActivityFromTrackedFiles(g *git.Git, path strin
 }
 
 // getLastActivityFromUntrackedFiles gets the latest modification time from untracked files
-func (c *StatusCollector) getLastActivityFromUntrackedFiles(g *git.Git, path string) time.Time {
+func (c *StatusCollector) getLastActivityFromUntrackedFiles(ctx context.Context, g *git.Git, path string) (time.Time, error) {
 	var latestTime time.Time
 
-	untrackedOutput, err := g.RunCommand("ls-files", "-z", "--others", "--exclude-standard")
+	gitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	untrackedOutput, err := g.RunWithContext(gitCtx, "ls-files", "-z", "--others", "--exclude-standard")
 	if err != nil {
-		return latestTime
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, ctxErr
+		}
+		return latestTime, nil
 	}
 
 	untrackedFiles := strings.SplitSeq(strings.TrimRight(untrackedOutput, "\x00"), "\x00")
 	for file := range untrackedFiles {
+		if err := ctx.Err(); err != nil {
+			return time.Time{}, err
+		}
 		if file == "" {
 			continue
 		}
@@ -417,11 +447,14 @@ func (c *StatusCollector) getLastActivityFromUntrackedFiles(g *git.Git, path str
 		}
 	}
 
-	return latestTime
+	return latestTime, nil
 }
 
 // getLastActivityFallback is the fallback method when git commands fail
-func (c *StatusCollector) getLastActivityFallback(path string) (time.Time, error) {
+func (c *StatusCollector) getLastActivityFallback(ctx context.Context, path string) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
 	var latestTime time.Time
 
 	// Common large directories to skip
@@ -444,6 +477,9 @@ func (c *StatusCollector) getLastActivityFallback(path string) (time.Time, error
 	}
 
 	err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return nil // Continue even if we can't access a file
 		}

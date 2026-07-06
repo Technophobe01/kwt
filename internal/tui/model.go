@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 type inputMode int
@@ -31,14 +32,16 @@ const (
 )
 
 type confirmState struct {
-	kind confirmKind
-	row  Row
-	text string
+	kind  confirmKind
+	row   Row
+	text  string
+	force bool
 }
 
 type rowsMsg struct {
-	rows []Row
-	err  error
+	rows     []Row
+	warnings []string
+	err      error
 }
 
 type actionDoneMsg struct {
@@ -56,6 +59,7 @@ type Model struct {
 	input   textinput.Model
 
 	rows                []Row
+	warnings            []string
 	cursor              int
 	filter              string
 	projectPerspective  string
@@ -132,6 +136,10 @@ func (m Model) View() tea.View {
 		b.WriteString("\n\n")
 		b.WriteString(m.renderRows())
 		b.WriteString("\n")
+		if warnings := m.renderWarnings(); warnings != "" {
+			b.WriteString(warnings)
+			b.WriteString("\n")
+		}
 		b.WriteString(m.renderStatusLine())
 		b.WriteString("\n")
 		b.WriteString(m.renderFooter())
@@ -170,6 +178,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		return m.startPendingRefresh()
 	}
+	m.warnings = msg.warnings
 
 	oldRows := m.filteredRows()
 	oldCursor := m.cursor
@@ -273,6 +282,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.startNewBranch()
 	case key.Matches(msg, m.keys.Delete):
 		return m.startDelete()
+	case key.Matches(msg, m.keys.Sync):
+		return m.syncSelected(m.selectedRow())
 	case key.Matches(msg, m.keys.Shell):
 		return m.shellSelected()
 	case key.Matches(msg, m.keys.Kill):
@@ -469,10 +480,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	row := m.confirm.row
 	kind := m.confirm.kind
+	force := m.confirm.force
 	m.confirm = confirmState{}
 	switch kind {
 	case confirmDelete:
-		return m, m.removeWorktreeCmd(row)
+		return m, m.removeWorktreeCmd(row, force)
 	case confirmKill:
 		return m, m.killSessionCmd(row)
 	default:
@@ -483,6 +495,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
+		if row.Fleet != nil && row.Fleet.CanMaterialize {
+			m.message = "press s to sync this worktree"
+			return m, nil
+		}
 		m.message = "no worktree selected"
 		return m, nil
 	}
@@ -496,7 +512,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
 	if row.Entry == nil {
-		m.message = "no worktree selected"
+		m.message = "sync this worktree before opening a shell"
 		return m, nil
 	}
 	m.handoff = Handoff{Kind: HandoffShell, Row: row}
@@ -524,7 +540,7 @@ func (m Model) cycleLayout() (Model, tea.Cmd) {
 			m.selectedLayout = m.layouts[next]
 		}
 	}
-	m.message = fmt.Sprintf("layout %s", m.layoutLabel())
+	m.message = ""
 	return m, nil
 }
 
@@ -538,6 +554,23 @@ func (m Model) startNewBranch() (Model, tea.Cmd) {
 	m.input.Prompt = fmt.Sprintf("new branch in %s: ", rowRepoName(row))
 	m.input.SetValue("")
 	return m, m.input.Focus()
+}
+
+func (m Model) syncSelected(row Row) (Model, tea.Cmd) {
+	if row.Fleet == nil {
+		m.message = "nothing to sync for this row"
+		return m, nil
+	}
+	if row.Fleet.Local {
+		m.message = "nothing to sync for this row"
+		return m, nil
+	}
+	if !row.Fleet.CanMaterialize {
+		m.message = "cannot sync this worktree"
+		return m, nil
+	}
+	m.message = fmt.Sprintf("syncing %s", rowLabel(row))
+	return m, m.materializeWorktreeCmd(row)
 }
 
 func (m Model) startFilter() (Model, tea.Cmd) {
@@ -602,12 +635,38 @@ func (m Model) startDelete() (Model, tea.Cmd) {
 		m.message = "refusing to remove a main worktree"
 		return m, nil
 	}
+	dirty := rowHasUncommittedChanges(row)
 	text := fmt.Sprintf("delete %s? [y/N]", rowLabel(row))
-	if row.SessionLive {
+	if dirty && row.SessionLive {
+		text = fmt.Sprintf("discard changes, delete %s, and kill its live workspace? [y/N]", rowLabel(row))
+	} else if dirty {
+		text = fmt.Sprintf("discard changes and delete %s? [y/N]", rowLabel(row))
+	} else if row.SessionLive {
 		text = fmt.Sprintf("delete %s and kill its live workspace? [y/N]", rowLabel(row))
 	}
-	m.confirm = confirmState{kind: confirmDelete, row: row, text: text}
+	m.confirm = confirmState{kind: confirmDelete, row: row, text: text, force: dirty}
 	return m, nil
+}
+
+func rowHasUncommittedChanges(row Row) bool {
+	if row.Status == nil {
+		return false
+	}
+	status := row.Status.GitStatus
+	if status.Added > 0 ||
+		status.Modified > 0 ||
+		status.Deleted > 0 ||
+		status.Untracked > 0 ||
+		status.Staged > 0 ||
+		status.Conflicts > 0 {
+		return true
+	}
+	switch row.Status.Status {
+	case models.WorktreeStatusModified, models.WorktreeStatusStaged, models.WorktreeStatusConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) startKill() (Model, tea.Cmd) {
@@ -630,8 +689,8 @@ func (m Model) startKill() (Model, tea.Cmd) {
 
 func (m Model) fetchRowsCmd() tea.Cmd {
 	return func() tea.Msg {
-		rows, err := m.backend.List(context.Background())
-		return rowsMsg{rows: rows, err: err}
+		rows, warnings, err := m.backend.List(context.Background())
+		return rowsMsg{rows: rows, warnings: warnings, err: err}
 	}
 }
 
@@ -649,9 +708,23 @@ func (m Model) createWorktreeCmd(row Row, branch string) tea.Cmd {
 	}
 }
 
-func (m Model) removeWorktreeCmd(row Row) tea.Cmd {
+func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.backend.RemoveWorktree(context.Background(), row); err != nil {
+		path, err := m.backend.MaterializeWorktree(context.Background(), row)
+		if err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{
+			message:    fmt.Sprintf("synced %s", rowLabel(row)),
+			refresh:    true,
+			anchorPath: path,
+		}
+	}
+}
+
+func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.backend.RemoveWorktree(context.Background(), row, force); err != nil {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
@@ -714,7 +787,8 @@ func (m Model) renderRows() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderDashboardHeader())
+	columns := dashboardColumnsForWidth(m.width)
+	b.WriteString(renderDashboardHeader(columns))
 	b.WriteString("\n")
 	now := timeNow()
 	selected := clampCursor(m.cursor, len(rows))
@@ -725,24 +799,7 @@ func (m Model) renderRows() string {
 		if i == selected {
 			cursor = "▸"
 		}
-		activity := "-"
-		if row.Status != nil {
-			activity = formatActivityAt(row.Status.LastActivity, now)
-		}
-		ws := "offline"
-		if row.SessionLive {
-			ws = m.theme.live.Render("live")
-		} else {
-			ws = m.theme.dim.Render(ws)
-		}
-		line := cursor + " " + renderDashboardCells([]string{
-			rowRepoName(row),
-			rowBranch(row),
-			formatChanges(row.Status),
-			formatSync(row.Status),
-			activity,
-			ws,
-		})
+		line := cursor + " " + renderDashboardCells(columns, dashboardCellValues(row, now), m.dashboardCellStyles(row))
 		if i == selected {
 			line = m.theme.cursor.Render(line)
 		}
@@ -750,6 +807,17 @@ func (m Model) renderRows() string {
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) dashboardCellStyles(row Row) map[string]dashboardCellStyle {
+	styles := make(map[string]dashboardCellStyle, 1)
+	switch formatWorkspace(row) {
+	case "live":
+		styles[dashboardColumnWorkspace] = func(s string) string { return m.theme.live.Render(s) }
+	case "remote", "offline":
+		styles[dashboardColumnWorkspace] = func(s string) string { return m.theme.dim.Render(s) }
+	}
+	return styles
 }
 
 func (m Model) availableRowCount() int {
@@ -788,6 +856,13 @@ func currentRowIndex(rows []Row) (int, bool) {
 	return 0, false
 }
 
+func (m Model) renderWarnings() string {
+	if len(m.warnings) == 0 {
+		return ""
+	}
+	return m.theme.warning.Render("warning: " + strings.Join(m.warnings, "; "))
+}
+
 func (m Model) renderStatusLine() string {
 	switch {
 	case m.err != nil:
@@ -808,6 +883,31 @@ func (m Model) renderStatusLine() string {
 
 func (m Model) renderSelectionDetails() string {
 	row := m.selectedRow()
+	if row.Entry == nil && row.Fleet != nil {
+		location := "remote"
+		if row.Fleet.MaterializeHost != "" {
+			location = "remote on " + row.Fleet.MaterializeHost
+		}
+		detail := location
+		if row.Fleet.RemotePath != "" {
+			detail += "\n" + abbreviateHome(row.Fleet.RemotePath)
+		}
+		if row.Fleet.CanMaterialize {
+			detail += "\npress s to sync (branch must be pushed/fetched here)"
+		}
+		if row.Fleet.RemoteAhead > 0 {
+			upstream := strings.TrimSpace(row.Fleet.RemoteUpstream)
+			if upstream == "" {
+				upstream = "upstream"
+			}
+			detail += fmt.Sprintf("\nsource is %d %s ahead of %s",
+				row.Fleet.RemoteAhead,
+				plural(row.Fleet.RemoteAhead, "commit", "commits"),
+				upstream,
+			)
+		}
+		return fmt.Sprintf("selected %s · %s", rowLabel(row), detail)
+	}
 	path := rowPath(row)
 	if path == "" {
 		return ""
@@ -816,8 +916,83 @@ func (m Model) renderSelectionDetails() string {
 	if row.SessionLive {
 		workspace = "workspace live"
 	}
-	return fmt.Sprintf("selected %s · layout %s · %s\n%s",
-		rowLabel(row), m.layoutLabel(), workspace, abbreviateHome(path))
+	detail := fmt.Sprintf("selected %s · layout %s · %s", rowLabel(row), m.renderLayoutLabel(), workspace)
+	if fleetDetail := renderLocalFleetDetails(row); fleetDetail != "" {
+		detail += "\n" + fleetDetail
+	}
+	return detail + "\n" + abbreviateHome(path)
+}
+
+func renderLocalFleetDetails(row Row) string {
+	if row.Fleet == nil {
+		return ""
+	}
+	details := make([]string, 0, 3)
+	otherHosts := localFleetOtherHosts(row)
+	if len(otherHosts) > 0 {
+		details = append(details, "also on "+strings.Join(otherHosts, ", "))
+	}
+	if sync := renderFleetSyncDetail(row.Fleet.Sync, otherHosts); sync != "" {
+		details = append(details, sync)
+	}
+	if dirty := renderFleetDirtyDetail(row.Fleet.Dirty, otherHosts); dirty != "" {
+		details = append(details, dirty)
+	}
+	return strings.Join(details, " · ")
+}
+
+func localFleetOtherHosts(row Row) []string {
+	if row.Fleet == nil {
+		return nil
+	}
+	hosts := make([]string, 0, len(row.Fleet.Hosts))
+	for _, host := range row.Fleet.Hosts {
+		host = strings.TrimSpace(host)
+		if host == "" || host == "local" {
+			continue
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+func renderFleetSyncDetail(sync string, otherHosts []string) string {
+	sync = strings.TrimSpace(sync)
+	if sync == "" || sync == "same" {
+		return ""
+	}
+	if different, ok := strings.CutPrefix(sync, "different: "); ok {
+		host, rest, _ := strings.Cut(strings.TrimSpace(different), " ")
+		rest = strings.TrimSpace(rest)
+		if len(otherHosts) == 1 && host == otherHosts[0] {
+			if rest == "" {
+				return "head differs"
+			}
+			return "head differs " + rest
+		}
+		return "head differs from " + strings.TrimSpace(different)
+	}
+	return "heads " + sync
+}
+
+func renderFleetDirtyDetail(dirty string, otherHosts []string) string {
+	dirty = strings.TrimSpace(dirty)
+	if dirty == "" || dirty == "clean" {
+		return ""
+	}
+	entries := parseFleetDirtyEntries(dirty)
+	if len(entries) == 0 {
+		return "changes " + dirty
+	}
+	if len(entries) == 1 {
+		entry := entries[0]
+		summary := compactFleetDirtySummary(entry.summary)
+		if len(otherHosts) == 1 && entry.host == otherHosts[0] {
+			return "remote changes " + summary
+		}
+		return fmt.Sprintf("changes on %s %s", entry.host, summary)
+	}
+	return fmt.Sprintf("remote changes on %d hosts", len(entries))
 }
 
 func (m Model) layoutLabel() string {
@@ -825,6 +1000,10 @@ func (m Model) layoutLabel() string {
 		return "default"
 	}
 	return m.selectedLayout
+}
+
+func (m Model) renderLayoutLabel() string {
+	return m.theme.success.Render(m.layoutLabel())
 }
 
 func (m Model) projectFilterLabel() string {
@@ -1020,7 +1199,7 @@ func (m Model) renderHelp() string {
 		"kwt help",
 		"",
 		"↑/k ↓/j move    g/G top/bottom",
-		"enter attach    L layout    n new    d delete    s shell    K kill workspace",
+		"enter attach    L layout    n new    d delete    s sync    c shell    K kill workspace",
 		"P project       p filter    / search    r refresh    esc cancel/clear    q quit",
 		"",
 		"Press any key to close help.",

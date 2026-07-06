@@ -1,16 +1,20 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/status"
@@ -31,6 +35,8 @@ type tuiBackend struct {
 	collectStatuses          func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions             func() ([]string, error)
 	registerProject          func(models.Project) error
+	readFleetState           func(context.Context, *models.Config) (fleet.FleetState, error)
+	now                      func() time.Time
 }
 
 func newTUIBackend(cfg *models.Config) *tuiBackend {
@@ -50,32 +56,34 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
 		registerProject:          config.RegisterProject,
+		readFleetState:           readTUIFleetState,
+		now:                      time.Now,
 	}
 }
 
-func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, error) {
+func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
 	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover worktrees: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
 	}
 
 	entries = mergeTUIEntries(entries, b.discoverRegisteredProjectWorktrees())
 
 	launchEntries, err := b.discoverLaunchWorktrees(b.launchDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
 	}
 	b.registerLaunchProject(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
 	statusByPath, err := b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sessions, err := b.listSessions()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	liveSessions := make(map[string]bool, len(sessions))
 	for _, session := range sessions {
@@ -90,7 +98,125 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, error) {
 		}
 		rows = append(rows, buildTUIRow(entry, st, liveSessions))
 	}
-	return rows, nil
+	rows, warnings := b.mergeFleetRows(ctx, rows)
+	return rows, warnings, nil
+}
+
+func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
+	if b.cfg == nil || !b.cfg.Fleet.Enabled || b.readFleetState == nil {
+		return rows, nil
+	}
+	state, err := b.readFleetState(ctx, b.cfg)
+	if err != nil {
+		return rows, nil
+	}
+	currentHost, err := currentFleetHostID(b.cfg)
+	if err != nil {
+		return rows, nil
+	}
+	warnings := make([]string, 0, len(state.Warnings))
+	for _, warning := range state.Warnings {
+		warnings = append(warnings, warning.String())
+	}
+
+	byKey := make(map[string]int, len(rows))
+	for i := range rows {
+		if key := tuiFleetKeyForRow(rows[i]); key != "" {
+			byKey[key] = i
+		}
+	}
+
+	now := b.now()
+	for _, fleetRow := range state.Rows {
+		// Local presence is decided by the rows just discovered on disk, not
+		// by hub observations for this host, which can be stale when a
+		// publish fails.
+		rowIndex, local := byKey[tuiFleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
+		var localRow dashboard.Row
+		if local {
+			localRow = rows[rowIndex]
+		}
+		fleetRow = localAwareFleetRow(fleetRow, currentHost, local, localRow, now)
+		info := dashboardFleetInfo(fleetRow, fleet.BuildStatusRow(fleetRow, currentHost, now), currentHost, local)
+		if info == nil {
+			continue
+		}
+		if local {
+			rows[rowIndex].Fleet = info
+			continue
+		}
+		if info.CanMaterialize {
+			// MaterializeWorktree needs a registered local project to add
+			// the worktree from; do not advertise sync without one.
+			if _, ok := b.projectForFleetInfo(info); !ok {
+				info.CanMaterialize = false
+			}
+		}
+		if len(info.Hosts) == 0 {
+			// Only this host's own stale observation backs the row and the
+			// worktree is gone locally; nothing real to show.
+			continue
+		}
+		rows = append(rows, dashboard.Row{Fleet: info})
+	}
+	return rows, warnings
+}
+
+func fleetRowRef(row fleet.FleetRow) string {
+	ref := strings.TrimSpace(row.Ref)
+	if ref == "" {
+		ref = strings.TrimSpace(row.Branch)
+	}
+	return ref
+}
+
+// localAwareFleetRow rebuilds a hub row's observations around local
+// discovery: this host's hub observation is dropped (it may be stale when a
+// publish failed) and, when the row exists locally, replaced with what is on
+// disk right now, so Sync/Dirty/Freshness reflect reality.
+func localAwareFleetRow(
+	row fleet.FleetRow,
+	currentHost string,
+	local bool,
+	localRow dashboard.Row,
+	now time.Time,
+) fleet.FleetRow {
+	observations := make([]fleet.Observation, 0, len(row.Observations)+1)
+	for _, observation := range row.Observations {
+		if strings.TrimSpace(observation.HostID) == currentHost {
+			continue
+		}
+		observations = append(observations, observation)
+	}
+	if local {
+		if observation, ok := localFleetObservation(currentHost, localRow, now); ok {
+			observations = append(observations, observation)
+		}
+	}
+	row.Observations = observations
+	return row
+}
+
+func localFleetObservation(currentHost string, localRow dashboard.Row, now time.Time) (fleet.Observation, bool) {
+	if localRow.Entry == nil {
+		return fleet.Observation{}, false
+	}
+	head := strings.TrimSpace(localRow.Entry.CommitHash)
+	if head == "" {
+		return fleet.Observation{}, false
+	}
+	observation := fleet.Observation{
+		HostID:     currentHost,
+		Path:       localRow.Entry.Path,
+		Head:       head,
+		ObservedAt: now,
+	}
+	if localRow.Status != nil {
+		observation.LastActivity = localRow.Status.LastActivity
+	}
+	// Status is deliberately left zero: local dirt renders from the on-disk
+	// worktree status, keeping host-labeled fleet dirt scoped to other hosts.
+	return observation, true
 }
 
 func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
@@ -192,7 +318,21 @@ func sameRegisteredProject(a, b models.Project) bool {
 }
 
 func shouldReuseExistingProject(existing, discovered models.Project) bool {
+	// A publish-canonical identity is authoritative: manifest publishing
+	// prefers project.Repository over origin, so launch registration must
+	// not replace it with an origin-derived identity (e.g. a fork remote).
+	// Weaker identities (path-like, local/...) never reach the hub, so an
+	// origin-derived identity may upgrade them — but a path fallback must
+	// not downgrade a stable one.
+	if hasPublishableProjectIdentity(existing) {
+		return true
+	}
 	return hasStableProjectIdentity(existing) && !hasStableProjectIdentity(discovered)
+}
+
+func hasPublishableProjectIdentity(project models.Project) bool {
+	_, ok := fleet.CanonicalRepositoryIdentity(project.Repository)
+	return ok
 }
 
 func hasStableProjectIdentity(project models.Project) bool {
@@ -242,15 +382,25 @@ func applyProjectIdentityFallback(
 	entries []*discovery.GlobalWorktreeEntry,
 	project models.Project,
 ) []*discovery.GlobalWorktreeEntry {
-	fallback := repositoryInfoFromProject(project)
-	if fallback == nil {
+	info := repositoryInfoFromProject(project)
+	if info == nil {
 		return entries
 	}
+	// Manifest publishing prefers the configured project.Repository over the
+	// origin URL only when it is publish-canonical. Mirror that precedence
+	// here so local rows and hub rows agree on identity: a canonical
+	// configured identity overrides a fork origin, while path-like or
+	// local/... identities never reach the hub and must not displace the
+	// origin-derived identity that does.
+	override := hasPublishableProjectIdentity(project)
 	for _, entry := range entries {
-		if entry == nil || entry.RepositoryURL != "" {
+		if entry == nil {
 			continue
 		}
-		entry.RepositoryInfo = fallback
+		if entry.RepositoryURL != "" && !override {
+			continue
+		}
+		entry.RepositoryInfo = info
 	}
 	return entries
 }
@@ -443,14 +593,266 @@ func buildTUIRow(
 	}
 }
 
+func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetState, error) {
+	if cfg != nil && cfg.Fleet.Enabled {
+		var publishWarning bytes.Buffer
+		_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
+	}
+	client, err := newFleetClientFromConfig(cfg)
+	if err != nil {
+		return fleet.FleetState{}, err
+	}
+	state, _, notModified, err := client.State(ctx, "")
+	if err != nil {
+		return fleet.FleetState{}, err
+	}
+	if notModified {
+		return fleet.FleetState{}, nil
+	}
+	return state, nil
+}
+
+func tuiFleetKeyForRow(row dashboard.Row) string {
+	if row.Fleet != nil {
+		return tuiFleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
+	}
+	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
+		return ""
+	}
+	identity := row.Entry.RepositoryInfo.FullPath
+	if identity == "" && row.Entry.RepositoryInfo.Host != "" && row.Entry.RepositoryInfo.Owner != "" && row.Entry.RepositoryInfo.Repository != "" {
+		identity = path.Join(row.Entry.RepositoryInfo.Host, row.Entry.RepositoryInfo.Owner, row.Entry.RepositoryInfo.Repository)
+	}
+	if identity == "" {
+		return ""
+	}
+	branch := strings.TrimSpace(row.Entry.Branch)
+	if branch == "" || branch == "HEAD" {
+		// Hub manifests key detached worktrees by commit SHA.
+		return tuiFleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
+	}
+	return tuiFleetKey(identity, "branch", branch)
+}
+
+func tuiFleetKey(projectIdentity string, kind string, ref string) string {
+	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	ref = strings.TrimSpace(ref)
+	if projectIdentity == "" || kind == "" || ref == "" {
+		return ""
+	}
+	return projectIdentity + "\x00" + kind + "\x00" + ref
+}
+
+func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string, local bool) *dashboard.FleetInfo {
+	ref := fleetRowRef(row)
+	if row.ProjectIdentity == "" || row.Kind == "" || ref == "" {
+		return nil
+	}
+	info := &dashboard.FleetInfo{
+		ProjectIdentity: row.ProjectIdentity,
+		ProjectName:     rendered.Project,
+		Kind:            row.Kind,
+		Ref:             ref,
+		Branch:          strings.TrimSpace(row.Branch),
+		Local:           local,
+		Hosts:           fleetDisplayHosts(row.Observations, currentHost, local),
+		Sync:            rendered.Sync,
+		Dirty:           rendered.Dirty,
+		Freshness:       rendered.Freshness,
+	}
+	if info.ProjectName == "" {
+		info.ProjectName = strings.TrimSpace(row.ProjectName)
+	}
+	if info.ProjectName == "" {
+		info.ProjectName = row.ProjectIdentity
+	}
+	if info.Branch == "" && row.Kind == "branch" {
+		info.Branch = ref
+	}
+	info.MaterializeLabel = info.Branch
+	if info.MaterializeLabel == "" {
+		info.MaterializeLabel = info.Ref
+	}
+	if !info.Local {
+		if observation, ok := fleetMaterializeObservation(row.Observations, currentHost); ok {
+			info.MaterializeHost = observation.HostID
+			info.RemotePath = observation.Path
+			info.RemoteHead = observation.Head
+			info.RemoteUpstream = observation.Upstream
+			info.RemoteAhead = observation.Ahead
+		}
+		info.CanMaterialize = row.Kind == "branch" && info.Branch != ""
+	}
+	return info
+}
+
+func fleetDisplayHosts(observations []fleet.Observation, currentHost string, local bool) []string {
+	seen := make(map[string]struct{}, len(observations)+1)
+	for _, observation := range observations {
+		hostID := strings.TrimSpace(observation.HostID)
+		if hostID == "" || hostID == currentHost {
+			// This host's hub observation may be stale; the local flag from
+			// on-disk discovery decides whether "local" is listed.
+			continue
+		}
+		seen[hostID] = struct{}{}
+	}
+	if local {
+		seen["local"] = struct{}{}
+	}
+	hosts := make([]string, 0, len(seen))
+	for hostID := range seen {
+		hosts = append(hosts, hostID)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func fleetMaterializeObservation(observations []fleet.Observation, currentHost string) (fleet.Observation, bool) {
+	for _, observation := range observations {
+		hostID := strings.TrimSpace(observation.HostID)
+		if hostID != "" && hostID != currentHost {
+			return observation, true
+		}
+	}
+	return fleet.Observation{}, false
+}
+
 func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, branch string) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	return worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	if err != nil {
+		return "", err
+	}
+	publishTUIFleetBestEffort(ctx, b.cfg)
+	return path, nil
 }
 
-func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) error {
+func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {
+	if row.Fleet == nil {
+		return "", fmt.Errorf("no fleet worktree selected")
+	}
+	if row.Fleet.Local {
+		return "", fmt.Errorf("worktree already synced")
+	}
+	if row.Fleet.Kind != "branch" || strings.TrimSpace(row.Fleet.Branch) == "" {
+		return "", fmt.Errorf("only branch worktrees can be synced")
+	}
+	project, ok := b.projectForFleetInfo(row.Fleet)
+	if !ok {
+		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
+	}
+	repo := git.New(project.Path)
+	// `git worktree add` auto-creates a local branch from a fetched remote;
+	// remember whether one existed so a failed verification can clean it up.
+	branchExisted := localBranchExists(ctx, repo, row.Fleet.Branch)
+	path, err := worktree.New(repo, b.cfg).AddWithOptions(
+		row.Fleet.Branch,
+		"",
+		false,
+		worktree.AddOptions{SkipSetup: true},
+	)
+	if err != nil {
+		return "", fmt.Errorf(
+			"could not sync %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
+			row.Fleet.Branch,
+			err,
+		)
+	}
+	if err := b.verifyMaterializedHead(ctx, project.Path, path, row.Fleet); err != nil {
+		if !branchExisted {
+			_ = repo.DeleteBranch(row.Fleet.Branch, true)
+		}
+		return "", err
+	}
+	publishTUIFleetBestEffort(ctx, b.cfg)
+	return path, nil
+}
+
+func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string, worktreePath string, info *dashboard.FleetInfo) error {
+	if info == nil || strings.TrimSpace(info.RemoteHead) == "" {
+		return nil
+	}
+	want := strings.TrimSpace(info.RemoteHead)
+	got, err := git.New(worktreePath).RunWithContext(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
+		return fmt.Errorf("could not verify synced head for %s; push or fetch it first: %w", info.Branch, err)
+	}
+	got = strings.TrimSpace(got)
+	if strings.EqualFold(got, want) {
+		return nil
+	}
+	_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
+	return fmt.Errorf(
+		"synced %s at %s, but hub reported head %s; push or fetch the reported commit first",
+		info.Branch,
+		shortCommit(got),
+		shortCommit(want),
+	)
+}
+
+func localBranchExists(ctx context.Context, g *git.Git, branch string) bool {
+	_, err := g.RunWithContext(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
+}
+
+func shortCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) > 12 {
+		return commit[:12]
+	}
+	if commit == "" {
+		return "unknown"
+	}
+	return commit
+}
+
+func publishTUIFleetBestEffort(ctx context.Context, cfg *models.Config) {
+	if cfg == nil || !cfg.Fleet.Enabled {
+		return
+	}
+	var publishWarning bytes.Buffer
+	_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
+}
+
+func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Project, bool) {
+	if b == nil || b.cfg == nil || info == nil {
+		return models.Project{}, false
+	}
+	projectIdentity := strings.TrimSpace(info.ProjectIdentity)
+	if projectIdentity == "" {
+		return models.Project{}, false
+	}
+	for _, project := range b.cfg.Projects {
+		if strings.TrimSpace(project.Path) == "" {
+			continue
+		}
+		if sameRepositoryIdentity(project.Repository, projectIdentity) {
+			return project, true
+		}
+	}
+	return models.Project{}, false
+}
+
+func sameRepositoryIdentity(left string, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	normalizedLeft, leftErr := fleet.NormalizeRepositoryIdentity(left)
+	normalizedRight, rightErr := fleet.NormalizeRepositoryIdentity(right)
+	return leftErr == nil && rightErr == nil && strings.EqualFold(normalizedLeft, normalizedRight)
+}
+
+func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, force bool) error {
 	if row.Entry == nil {
 		return fmt.Errorf("no worktree selected")
 	}
@@ -462,10 +864,10 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) erro
 	if err != nil {
 		return err
 	}
-	if err := b.removeWorktreeFromRoot(repoRoot, row.Entry.Path); err != nil {
+	if err := b.removeWorktreeFromRoot(repoRoot, row.Entry.Path, force); err != nil {
 		if strings.Contains(err.Error(), "contains modified or untracked files") ||
 			strings.Contains(err.Error(), "has local changes") {
-			return fmt.Errorf("worktree has uncommitted changes (use kwt remove --force)")
+			return fmt.Errorf("worktree has uncommitted changes")
 		}
 		return err
 	}
@@ -473,6 +875,8 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row) erro
 	if reg, err := registry.New(); err == nil {
 		_ = reg.Unregister(row.Entry.Path)
 	}
+
+	publishTUIFleetBestEffort(ctx, b.cfg)
 
 	if row.SessionLive && row.SessionName != "" {
 		return b.tmux.KillSession(row.SessionName)
@@ -541,8 +945,8 @@ func rowRepositoryIdentityCandidates(info *url.RepositoryInfo) []string {
 	return candidates
 }
 
-func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string) error {
-	err := worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, false)
+func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string, force bool) error {
+	err := worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
 	if err == nil || !isWorktreeValidationError(err) {
 		return err
 	}
@@ -550,7 +954,7 @@ func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string
 	if repairErr := repairLinkedWorktreeGitFile(repoRoot, worktreePath); repairErr != nil {
 		return fmt.Errorf("%w (failed to repair worktree metadata: %v)", err, repairErr)
 	}
-	return worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, false)
+	return worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
 }
 
 func isWorktreeValidationError(err error) bool {

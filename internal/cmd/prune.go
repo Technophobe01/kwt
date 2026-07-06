@@ -54,12 +54,13 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		return runPruneExpired(cmd, args)
 	}
 
-	return ExecuteWithContext(true, func(ctx *CommandContext) error {
+	return ExecuteWithArgs(true, func(ctx *CommandContext, cmd *cobra.Command, args []string) error {
 		if err := ctx.WorktreeManager.Prune(); err != nil {
 			return fmt.Errorf("failed to prune worktrees: %w", err)
 		}
 
 		ctx.Printer.PrintSuccess("Pruned stale worktree information")
+		publishFleetBestEffortForCommand(cmd, ctx.Config)
 		return nil
 	})(cmd, args)
 }
@@ -78,6 +79,7 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 
 	var removed int
 	var skipped int
+	var changed int
 
 	for _, entry := range expired {
 		// Never remove main worktrees
@@ -86,6 +88,25 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 				fmt.Printf("Would skip (main worktree): %s\n", entry.Path)
 			}
 			skipped++
+			continue
+		}
+
+		// If the worktree directory is already gone, unregistering the entry
+		// is the only remaining mutation and does not require a git status check.
+		if _, err := os.Stat(entry.Path); os.IsNotExist(err) {
+			if pruneDryRun {
+				fmt.Printf("Would unregister (already deleted): %s\n", entry.Path)
+				removed++
+				continue
+			}
+			if err := reg.Unregister(entry.Path); err != nil {
+				fmt.Printf("Warning: failed to unregister %s: %v\n", entry.Path, err)
+				skipped++
+				continue
+			}
+			fmt.Printf("Unregistered (already deleted): %s\n", entry.Path)
+			removed++
+			changed++
 			continue
 		}
 
@@ -108,22 +129,6 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Check if worktree directory still exists
-		if _, err := os.Stat(entry.Path); os.IsNotExist(err) {
-			if pruneDryRun {
-				fmt.Printf("Would unregister (already deleted): %s\n", entry.Path)
-				removed++
-				continue
-			}
-			// Directory already gone, just unregister
-			if err := reg.Unregister(entry.Path); err != nil {
-				fmt.Printf("Warning: failed to unregister %s: %v\n", entry.Path, err)
-			}
-			fmt.Printf("Unregistered (already deleted): %s\n", entry.Path)
-			removed++
-			continue
-		}
-
 		if pruneDryRun {
 			fmt.Printf("Would remove: %s (branch: %s)\n", entry.Path, entry.Branch)
 			removed++
@@ -137,6 +142,7 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 			skipped++
 			continue
 		}
+		changed++
 
 		// Unregister from registry
 		if err := reg.Unregister(entry.Path); err != nil {
@@ -151,6 +157,12 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\nDry run: would remove %d worktree(s), skip %d\n", removed, skipped)
 	} else {
 		fmt.Printf("\nRemoved %d expired worktree(s), skipped %d\n", removed, skipped)
+	}
+
+	if changed > 0 {
+		if cfg, err := loadFleetConfig(); err == nil {
+			publishFleetBestEffortForCommand(cmd, cfg)
+		}
 	}
 
 	return nil
