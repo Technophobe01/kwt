@@ -29,6 +29,7 @@ const (
 	confirmNone confirmKind = iota
 	confirmDelete
 	confirmKill
+	confirmUnregister
 )
 
 type confirmState struct {
@@ -487,6 +488,8 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, m.removeWorktreeCmd(row, force)
 	case confirmKill:
 		return m, m.killSessionCmd(row)
+	case confirmUnregister:
+		return m, m.unregisterWorkspaceCmd(row)
 	default:
 		return m, nil
 	}
@@ -494,7 +497,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		if row.Fleet != nil && row.Fleet.CanMaterialize {
 			m.message = "press s to sync this worktree"
 			return m, nil
@@ -511,7 +514,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		m.message = "sync this worktree before opening a shell"
 		return m, nil
 	}
@@ -546,6 +549,10 @@ func (m Model) cycleLayout() (Model, tea.Cmd) {
 
 func (m Model) startNewBranch() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Workspace != nil {
+		m.message = "not a git worktree"
+		return m, nil
+	}
 	if row.Entry == nil {
 		m.message = "no worktree selected"
 		return m, nil
@@ -627,6 +634,14 @@ func (m Model) cursorAfterProjectChange(selectedPath string) int {
 
 func (m Model) startDelete() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Workspace != nil {
+		m.confirm = confirmState{
+			kind: confirmUnregister,
+			row:  row,
+			text: fmt.Sprintf("unregister workspace %s? (directory is kept) [y/N]", row.Workspace.Name),
+		}
+		return m, nil
+	}
 	if row.Entry == nil {
 		m.message = "no worktree selected"
 		return m, nil
@@ -671,7 +686,7 @@ func rowHasUncommittedChanges(row Row) bool {
 
 func (m Model) startKill() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		m.message = "no worktree selected"
 		return m, nil
 	}
@@ -728,6 +743,15 @@ func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
+	}
+}
+
+func (m Model) unregisterWorkspaceCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.backend.UnregisterWorkspace(row); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{message: "workspace unregistered", refresh: true}
 	}
 }
 

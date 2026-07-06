@@ -111,6 +111,48 @@ func viewContent(model Model) string {
 	return model.View().Content
 }
 
+func TestWorkspaceRowActions(t *testing.T) {
+	row := Row{
+		Workspace:   &WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+		SessionName: "kwt-workspace-dir-notes-12345678",
+		SessionLive: true,
+	}
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	// Open: workspace rows hand off to attach outside tmux.
+	next, _ := model.openSelected()
+	assert.Equal(t, HandoffAttach, next.Handoff().Kind)
+
+	// New branch: gated with a message.
+	next, _ = model.startNewBranch()
+	assert.Contains(t, next.message, "not a git worktree")
+
+	// Sync: already gated by the row.Fleet == nil branch.
+	next, _ = model.syncSelected(row)
+	assert.Contains(t, next.message, "nothing to sync")
+
+	// Kill: allowed for live sessions.
+	next, _ = model.startKill()
+	assert.Equal(t, confirmKill, next.confirm.kind)
+
+	// Delete key: offers unregister, never worktree removal.
+	next, _ = model.startDelete()
+	require.Equal(t, confirmUnregister, next.confirm.kind)
+	assert.Contains(t, next.confirm.text, "unregister")
+
+	// Confirming with y calls Backend.UnregisterWorkspace and refreshes.
+	_, cmd := updateModel(t, next, press("y"))
+	require.NotNil(t, cmd)
+	msg := cmd()
+	done, ok := msg.(actionDoneMsg)
+	require.True(t, ok)
+	assert.True(t, done.refresh)
+	require.Len(t, backend.unregistered, 1)
+	assert.Equal(t, "notes", backend.unregistered[0].Workspace.Name)
+}
+
 func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
 	model := NewModel(&fakeBackend{}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{

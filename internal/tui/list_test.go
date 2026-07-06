@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -34,6 +36,20 @@ func TestRowRepoNameFallsBackToPathBase(t *testing.T) {
 
 	assert.Equal(t, "no-info", rowRepoName(row))
 	assert.Equal(t, "no-info:main", rowLabel(row))
+}
+
+func TestWorkspaceRowRendering(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	row := Row{
+		Workspace:   &WorkspaceInfo{Name: "notes", Path: filepath.Join(home, "notes")},
+		SessionLive: true,
+	}
+
+	assert.Equal(t, "notes", rowRepoName(row))
+	assert.Equal(t, "~/notes", rowBranch(row))
+	assert.Equal(t, filepath.Join(home, "notes"), rowPath(row))
+	assert.Equal(t, "local", formatMachines(row))
+	assert.Equal(t, "live", formatWorkspace(row))
 }
 
 func TestSortRowsByRepoThenBranch(t *testing.T) {
