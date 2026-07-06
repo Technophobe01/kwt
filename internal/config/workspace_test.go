@@ -112,6 +112,32 @@ func TestRegisterWorkspaceRejectsDuplicateNameForDifferentPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "--name")
 }
 
+// TestRegisterWorkspaceDedupesUnexpandedStoredPath guards against a stored
+// workspace path like "~/notes" (unexpanded, e.g. hand-edited into the
+// config, or written before path normalization existed) failing to dedupe
+// against the same directory registered later via its resolved absolute
+// path. Without normalizing the comparison, this would either duplicate the
+// entry or reject the re-registration as a name collision.
+func TestRegisterWorkspaceDedupesUnexpandedStoredPath(t *testing.T) {
+	configHome := workspaceTestEnv(t)
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	notesDir := filepath.Join(tempHome, "notes")
+	require.NoError(t, os.MkdirAll(notesDir, 0o755))
+
+	configPath := filepath.Join(configHome, configName+"."+configType)
+	unexpanded := "[[workspaces]]\nname = \"old\"\npath = \"~/notes\"\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(unexpanded), 0o644))
+
+	stored, err := RegisterWorkspace(models.Workspace{Name: "new", Path: notesDir})
+
+	require.NoError(t, err)
+	assert.Equal(t, "new", stored.Name)
+	workspaces := registeredWorkspaces(t)
+	require.Len(t, workspaces, 1, "resolved path must dedupe against the unexpanded stored path")
+	assert.Equal(t, "new", workspaces[0].Name)
+}
+
 func TestUnregisterWorkspace(t *testing.T) {
 	workspaceTestEnv(t)
 	dir := filepath.Join(t.TempDir(), "notes")

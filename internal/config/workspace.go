@@ -40,7 +40,7 @@ func RegisterWorkspace(workspace models.Workspace) (models.Workspace, error) {
 
 	updated := false
 	for i := range workspaces {
-		if workspaces[i].Path == workspace.Path {
+		if sameProjectPath(workspaces[i].Path, workspace.Path) {
 			workspaces[i] = workspace
 			updated = true
 			continue

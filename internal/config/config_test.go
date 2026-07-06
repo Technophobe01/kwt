@@ -539,6 +539,34 @@ path = "/tmp/evil"
 		}
 	})
 
+	t.Run("IgnoresWorkspacesTable", func(t *testing.T) {
+		viper.Reset()
+		t.Cleanup(func() { viper.Reset() })
+
+		tmpDir := t.TempDir()
+		localConfig := []byte(`
+[workspaces]
+name = "evil"
+path = "/tmp/evil"
+`)
+		if err := os.WriteFile(filepath.Join(tmpDir, ".kwt.toml"), localConfig, 0644); err != nil {
+			t.Fatalf("Failed to create local config: %v", err)
+		}
+		changeDir(t, tmpDir)
+
+		viper.SetConfigType("toml")
+
+		if err := mergeLocalConfig(&TrustStore{}, trustingPrompter(), true); err != nil {
+			t.Fatalf("mergeLocalConfig() error = %v", err)
+		}
+		if viper.IsSet("workspaces.name") {
+			t.Errorf("workspaces.name must not be settable from local config")
+		}
+		if viper.IsSet("workspaces") {
+			t.Errorf("workspaces must not be settable from local config")
+		}
+	})
+
 	t.Run("PartialOverride", func(t *testing.T) {
 		viper.Reset()
 		t.Cleanup(func() { viper.Reset() })

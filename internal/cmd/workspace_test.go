@@ -156,3 +156,53 @@ func TestWorkspaceRemoveReportsLiveSessionCaseInsensitive(t *testing.T) {
 func tmuxDirSessionNameForTest(name, path string) string {
 	return tmux.DirWorkspaceSessionName(name, path)
 }
+
+// TestWorkspaceCmdIsolatesFromCwdConfig guards the config-isolation invariant:
+// workspaceCmd overrides the root PersistentPreRunE (which merges the
+// caller's cwd .kwt.toml) with a no-op, since workspace commands manage
+// machine-level global state. If the override is removed, workspace
+// subcommands fall back to root's cwd merge -- this test fails because the
+// field goes nil.
+func TestWorkspaceCmdIsolatesFromCwdConfig(t *testing.T) {
+	require.NotNil(t, workspaceCmd.PersistentPreRunE,
+		"workspace must define its own PersistentPreRunE to bypass root's cwd merge")
+	require.NoError(t, workspaceCmd.PersistentPreRunE(workspaceCmd, nil),
+		"workspace's PersistentPreRunE must be a no-op that never errors")
+}
+
+func TestWorkspaceListPropagatesSessionError(t *testing.T) {
+	resetWorkspaceCommandDeps(t)
+	loadWorkspaceConfig = func() (*models.Config, error) {
+		return &models.Config{Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}}}, nil
+	}
+	listWorkspaceSessions = func() ([]string, error) {
+		return nil, errors.New("tmux: no such file or directory")
+	}
+
+	cmd, _, _ := fleetTestCommand()
+	err := runWorkspaceList(cmd, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list tmux sessions")
+}
+
+func TestWorkspaceRemoveWarnsOnSessionCheckError(t *testing.T) {
+	resetWorkspaceCommandDeps(t)
+	loadWorkspaceConfig = func() (*models.Config, error) {
+		return &models.Config{Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}}}, nil
+	}
+	listWorkspaceSessions = func() ([]string, error) {
+		return nil, errors.New("tmux: no such file or directory")
+	}
+	unregisterWorkspace = func(name string) error {
+		assert.Equal(t, "notes", name)
+		return nil
+	}
+
+	cmd, stdout, stderr := fleetTestCommand()
+	err := runWorkspaceRemove(cmd, []string{"notes"})
+
+	require.NoError(t, err, "the session check is advisory; it must not fail the remove")
+	assert.Contains(t, stdout.String(), "unregistered workspace notes")
+	assert.Contains(t, stderr.String(), "warning: could not check for a live session")
+}

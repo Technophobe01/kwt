@@ -148,7 +148,7 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 		switch {
 		case key == "repository_settings":
 			mergeRepositorySettings(localViper)
-		case key == "projects" || key == "workspaces":
+		case key == "projects" || key == "workspaces" || strings.HasPrefix(key, "workspaces."):
 			continue
 		case key == "fleet" || strings.HasPrefix(key, "fleet."):
 			// Sync settings decide where bearer tokens are read from and

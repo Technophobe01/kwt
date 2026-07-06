@@ -26,6 +26,10 @@ var (
 var workspaceCmd = &cobra.Command{
 	Use:   "workspace",
 	Short: "Manage directory workspaces not bound to a git worktree",
+	// Isolation: workspace commands manage machine-level state in the global
+	// config and must not merge the caller's cwd .kwt.toml. Overriding the
+	// root PersistentPreRunE with a no-op keeps the global config pristine.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
 }
 
 var workspaceAddCmd = &cobra.Command{
@@ -85,7 +89,7 @@ func runWorkspaceList(cmd *cobra.Command, args []string) error {
 	}
 	sessions, err := listWorkspaceSessions()
 	if err != nil {
-		sessions = nil
+		return fmt.Errorf("failed to list tmux sessions: %w", err)
 	}
 	t := table.New().SetOutput(cmd.OutOrStdout()).Headers("NAME", "PATH", "SESSION")
 	for _, workspace := range cfg.Workspaces {
@@ -115,12 +119,12 @@ func runWorkspaceRemove(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "unregistered workspace %s\n", name)
 	if livePath != "" {
 		sessions, err := listWorkspaceSessions()
-		if err == nil {
-			if session, ok := tmux.MatchDirWorkspaceSession(sessions, livePath); ok {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-					"its tmux session %s is still running; kill it with: tmux kill-session -t %s\n",
-					session, session)
-			}
+		if err != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not check for a live session: %v\n", err)
+		} else if session, ok := tmux.MatchDirWorkspaceSession(sessions, livePath); ok {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+				"its tmux session %s is still running; kill it with: tmux kill-session -t %s\n",
+				session, session)
 		}
 	}
 	return nil
