@@ -99,6 +99,14 @@ func NewModel(backend Backend, baseDir string) Model {
 	}
 }
 
+// WithInitialAnchor pre-selects the row whose path matches path on the first
+// rows load — typically the launch directory's workspace row, which the
+// activity-descending sort would otherwise bury at the bottom of the list.
+func (m Model) WithInitialAnchor(path string) Model {
+	m.anchorPath = path
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
 	return m.fetchRowsCmd()
 }
@@ -195,6 +203,15 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 			m.anchorPath = ""
 		} else if m.pendingRefresh {
 			m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+		} else if !hadRows {
+			// An initial anchor that matches nothing keeps the first-load
+			// behavior of selecting the current worktree.
+			m.anchorPath = ""
+			if index, ok := currentRowIndex(newRows); ok {
+				m.cursor = index
+			} else {
+				m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+			}
 		} else {
 			m.cursor = 0
 			m.anchorPath = ""

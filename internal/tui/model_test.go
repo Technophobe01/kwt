@@ -933,3 +933,36 @@ func TestModelPathAnchorsCursorAfterRefresh(t *testing.T) {
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.selectedRow()))
 	assert.Equal(t, 1, model.cursor)
 }
+
+func TestInitialAnchorSelectsLaunchWorkspaceRow(t *testing.T) {
+	active := testRow("kwt", "main", "/w/kwt/main")
+	active.Status.LastActivity = time.Now()
+	workspace := Row{Workspace: &WorkspaceInfo{Name: "code", Path: "/Users/me/code"}}
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/Users/me/code")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{active, workspace}})
+
+	require.NotNil(t, model.selectedRow().Workspace,
+		"first load must select the launch directory's workspace row despite activity sorting")
+	assert.Equal(t, "/Users/me/code", model.selectedRow().Workspace.Path)
+
+	// The anchor is consumed: a refresh keeps the cursor by path instead of
+	// snapping back, and moving afterwards works normally.
+	model, _ = updateModel(t, model, press("g"))
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{active, workspace}})
+	require.NotNil(t, model.selectedRow().Entry, "anchor must not re-apply on later refreshes")
+}
+
+func TestInitialAnchorMissFallsBackToCurrentRow(t *testing.T) {
+	other := testRow("kwt", "main", "/w/kwt/main")
+	other.Status.LastActivity = time.Now()
+	current := testRow("kata", "feature", "/w/kata/feature")
+	current.Status.IsCurrent = true
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/nowhere/unmatched")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{other, current}})
+
+	require.NotNil(t, model.selectedRow().Entry)
+	assert.Equal(t, "/w/kata/feature", model.selectedRow().Entry.Path,
+		"an unmatched initial anchor must fall back to the current worktree row")
+}
