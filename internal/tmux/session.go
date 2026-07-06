@@ -62,3 +62,27 @@ func sanitizeTmuxName(s string) string {
 		".", "-", ":", "-", "/", "-", " ", "-", "\t", "-",
 	).Replace(s)
 }
+
+const dirWorkspaceSessionPrefix = "kwt-workspace-dir-"
+
+// DirWorkspaceSessionName returns a stable, tmux-safe session name for a
+// directory workspace: kwt-workspace-dir-{name}-{hash}. The hash is computed
+// over the workspace path so renames keep a recognizable suffix and distinct
+// directories never collide.
+func DirWorkspaceSessionName(name, path string) string {
+	raw := fmt.Sprintf("%s%s-%s", dirWorkspaceSessionPrefix, name, template.ShortHash(path))
+	return sanitizeTmuxName(raw)
+}
+
+// MatchDirWorkspaceSession finds the live directory-workspace session for
+// path, matching by prefix and trailing path hash rather than the full name
+// so a renamed workspace still finds its running session.
+func MatchDirWorkspaceSession(sessions []string, path string) (string, bool) {
+	suffix := "-" + template.ShortHash(path)
+	for _, session := range sessions {
+		if strings.HasPrefix(session, dirWorkspaceSessionPrefix) && strings.HasSuffix(session, suffix) {
+			return session, true
+		}
+	}
+	return "", false
+}
