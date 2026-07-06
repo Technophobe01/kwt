@@ -133,6 +133,26 @@ func TestWorkspaceRemovePropagatesUnknownNameError(t *testing.T) {
 	assert.Contains(t, err.Error(), "no workspace named")
 }
 
+func TestWorkspaceRemoveReportsLiveSessionCaseInsensitive(t *testing.T) {
+	resetWorkspaceCommandDeps(t)
+	loadWorkspaceConfig = func() (*models.Config, error) {
+		return &models.Config{Workspaces: []models.Workspace{{Name: "Notes", Path: "/Users/me/notes"}}}, nil
+	}
+	listWorkspaceSessions = func() ([]string, error) {
+		return []string{tmuxDirSessionNameForTest("Notes", "/Users/me/notes")}, nil
+	}
+	unregisterWorkspace = func(name string) error {
+		assert.Equal(t, "notes", name)
+		return nil
+	}
+
+	cmd, stdout, _ := fleetTestCommand()
+	err := runWorkspaceRemove(cmd, []string{"notes"})
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout.String(), "still running")
+}
+
 func tmuxDirSessionNameForTest(name, path string) string {
 	return tmux.DirWorkspaceSessionName(name, path)
 }

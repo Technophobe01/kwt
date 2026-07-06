@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/kwt/internal/config"
@@ -103,7 +104,7 @@ func runWorkspaceRemove(cmd *cobra.Command, args []string) error {
 	livePath := ""
 	if cfgErr == nil {
 		for _, workspace := range cfg.Workspaces {
-			if workspace.Name == name {
+			if strings.EqualFold(workspace.Name, name) {
 				livePath = workspace.Path
 			}
 		}
