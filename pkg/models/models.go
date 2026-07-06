@@ -35,17 +35,17 @@ type CdConfig struct {
 
 // Config represents the application configuration.
 type Config struct {
-	Worktree           WorktreeConfig      `mapstructure:"worktree"`            // Worktree-related configuration
-	Fleet              FleetConfig         `mapstructure:"fleet" toml:"fleet"`  // Multi-machine sync configuration
-	Cd                 CdConfig            `mapstructure:"cd"`                  // Cd command configuration
-	Finder             FinderConfig        `mapstructure:"finder"`              // Fuzzy finder configuration
-	UI                 UIConfig            `mapstructure:"ui"`                  // UI-related configuration
-	Naming             NamingConfig        `mapstructure:"naming"`              // Naming and template configuration
-	Agents             map[string]string   `mapstructure:"agents"`              // Named agent invocation commands for layouts
-	Projects           []Project           `mapstructure:"projects"`            // Known repositories for cross-project discovery
+	Worktree           WorktreeConfig      `mapstructure:"worktree"`                     // Worktree-related configuration
+	Fleet              FleetConfig         `mapstructure:"fleet" toml:"fleet"`           // Multi-machine sync configuration
+	Cd                 CdConfig            `mapstructure:"cd"`                           // Cd command configuration
+	Finder             FinderConfig        `mapstructure:"finder"`                       // Fuzzy finder configuration
+	UI                 UIConfig            `mapstructure:"ui"`                           // UI-related configuration
+	Naming             NamingConfig        `mapstructure:"naming"`                       // Naming and template configuration
+	Agents             map[string]string   `mapstructure:"agents"`                       // Named agent invocation commands for layouts
+	Projects           []Project           `mapstructure:"projects"`                     // Known repositories for cross-project discovery
 	Workspaces         []Workspace         `mapstructure:"workspaces" toml:"workspaces"` // Registered directory workspaces
-	RepositorySettings []RepositorySetting `mapstructure:"repository_settings"` // Per-repository setup/copy overrides
-	Layouts            LayoutsConfig       `mapstructure:"layouts"`             // Named tmux workspace layout library
+	RepositorySettings []RepositorySetting `mapstructure:"repository_settings"`          // Per-repository setup/copy overrides
+	Layouts            LayoutsConfig       `mapstructure:"layouts"`                      // Named tmux workspace layout library
 }
 
 // FleetConfig contains optional multi-machine sync configuration.
