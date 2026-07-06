@@ -2043,6 +2043,7 @@ func TestTUIBackendNeverRegistersWorkspaceForGitLaunchDir(t *testing.T) {
 func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir reads USERPROFILE on Windows
 	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
 	backend := newTUIBackendWithLaunchDir(cfg, home)
 	stubTUIProjectRegistration(backend)
