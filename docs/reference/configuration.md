@@ -59,6 +59,23 @@ path = "~/code/kwt"
 last_touched = "2026-07-04T12:00:00Z"
 ```
 
+## Directory workspaces
+
+Plain directories registered as tmux workspaces, independent of any Git
+worktree:
+
+```toml
+[[workspaces]]
+name = "notes"
+path = "~/notes"
+```
+
+Paths are expanded and symlink-resolved on load. Entries are machine-level
+configuration: repository-local `.kwt.toml` files cannot set them, and they are
+never published over multi-machine sync. Manage entries with
+`kwt workspace add|list|remove` rather than editing the file; see
+[Directory workspaces](../workflows/directory-workspaces.md) for the workflow.
+
 ## Repository setup
 
 Optional repository settings can copy files or run commands when new worktrees

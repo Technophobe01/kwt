@@ -29,6 +29,8 @@ kwt open parser
 kwt status
 kwt sync status
 kwt exec fix/parser-race -- go test ./internal/parser
+kwt workspace add ~/notes
+kwt workspace list
 kwt config get layouts.default
 kwt config set --local layouts.default stack
 ```

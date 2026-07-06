@@ -20,6 +20,7 @@ nav = [
   ] },
   { "Workflows" = [
     { "Agent workspaces" = "workflows/agent-workspaces.md" },
+    { "Directory workspaces" = "workflows/directory-workspaces.md" },
   ] },
   { "Multi-machine sync" = [
     { "Overview" = "multi-machine-sync.md" },

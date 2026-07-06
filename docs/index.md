@@ -22,7 +22,8 @@ kwt
 
 Run `kwt` from a repository to open the dashboard. The dashboard registers that
 repository, shows worktrees from known projects, and attaches to a tmux workspace
-for the selected branch.
+for the selected branch. Plain directories work too: launching from a non-Git
+directory registers it as a directory workspace with its own tmux session.
 
 ## What kwt optimizes for
 
@@ -45,6 +46,8 @@ kwt remove feature/machine-view
 
 See the [quickstart](get-started/quickstart.md), [CLI reference](reference/cli.md),
 and [configuration reference](reference/configuration.md) for the maintained
-surface. [Multi-machine sync](multi-machine-sync.md) covers trusted multi-host
-worktree visibility, and the [design notes](design/index.md) preserve the
-decisions behind the cross-project TUI and synchronization architecture.
+surface. [Directory workspaces](workflows/directory-workspaces.md) covers tmux
+sessions for non-Git directories, [multi-machine sync](multi-machine-sync.md)
+covers trusted multi-host worktree visibility, and the
+[design notes](design/index.md) preserve the decisions behind the cross-project
+TUI and synchronization architecture.
