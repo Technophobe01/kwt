@@ -32,6 +32,7 @@ type fakeBackend struct {
 	removeForces    []bool
 	killCalls       []string
 	openCalls       []string
+	unregistered    []Row
 }
 
 func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
@@ -65,6 +66,11 @@ func (b *fakeBackend) KillSession(row Row) error {
 func (b *fakeBackend) OpenInTmux(ctx context.Context, row Row, layoutName string) error {
 	b.openCalls = append(b.openCalls, rowPath(row)+":"+layoutName)
 	return b.openErr
+}
+
+func (b *fakeBackend) UnregisterWorkspace(row Row) error {
+	b.unregistered = append(b.unregistered, row)
+	return nil
 }
 
 func (b *fakeBackend) LayoutNames() []string { return append([]string(nil), b.layoutNames...) }
@@ -103,6 +109,48 @@ func updateModel(t *testing.T, model Model, msg tea.Msg) (Model, tea.Cmd) {
 
 func viewContent(model Model) string {
 	return model.View().Content
+}
+
+func TestWorkspaceRowActions(t *testing.T) {
+	row := Row{
+		Workspace:   &WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+		SessionName: "kwt-workspace-dir-notes-12345678",
+		SessionLive: true,
+	}
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+
+	// Open: workspace rows hand off to attach outside tmux.
+	next, _ := model.openSelected()
+	assert.Equal(t, HandoffAttach, next.Handoff().Kind)
+
+	// New branch: gated with a message.
+	next, _ = model.startNewBranch()
+	assert.Contains(t, next.message, "not a git worktree")
+
+	// Sync: already gated by the row.Fleet == nil branch.
+	next, _ = model.syncSelected(row)
+	assert.Contains(t, next.message, "nothing to sync")
+
+	// Kill: allowed for live sessions.
+	next, _ = model.startKill()
+	assert.Equal(t, confirmKill, next.confirm.kind)
+
+	// Delete key: offers unregister, never worktree removal.
+	next, _ = model.startDelete()
+	require.Equal(t, confirmUnregister, next.confirm.kind)
+	assert.Contains(t, next.confirm.text, "unregister")
+
+	// Confirming with y calls Backend.UnregisterWorkspace and refreshes.
+	_, cmd := updateModel(t, next, press("y"))
+	require.NotNil(t, cmd)
+	msg := cmd()
+	done, ok := msg.(actionDoneMsg)
+	require.True(t, ok)
+	assert.True(t, done.refresh)
+	require.Len(t, backend.unregistered, 1)
+	assert.Equal(t, "notes", backend.unregistered[0].Workspace.Name)
 }
 
 func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
@@ -884,4 +932,37 @@ func TestModelPathAnchorsCursorAfterRefresh(t *testing.T) {
 
 	assert.Equal(t, "/w/kwt/feature", rowPath(model.selectedRow()))
 	assert.Equal(t, 1, model.cursor)
+}
+
+func TestInitialAnchorSelectsLaunchWorkspaceRow(t *testing.T) {
+	active := testRow("kwt", "main", "/w/kwt/main")
+	active.Status.LastActivity = time.Now()
+	workspace := Row{Workspace: &WorkspaceInfo{Name: "code", Path: "/Users/me/code"}}
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/Users/me/code")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{active, workspace}})
+
+	require.NotNil(t, model.selectedRow().Workspace,
+		"first load must select the launch directory's workspace row despite activity sorting")
+	assert.Equal(t, "/Users/me/code", model.selectedRow().Workspace.Path)
+
+	// The anchor is consumed: a refresh keeps the cursor by path instead of
+	// snapping back, and moving afterwards works normally.
+	model, _ = updateModel(t, model, press("g"))
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{active, workspace}})
+	require.NotNil(t, model.selectedRow().Entry, "anchor must not re-apply on later refreshes")
+}
+
+func TestInitialAnchorMissFallsBackToCurrentRow(t *testing.T) {
+	other := testRow("kwt", "main", "/w/kwt/main")
+	other.Status.LastActivity = time.Now()
+	current := testRow("kata", "feature", "/w/kata/feature")
+	current.Status.IsCurrent = true
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/nowhere/unmatched")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{other, current}})
+
+	require.NotNil(t, model.selectedRow().Entry)
+	assert.Equal(t, "/w/kata/feature", model.selectedRow().Entry.Path,
+		"an unmatched initial anchor must fall back to the current worktree row")
 }

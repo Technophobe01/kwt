@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -15,8 +17,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
+	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
@@ -1823,6 +1827,9 @@ func runTUITestGitOutput(t *testing.T, dir string, args ...string) string {
 
 func stubTUIProjectRegistration(backend *tuiBackend) {
 	backend.registerProject = func(models.Project) error { return nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		return workspace, nil
+	}
 }
 
 func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
@@ -1856,4 +1863,333 @@ func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
 	assert.Equal(t, `multiple machines are publishing as host ID "same" (host same)`, warnings[0])
+}
+
+func TestTUIBackendListIncludesWorkspaceRows(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: "/global"},
+		Workspaces: []models.Workspace{{Name: "notes", Path: dir}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	liveSession := tmux.DirWorkspaceSessionName("old-name", dir)
+	backend.listSessions = func() ([]string, error) { return []string{liveSession}, nil }
+
+	rows, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].Workspace)
+	assert.Equal(t, "notes", rows[0].Workspace.Name)
+	assert.Equal(t, dir, rows[0].Workspace.Path)
+	assert.True(t, rows[0].SessionLive,
+		"liveness must match by path hash even under an old session name")
+	assert.Equal(t, liveSession, rows[0].SessionName,
+		"attach must target the live session, not the freshly computed name")
+	assert.Nil(t, rows[0].Entry)
+	assert.Nil(t, rows[0].Fleet)
+}
+
+func TestTUIBackendAutoRegistersNonGitLaunchDir(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	var registered []models.Workspace
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		registered = append(registered, workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, registered, 1)
+	assert.Equal(t, launchDir, registered[0].Path)
+}
+
+func TestTUIBackendSkipsAutoRegisterWhenAlreadyRegisteredWithCustomName(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: "/global"},
+		Workspaces: []models.Workspace{{Name: "mynotes", Path: launchDir}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	called := false
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		called = true
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.False(t, called, "an already-registered launch dir must not be re-registered")
+	require.Len(t, cfg.Workspaces, 1)
+	assert.Equal(t, "mynotes", cfg.Workspaces[0].Name,
+		"a custom workspace name must survive the auto-registration refresh")
+}
+
+func TestTUIBackendAutoRegistersLaunchWorkspaceOnlyOnce(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	registrations := 0
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		registrations++
+		return workspace, nil
+	}
+	backend.unregisterWorkspace = func(name string) error { return nil }
+
+	_, _, err := backend.List(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, registrations)
+
+	require.NoError(t, backend.UnregisterWorkspace(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: filepath.Base(launchDir), Path: launchDir},
+	}))
+	assert.Empty(t, cfg.Workspaces, "unregister must drop the in-memory entry")
+
+	_, _, err = backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, registrations,
+		"a second refresh must not re-register the launch workspace after it was unregistered")
+	assert.Empty(t, cfg.Workspaces,
+		"the unregistered launch workspace must not reappear on the next refresh")
+}
+
+func TestTUIBackendNeverRegistersWorkspaceForGitLaunchDir(t *testing.T) {
+	launchDir := "/repos/other"
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{Host: "github.com", Owner: "example", Repository: "other"},
+		Branch:         "main",
+		Path:           launchDir,
+		IsMain:         true,
+	}
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{launchEntry}, nil
+	}
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		t.Fatalf("a git launch directory must never be registered as a workspace, got %v", workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Workspaces)
+}
+
+func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir reads USERPROFILE on Windows
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, home)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		t.Fatalf("home directory must never be auto-registered, got %v", workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+}
+
+func TestTUIBackendSessionNameAndHandoffPathForWorkspaceRow(t *testing.T) {
+	row := dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+	}
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	name, err := backend.sessionName(row)
+
+	require.NoError(t, err)
+	assert.Equal(t, tmux.DirWorkspaceSessionName("notes", "/Users/me/notes"), name,
+		"an unset SessionName must fall back to the workspace branch")
+	assert.Equal(t, "/Users/me/notes", rowPathForHandoff(row))
+
+	row.SessionName = "live-session-name"
+	name, err = backend.sessionName(row)
+
+	require.NoError(t, err)
+	assert.Equal(t, "live-session-name", name,
+		"a non-empty SessionName must win over the workspace branch")
+}
+
+func TestRowPaneRoot(t *testing.T) {
+	assert.Equal(t, "/Users/me/notes", rowPaneRoot(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+	}), "a workspace row must use the workspace path")
+
+	assert.Equal(t, "/repos/service", rowPaneRoot(dashboard.Row{
+		Entry: &discovery.GlobalWorktreeEntry{Path: "/repos/service"},
+	}), "an entry row must use the entry path")
+
+	assert.Equal(t, "", rowPaneRoot(dashboard.Row{}),
+		"an empty row must fall back to an empty pane root")
+}
+
+func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	err := backend.attachWorkspace(context.Background(), dashboard.Row{}, "", false, false)
+
+	require.Error(t, err)
+	assert.Equal(t, "no worktree selected", err.Error())
+}
+
+// TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow exercises the
+// relaxed guard in attachWorkspace: a workspace-only row (row.Entry == nil)
+// must get past it. There is no seam to stub the tmux runner that
+// attachWorkspace constructs internally, so this test relies on an empty
+// layouts config to force a layout-resolution error before EnsureAndAttach
+// is ever reached; that keeps the test from touching real tmux while still
+// proving the row cleared the guard.
+func TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow(t *testing.T) {
+	row := dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: t.TempDir()},
+	}
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	err := backend.attachWorkspace(context.Background(), row, "", false, false)
+
+	require.Error(t, err)
+	assert.NotEqual(t, "no worktree selected", err.Error(),
+		"a workspace row must clear the entry/workspace guard")
+}
+
+// TestTUIBackendResolveLayoutUsesWorkspacePathForDefault covers resolveLayout's
+// workspace branch: for a workspace row, the repo-local layout default must be
+// read from row.Workspace.Path, not from repositoryRootForRow (which requires
+// row.Entry and would error for a workspace-only row).
+func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("KWT_HOME", filepath.Join(home, ".config", "kwt"))
+
+	workspaceDir := t.TempDir()
+	localTOML := []byte("[layouts]\ndefault = \"focus\"\n")
+	localConfigPath := filepath.Join(workspaceDir, ".kwt.toml")
+	require.NoError(t, os.WriteFile(localConfigPath, localTOML, 0o644))
+
+	absPath, err := filepath.EvalSymlinks(localConfigPath)
+	require.NoError(t, err)
+	sum := sha256.Sum256(localTOML)
+	trustStorePath := filepath.Join(home, ".config", "kwt", "trusted_configs.json")
+	store, err := config.LoadTrustStore(trustStorePath)
+	require.NoError(t, err)
+	require.NoError(t, store.Add(absPath, hex.EncodeToString(sum[:])))
+
+	cfg := &models.Config{
+		Layouts: models.LayoutsConfig{
+			Default: "quad",
+			Presets: []models.Layout{
+				{Name: "quad", Arrange: "tiled", Panes: []string{"shell"}},
+				{Name: "focus", Arrange: "main-vertical", Panes: []string{"shell"}},
+			},
+		},
+	}
+	row := dashboard.Row{Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: workspaceDir}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	layout, err := backend.resolveLayout(row, "", false)
+
+	require.NoError(t, err)
+	assert.Equal(t, "focus", layout.Name,
+		"the workspace directory's .kwt.toml default must win over the global default")
+}
+
+func TestTUIBackendUnregisterWorkspace(t *testing.T) {
+	cfg := &models.Config{Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	var removed []string
+	backend.unregisterWorkspace = func(name string) error {
+		removed = append(removed, name)
+		return nil
+	}
+
+	err := backend.UnregisterWorkspace(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"notes"}, removed)
+	assert.Empty(t, cfg.Workspaces, "unregister must also drop the in-memory entry")
+
+	err = backend.UnregisterWorkspace(dashboard.Row{})
+	require.Error(t, err)
 }

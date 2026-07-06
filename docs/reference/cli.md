@@ -17,6 +17,7 @@ stable command surface.
 | `kwt prune`      | Clean up stale Git worktree metadata.                  |
 | `kwt sync`       | Publish and inspect multi-machine sync state.          |
 | `kwt tmux`       | Manage standalone tmux sessions.                       |
+| `kwt workspace`  | Manage directory workspaces.                           |
 | `kwt config`     | Read and write config values.                          |
 | `kwt completion` | Generate shell completion and integration.             |
 

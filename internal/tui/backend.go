@@ -25,8 +25,15 @@ type Row struct {
 	Entry       *discovery.GlobalWorktreeEntry
 	Status      *models.WorktreeStatus
 	Fleet       *FleetInfo
+	Workspace   *WorkspaceInfo
 	SessionName string
 	SessionLive bool
+}
+
+// WorkspaceInfo is the TUI-facing view of one registered directory workspace.
+type WorkspaceInfo struct {
+	Name string
+	Path string
 }
 
 // FleetInfo is the TUI-facing summary of one multi-machine sync row.
@@ -57,6 +64,7 @@ type Backend interface {
 	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
 	RemoveWorktree(ctx context.Context, row Row, force bool) error
+	UnregisterWorkspace(row Row) error
 	KillSession(row Row) error
 	OpenInTmux(ctx context.Context, row Row, layoutName string) error
 	LayoutNames() []string

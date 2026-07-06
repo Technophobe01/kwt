@@ -11,12 +11,16 @@ import (
 	"time"
 
 	"github.com/mattn/go-runewidth"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
 var timeNow = time.Now
 
 func rowRepoName(row Row) string {
+	if row.Workspace != nil {
+		return row.Workspace.Name
+	}
 	if row.Entry != nil && row.Entry.RepositoryInfo != nil && row.Entry.RepositoryInfo.Repository != "" {
 		return row.Entry.RepositoryInfo.Repository
 	}
@@ -41,6 +45,9 @@ func rowRepoName(row Row) string {
 }
 
 func rowBranch(row Row) string {
+	if row.Workspace != nil {
+		return utils.TildePath(row.Workspace.Path)
+	}
 	if row.Entry != nil {
 		return row.Entry.Branch
 	}
@@ -57,6 +64,9 @@ func rowBranch(row Row) string {
 }
 
 func rowPath(row Row) string {
+	if row.Workspace != nil {
+		return row.Workspace.Path
+	}
 	if row.Entry != nil {
 		return row.Entry.Path
 	}
@@ -254,6 +264,9 @@ func formatPushPullStatus(status *models.WorktreeStatus) (string, bool) {
 }
 
 func formatRowChanges(row Row) string {
+	if row.Workspace != nil {
+		return "-"
+	}
 	if rowHasUncommittedChanges(row) {
 		return formatChanges(row.Status)
 	}
@@ -331,6 +344,9 @@ func compactFleetDirtySummary(summary string) string {
 }
 
 func formatRowSync(row Row) string {
+	if row.Workspace != nil {
+		return "-"
+	}
 	if row.Fleet != nil {
 		if !row.Fleet.Local {
 			return "remote only"
@@ -396,6 +412,9 @@ func rowHasOtherHosts(row Row) bool {
 }
 
 func formatRowActivity(row Row, now time.Time) string {
+	if row.Workspace != nil {
+		return "-"
+	}
 	if row.Status != nil {
 		return formatActivityAt(row.Status.LastActivity, now)
 	}

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
@@ -44,7 +45,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	backend := newTUIBackend(cfg)
-	model := dashboard.NewModel(backend, cfg.Worktree.BaseDir)
+	model := dashboard.NewModel(backend, cfg.Worktree.BaseDir).
+		WithInitialAnchor(launchAnchorPath(backend.launchDir))
 	final, err := tea.NewProgram(model).Run()
 	if err != nil {
 		return err
@@ -68,7 +70,23 @@ func executeTUIHandoff(backend *tuiBackend, handoff dashboard.Handoff) error {
 	}
 }
 
+// launchAnchorPath resolves symlinks in the launch directory so the initial
+// anchor string matches registered workspace paths, which are stored
+// symlink-resolved.
+func launchAnchorPath(launchDir string) string {
+	if launchDir == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(launchDir); err == nil {
+		return resolved
+	}
+	return launchDir
+}
+
 func rowPathForHandoff(row dashboard.Row) string {
+	if row.Workspace != nil {
+		return row.Workspace.Path
+	}
 	if row.Entry != nil {
 		return row.Entry.Path
 	}

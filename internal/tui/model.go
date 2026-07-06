@@ -29,6 +29,7 @@ const (
 	confirmNone confirmKind = iota
 	confirmDelete
 	confirmKill
+	confirmUnregister
 )
 
 type confirmState struct {
@@ -96,6 +97,14 @@ func NewModel(backend Backend, baseDir string) Model {
 		width:    100,
 		height:   30,
 	}
+}
+
+// WithInitialAnchor pre-selects the row whose path matches path on the first
+// rows load — typically the launch directory's workspace row, which the
+// activity-descending sort would otherwise bury at the bottom of the list.
+func (m Model) WithInitialAnchor(path string) Model {
+	m.anchorPath = path
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -194,6 +203,15 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 			m.anchorPath = ""
 		} else if m.pendingRefresh {
 			m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+		} else if !hadRows {
+			// An initial anchor that matches nothing keeps the first-load
+			// behavior of selecting the current worktree.
+			m.anchorPath = ""
+			if index, ok := currentRowIndex(newRows); ok {
+				m.cursor = index
+			} else {
+				m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
+			}
 		} else {
 			m.cursor = 0
 			m.anchorPath = ""
@@ -487,6 +505,8 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, m.removeWorktreeCmd(row, force)
 	case confirmKill:
 		return m, m.killSessionCmd(row)
+	case confirmUnregister:
+		return m, m.unregisterWorkspaceCmd(row)
 	default:
 		return m, nil
 	}
@@ -494,7 +514,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		if row.Fleet != nil && row.Fleet.CanMaterialize {
 			m.message = "press s to sync this worktree"
 			return m, nil
@@ -511,7 +531,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		m.message = "sync this worktree before opening a shell"
 		return m, nil
 	}
@@ -546,6 +566,10 @@ func (m Model) cycleLayout() (Model, tea.Cmd) {
 
 func (m Model) startNewBranch() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Workspace != nil {
+		m.message = "not a git worktree"
+		return m, nil
+	}
 	if row.Entry == nil {
 		m.message = "no worktree selected"
 		return m, nil
@@ -627,6 +651,14 @@ func (m Model) cursorAfterProjectChange(selectedPath string) int {
 
 func (m Model) startDelete() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Workspace != nil {
+		m.confirm = confirmState{
+			kind: confirmUnregister,
+			row:  row,
+			text: fmt.Sprintf("unregister workspace %s? (directory is kept) [y/N]", row.Workspace.Name),
+		}
+		return m, nil
+	}
 	if row.Entry == nil {
 		m.message = "no worktree selected"
 		return m, nil
@@ -671,7 +703,7 @@ func rowHasUncommittedChanges(row Row) bool {
 
 func (m Model) startKill() (Model, tea.Cmd) {
 	row := m.selectedRow()
-	if row.Entry == nil {
+	if row.Entry == nil && row.Workspace == nil {
 		m.message = "no worktree selected"
 		return m, nil
 	}
@@ -728,6 +760,15 @@ func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
+	}
+}
+
+func (m Model) unregisterWorkspaceCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.backend.UnregisterWorkspace(row); err != nil {
+			return actionDoneMsg{err: err}
+		}
+		return actionDoneMsg{message: "workspace unregistered", refresh: true}
 	}
 }
 

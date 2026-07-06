@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/url"
 )
 
@@ -76,4 +77,30 @@ func TestWorkspaceSessionName(t *testing.T) {
 	detached1 := WorkspaceSessionName(info, "HEAD", "/home/u/worktrees/github.com/wesm/kwt/wt1")
 	detached2 := WorkspaceSessionName(info, "HEAD", "/home/u/worktrees/github.com/wesm/kwt/wt2")
 	assert.NotEqual(t, detached1, detached2)
+}
+
+func TestDirWorkspaceSessionName(t *testing.T) {
+	name := DirWorkspaceSessionName("my notes", "/Users/me/notes")
+
+	assert.True(t, strings.HasPrefix(name, "kwt-workspace-dir-my-notes-"), name)
+	assert.Regexp(t, `^kwt-workspace-dir-my-notes-[0-9a-f]{8}$`, name)
+	assert.Equal(t, name, DirWorkspaceSessionName("my notes", "/Users/me/notes"),
+		"session names must be deterministic")
+	assert.NotEqual(t, name, DirWorkspaceSessionName("my notes", "/Users/me/other"),
+		"different paths must not collide")
+}
+
+func TestMatchDirWorkspaceSessionMatchesByPathHash(t *testing.T) {
+	current := DirWorkspaceSessionName("new-name", "/Users/me/notes")
+	old := DirWorkspaceSessionName("old-name", "/Users/me/notes")
+	sessions := []string{"kwt-workspace-foo-12345678", old, "unrelated"}
+
+	got, ok := MatchDirWorkspaceSession(sessions, "/Users/me/notes")
+
+	require.True(t, ok)
+	assert.Equal(t, old, got, "renamed workspaces must re-attach to the live old-name session")
+	assert.NotEqual(t, current, got)
+
+	_, ok = MatchDirWorkspaceSession([]string{"kwt-workspace-foo-12345678"}, "/Users/me/notes")
+	assert.False(t, ok)
 }

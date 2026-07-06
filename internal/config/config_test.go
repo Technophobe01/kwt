@@ -514,6 +514,59 @@ preview = false
 		}
 	})
 
+	t.Run("IgnoresWorkspaces", func(t *testing.T) {
+		viper.Reset()
+		t.Cleanup(func() { viper.Reset() })
+
+		tmpDir := t.TempDir()
+		localConfig := []byte(`
+[[workspaces]]
+name = "evil"
+path = "/tmp/evil"
+`)
+		if err := os.WriteFile(filepath.Join(tmpDir, ".kwt.toml"), localConfig, 0644); err != nil {
+			t.Fatalf("Failed to create local config: %v", err)
+		}
+		changeDir(t, tmpDir)
+
+		viper.SetConfigType("toml")
+
+		if err := mergeLocalConfig(&TrustStore{}, trustingPrompter(), true); err != nil {
+			t.Fatalf("mergeLocalConfig() error = %v", err)
+		}
+		if viper.IsSet("workspaces") {
+			t.Errorf("workspaces must not be settable from local config")
+		}
+	})
+
+	t.Run("IgnoresWorkspacesTable", func(t *testing.T) {
+		viper.Reset()
+		t.Cleanup(func() { viper.Reset() })
+
+		tmpDir := t.TempDir()
+		localConfig := []byte(`
+[workspaces]
+name = "evil"
+path = "/tmp/evil"
+`)
+		if err := os.WriteFile(filepath.Join(tmpDir, ".kwt.toml"), localConfig, 0644); err != nil {
+			t.Fatalf("Failed to create local config: %v", err)
+		}
+		changeDir(t, tmpDir)
+
+		viper.SetConfigType("toml")
+
+		if err := mergeLocalConfig(&TrustStore{}, trustingPrompter(), true); err != nil {
+			t.Fatalf("mergeLocalConfig() error = %v", err)
+		}
+		if viper.IsSet("workspaces.name") {
+			t.Errorf("workspaces.name must not be settable from local config")
+		}
+		if viper.IsSet("workspaces") {
+			t.Errorf("workspaces must not be settable from local config")
+		}
+	})
+
 	t.Run("PartialOverride", func(t *testing.T) {
 		viper.Reset()
 		t.Cleanup(func() { viper.Reset() })
@@ -1528,4 +1581,27 @@ func TestLoadRepoLayoutDefaultTrustedReturnsDefault(t *testing.T) {
 	got, err := LoadRepoLayoutDefault(repo, false)
 	require.NoError(t, err)
 	assert.Equal(t, "focus", got)
+}
+
+func TestLoadExpandsWorkspacePaths(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(func() { viper.Reset() })
+
+	home := t.TempDir()
+	// Resolve symlinks for consistent paths on macOS where /var -> /private/var
+	home, err := filepath.EvalSymlinks(home)
+	require.NoError(t, err)
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, "notes")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	viper.SetConfigType("toml")
+	viper.Set("workspaces", []map[string]any{{"name": "notes", "path": "~/notes"}})
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	require.Len(t, cfg.Workspaces, 1)
+	assert.Equal(t, "notes", cfg.Workspaces[0].Name)
+	assert.Equal(t, dir, cfg.Workspaces[0].Path)
 }
