@@ -43,6 +43,7 @@ type Config struct {
 	Naming             NamingConfig        `mapstructure:"naming"`              // Naming and template configuration
 	Agents             map[string]string   `mapstructure:"agents"`              // Named agent invocation commands for layouts
 	Projects           []Project           `mapstructure:"projects"`            // Known repositories for cross-project discovery
+	Workspaces         []Workspace         `mapstructure:"workspaces" toml:"workspaces"` // Registered directory workspaces
 	RepositorySettings []RepositorySetting `mapstructure:"repository_settings"` // Per-repository setup/copy overrides
 	Layouts            LayoutsConfig       `mapstructure:"layouts"`             // Named tmux workspace layout library
 }
@@ -92,6 +93,13 @@ type Project struct {
 	Name        string `mapstructure:"name" toml:"name"`                 // Human-friendly display name
 	Path        string `mapstructure:"path" toml:"path"`                 // Main repository root path
 	LastTouched string `mapstructure:"last_touched" toml:"last_touched"` // RFC3339 UTC timestamp
+}
+
+// Workspace records a plain directory kwt can open as a tmux workspace,
+// independent of any git worktree.
+type Workspace struct {
+	Name string `mapstructure:"name" toml:"name"` // Unique display name
+	Path string `mapstructure:"path" toml:"path"` // Directory root
 }
 
 // WorktreeConfig contains worktree-specific configuration options.

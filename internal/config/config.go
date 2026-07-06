@@ -148,7 +148,7 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 		switch {
 		case key == "repository_settings":
 			mergeRepositorySettings(localViper)
-		case key == "projects":
+		case key == "projects" || key == "workspaces":
 			continue
 		case key == "fleet" || strings.HasPrefix(key, "fleet."):
 			// Sync settings decide where bearer tokens are read from and
@@ -520,6 +520,20 @@ func expandConfigPaths(cfg *models.Config) error {
 			expandedPath = resolved
 		}
 		cfg.Projects[i].Path = expandedPath
+	}
+	for i := range cfg.Workspaces {
+		path := cfg.Workspaces[i].Path
+		if path == "" {
+			continue
+		}
+		expandedPath, err = utils.ExpandPath(path)
+		if err != nil {
+			return fmt.Errorf("failed to expand workspace path: %w", err)
+		}
+		if resolved, err := filepath.EvalSymlinks(expandedPath); err == nil {
+			expandedPath = resolved
+		}
+		cfg.Workspaces[i].Path = expandedPath
 	}
 	return nil
 }
