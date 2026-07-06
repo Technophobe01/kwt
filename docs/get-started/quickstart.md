@@ -16,31 +16,34 @@ go build -o kwt ./cmd/kwt
 
 ## Open the dashboard
 
-From any Git repository:
+From any directory:
 
 ```sh
 kwt
 ```
 
 Bare `kwt` opens the full-screen dashboard when stdin and stdout are interactive.
-Use `kwt tui` when you want the explicit command form.
+Use `kwt tui` when you want the explicit command form. Launching from a Git
+repository registers it as a project; launching from a plain directory registers
+it as a [directory workspace](../workflows/directory-workspaces.md) and
+pre-selects its row, so `enter` opens a tmux session right there.
 
 Useful keys:
 
-| Key     | Action                                               |
-| ------- | ---------------------------------------------------- |
-| `enter` | Attach to the selected workspace.                    |
-| `n`     | Create a worktree in the active project perspective. |
-| `P`     | Switch the active project perspective.               |
-| `p`     | Filter visible projects by name.                     |
-| `/`     | Search rows within the active perspective/filter.    |
-| `L`     | Select a workspace layout.                           |
-| `d`     | Delete the selected worktree.                        |
-| `K`     | Kill the selected live tmux workspace.               |
-| `s`     | Sync a remote-only branch row locally.               |
-| `c`     | Open a shell in the selected worktree.               |
-| `r`     | Refresh.                                             |
-| `?`     | Toggle help.                                         |
+| Key     | Action                                                  |
+| ------- | ------------------------------------------------------- |
+| `enter` | Attach to the selected workspace.                       |
+| `n`     | Create a worktree in the active project perspective.    |
+| `P`     | Switch the active project perspective.                  |
+| `p`     | Filter visible projects by name.                        |
+| `/`     | Search rows within the active perspective/filter.       |
+| `L`     | Select a workspace layout.                              |
+| `d`     | Delete the selected worktree or unregister a workspace. |
+| `K`     | Kill the selected live tmux workspace.                  |
+| `s`     | Sync a remote-only branch row locally.                  |
+| `c`     | Open a shell in the selected worktree.                  |
+| `r`     | Refresh.                                                |
+| `?`     | Toggle help.                                            |
 
 ## Create a worktree
 
