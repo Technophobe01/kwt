@@ -61,3 +61,27 @@ func TestDefaultHostIDUsesHostname(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "host.a", got)
 }
+
+func TestNormalizeRepositoryIdentityDropsURLCredentials(t *testing.T) {
+	for _, raw := range []string{
+		"https://ghp_token@github.com/org/repo.git",
+		"https://user:token@github.com/org/repo.git",
+	} {
+		identity, err := NormalizeRepositoryIdentity(raw)
+
+		require.NoError(t, err, raw)
+		assert.Equal(t, "github.com/org/repo", identity, raw)
+	}
+}
+
+func TestCanonicalRepositoryIdentityRejectsCredentialBearingRemotes(t *testing.T) {
+	for _, raw := range []string{
+		"user:token@github.com:org/repo.git",
+		"ssh://user:token@github.com/org/repo.git",
+	} {
+		identity, ok := CanonicalRepositoryIdentity(raw)
+
+		assert.False(t, ok, raw)
+		assert.NotContains(t, identity, "token", raw)
+	}
+}

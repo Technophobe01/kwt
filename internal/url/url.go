@@ -70,6 +70,12 @@ func validateRepositoryPathComponent(label, component string) error {
 		return fmt.Errorf("invalid %s %q", label, component)
 	case strings.ContainsAny(component, `/\`):
 		return fmt.Errorf("invalid %s %q: contains path separator", label, component)
+	case strings.Contains(component, "@"):
+		// Userinfo of well-formed URLs is separated by url.Parse before this
+		// point; an "@" here means normalization mangled a credential-bearing
+		// remote (e.g. scp-style user:token@host:path). Reject rather than
+		// risk embedding a secret in a repository identity.
+		return fmt.Errorf("invalid %s: contains userinfo separator", label)
 	default:
 		return nil
 	}
