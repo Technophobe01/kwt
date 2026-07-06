@@ -25,8 +25,15 @@ type Row struct {
 	Entry       *discovery.GlobalWorktreeEntry
 	Status      *models.WorktreeStatus
 	Fleet       *FleetInfo
+	Workspace   *WorkspaceInfo
 	SessionName string
 	SessionLive bool
+}
+
+// WorkspaceInfo is the TUI-facing view of one registered directory workspace.
+type WorkspaceInfo struct {
+	Name string
+	Path string
 }
 
 // FleetInfo is the TUI-facing summary of one multi-machine sync row.

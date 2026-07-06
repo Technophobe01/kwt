@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
+	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
@@ -1823,6 +1824,9 @@ func runTUITestGitOutput(t *testing.T, dir string, args ...string) string {
 
 func stubTUIProjectRegistration(backend *tuiBackend) {
 	backend.registerProject = func(models.Project) error { return nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		return workspace, nil
+	}
 }
 
 func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
@@ -1856,4 +1860,96 @@ func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
 	assert.Equal(t, `multiple machines are publishing as host ID "same" (host same)`, warnings[0])
+}
+
+func TestTUIBackendListIncludesWorkspaceRows(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: "/global"},
+		Workspaces: []models.Workspace{{Name: "notes", Path: dir}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	liveSession := tmux.DirWorkspaceSessionName("old-name", dir)
+	backend.listSessions = func() ([]string, error) { return []string{liveSession}, nil }
+
+	rows, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].Workspace)
+	assert.Equal(t, "notes", rows[0].Workspace.Name)
+	assert.Equal(t, dir, rows[0].Workspace.Path)
+	assert.True(t, rows[0].SessionLive,
+		"liveness must match by path hash even under an old session name")
+	assert.Equal(t, liveSession, rows[0].SessionName,
+		"attach must target the live session, not the freshly computed name")
+	assert.Nil(t, rows[0].Entry)
+	assert.Nil(t, rows[0].Fleet)
+}
+
+func TestTUIBackendAutoRegistersNonGitLaunchDir(t *testing.T) {
+	launchDir := t.TempDir()
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, launchDir)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	var registered []models.Workspace
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		registered = append(registered, workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, registered, 1)
+	assert.Equal(t, launchDir, registered[0].Path)
+}
+
+func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	backend := newTUIBackendWithLaunchDir(cfg, home)
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
+		t.Fatalf("home directory must never be auto-registered, got %v", workspace)
+		return workspace, nil
+	}
+
+	_, _, err := backend.List(context.Background())
+
+	require.NoError(t, err)
 }

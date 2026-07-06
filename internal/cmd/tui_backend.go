@@ -35,6 +35,7 @@ type tuiBackend struct {
 	collectStatuses          func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions             func() ([]string, error)
 	registerProject          func(models.Project) error
+	registerWorkspace        func(models.Workspace) (models.Workspace, error)
 	readFleetState           func(context.Context, *models.Config) (fleet.FleetState, error)
 	now                      func() time.Time
 }
@@ -56,6 +57,7 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
 		registerProject:          config.RegisterProject,
+		registerWorkspace:        config.RegisterWorkspace,
 		readFleetState:           readTUIFleetState,
 		now:                      time.Now,
 	}
@@ -74,6 +76,7 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error
 		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
 	}
 	b.registerLaunchProject(launchEntries)
+	b.registerLaunchWorkspace(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
 	statusByPath, err := b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
@@ -98,6 +101,7 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error
 		}
 		rows = append(rows, buildTUIRow(entry, st, liveSessions))
 	}
+	rows = append(rows, b.workspaceRows(sessions)...)
 	rows, warnings := b.mergeFleetRows(ctx, rows)
 	return rows, warnings, nil
 }
@@ -250,6 +254,57 @@ func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEn
 		return
 	}
 	b.upsertProject(project)
+}
+
+func (b *tuiBackend) workspaceRows(sessions []string) []dashboard.Row {
+	if b.cfg == nil || len(b.cfg.Workspaces) == 0 {
+		return nil
+	}
+	rows := make([]dashboard.Row, 0, len(b.cfg.Workspaces))
+	for _, workspace := range b.cfg.Workspaces {
+		sessionName := tmux.DirWorkspaceSessionName(workspace.Name, workspace.Path)
+		sessionLive := false
+		// Match by path hash so a renamed workspace still finds (and later
+		// attaches to) its live session created under the old name.
+		if live, ok := tmux.MatchDirWorkspaceSession(sessions, workspace.Path); ok {
+			sessionName = live
+			sessionLive = true
+		}
+		rows = append(rows, dashboard.Row{
+			Workspace:   &dashboard.WorkspaceInfo{Name: workspace.Name, Path: workspace.Path},
+			SessionName: sessionName,
+			SessionLive: sessionLive,
+		})
+	}
+	return rows
+}
+
+// registerLaunchWorkspace records a non-git launch directory as a workspace,
+// best-effort, mirroring launch-repo project registration. The home directory
+// is never auto-registered: running kwt from ~ is common and would create a
+// junk entry.
+func (b *tuiBackend) registerLaunchWorkspace(launchEntries []*discovery.GlobalWorktreeEntry) {
+	if b.registerWorkspace == nil || b.launchDir == "" || len(launchEntries) > 0 {
+		return
+	}
+	if home, err := os.UserHomeDir(); err == nil && samePath(home, b.launchDir) {
+		return
+	}
+	stored, err := b.registerWorkspace(models.Workspace{Path: b.launchDir})
+	if err != nil {
+		return
+	}
+	b.cfg.Workspaces = upsertWorkspace(b.cfg.Workspaces, stored)
+}
+
+func upsertWorkspace(workspaces []models.Workspace, workspace models.Workspace) []models.Workspace {
+	for i := range workspaces {
+		if samePath(workspaces[i].Path, workspace.Path) {
+			workspaces[i] = workspace
+			return workspaces
+		}
+	}
+	return append(workspaces, workspace)
 }
 
 func (b *tuiBackend) projectByPath(projectPath string) (models.Project, bool) {
