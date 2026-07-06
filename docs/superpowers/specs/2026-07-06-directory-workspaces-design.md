@@ -31,9 +31,11 @@ die; nothing to "open").
   path = "/Users/me/notes"
   ```
 
-- `models.Workspace{Name, Path string}`; `models.Config.Workspaces []Workspace`
-  (`mapstructure:"workspaces"`). Paths are expanded and symlink-resolved on
-  load like project paths.
+- `models.Workspace{Name, Path string}` with both tag families on every field
+  (`mapstructure:"name" toml:"name"`, `mapstructure:"path" toml:"path"`),
+  matching existing persisted structs; `models.Config.Workspaces []Workspace`
+  (`mapstructure:"workspaces" toml:"workspaces"`). Paths are expanded and
+  symlink-resolved on load like project paths.
 - `config.RegisterWorkspace(workspace models.Workspace) error`, mirroring
   `RegisterProject`:
   - Expand and resolve `Path`; error if it does not exist or is not a
@@ -72,12 +74,24 @@ user's home directory, which is never auto-registered.
   appear together on merged worktree rows).
 - The backend appends one row per registered workspace after worktree and
   fleet rows, computing session liveness from the same `listSessions` map.
-- Rendering: workspace name in the project column, tilde-abbreviated path in
-  the ref column, `local` in the machines column, session liveness in the
-  status column.
+- Rendering, using the dashboard's actual columns (REPO, BRANCH, MACHINES,
+  CHANGES, HEADS, ACTIVITY, WORKSPACE): workspace name under REPO,
+  tilde-abbreviated path under BRANCH, `local` under MACHINES, `-` under
+  CHANGES and HEADS, `-` under ACTIVITY, and session liveness under WORKSPACE
+  through the existing `formatWorkspace` path.
+- Row-path, session, and layout helpers must branch on `Workspace`, not only
+  `Entry`. Today every action path treats `row.Entry == nil` as
+  non-actionable — the model's open/attach/kill guards and the backend's
+  `attachWorkspace`, `sessionName`, and `rowPathForHandoff` all reject nil
+  entries, and `resolveLayout` resolves the repo root via
+  `repositoryRootForRow`. Each of these gains a workspace branch: the session
+  name comes from `DirWorkspaceSessionName`, the pane root and handoff path
+  are `Workspace.Path`, and the per-directory layout default is loaded from
+  `Workspace.Path` instead of a repo root.
 - Actions on workspace rows:
   - Open in tmux, attach outside tmux, kill session, and layout selection
-    work exactly as for worktree rows.
+    work exactly as for worktree rows once the guards above branch on
+    `Workspace`.
   - Git-specific actions (new branch, sync/materialize, worktree remove) are
     gated off with a status-line message.
   - The remove keybinding unregisters the workspace after the standard
@@ -91,6 +105,12 @@ user's home directory, which is never auto-registered.
   the resolved path (collision resistance); the name passes through the
   existing tmux sanitizer. The result still matches the existing
   `kwt-workspace-*` session-parsing regex.
+- Rename semantics: liveness detection and attach match live sessions by the
+  `kwt-workspace-dir-` prefix plus the trailing path hash, not the full
+  session name. Renaming a registered workspace therefore re-attaches to the
+  existing live session (under its old tmux name) rather than orphaning it;
+  the dashboard shows the new name immediately, and the tmux session adopts
+  the new name the next time it is created from scratch.
 - Opening uses the existing `tmux.WorkspaceRunner.EnsureAndAttach` with the
   workspace directory as the pane root and the same layout presets.
 - Per-directory layout defaults reuse the trust-gated
@@ -109,7 +129,8 @@ user's home directory, which is never auto-registered.
 - Config: register/dedupe by path, name-collision error, missing-path error,
   name defaulting, `workspaces` excluded from local-config merge.
 - tmux: `DirWorkspaceSessionName` determinism, sanitization, regex
-  compatibility.
+  compatibility, and hash-suffix matching so a renamed workspace still
+  detects and attaches to its live old-name session.
 - Backend: `List` returns workspace rows with correct liveness; home-dir
   guard on auto-registration; non-git launch dir auto-registers.
 - TUI: rendering of workspace rows, action gating messages, unregister flow
