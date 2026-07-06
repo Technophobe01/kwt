@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/tmux"
@@ -1956,16 +1959,106 @@ func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 
 func TestTUIBackendSessionNameAndHandoffPathForWorkspaceRow(t *testing.T) {
 	row := dashboard.Row{
-		Workspace:   &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
-		SessionName: tmux.DirWorkspaceSessionName("notes", "/Users/me/notes"),
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
 	}
 	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
 
 	name, err := backend.sessionName(row)
 
 	require.NoError(t, err)
-	assert.Equal(t, row.SessionName, name)
+	assert.Equal(t, tmux.DirWorkspaceSessionName("notes", "/Users/me/notes"), name,
+		"an unset SessionName must fall back to the workspace branch")
 	assert.Equal(t, "/Users/me/notes", rowPathForHandoff(row))
+
+	row.SessionName = "live-session-name"
+	name, err = backend.sessionName(row)
+
+	require.NoError(t, err)
+	assert.Equal(t, "live-session-name", name,
+		"a non-empty SessionName must win over the workspace branch")
+}
+
+func TestRowPaneRoot(t *testing.T) {
+	assert.Equal(t, "/Users/me/notes", rowPaneRoot(dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+	}), "a workspace row must use the workspace path")
+
+	assert.Equal(t, "/repos/service", rowPaneRoot(dashboard.Row{
+		Entry: &discovery.GlobalWorktreeEntry{Path: "/repos/service"},
+	}), "an entry row must use the entry path")
+
+	assert.Equal(t, "", rowPaneRoot(dashboard.Row{}),
+		"an empty row must fall back to an empty pane root")
+}
+
+func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	err := backend.attachWorkspace(context.Background(), dashboard.Row{}, "", false, false)
+
+	require.Error(t, err)
+	assert.Equal(t, "no worktree selected", err.Error())
+}
+
+// TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow exercises the
+// relaxed guard in attachWorkspace: a workspace-only row (row.Entry == nil)
+// must get past it. There is no seam to stub the tmux runner that
+// attachWorkspace constructs internally, so this test relies on an empty
+// layouts config to force a layout-resolution error before EnsureAndAttach
+// is ever reached; that keeps the test from touching real tmux while still
+// proving the row cleared the guard.
+func TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow(t *testing.T) {
+	row := dashboard.Row{
+		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: t.TempDir()},
+	}
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+
+	err := backend.attachWorkspace(context.Background(), row, "", false, false)
+
+	require.Error(t, err)
+	assert.NotEqual(t, "no worktree selected", err.Error(),
+		"a workspace row must clear the entry/workspace guard")
+}
+
+// TestTUIBackendResolveLayoutUsesWorkspacePathForDefault covers resolveLayout's
+// workspace branch: for a workspace row, the repo-local layout default must be
+// read from row.Workspace.Path, not from repositoryRootForRow (which requires
+// row.Entry and would error for a workspace-only row).
+func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	workspaceDir := t.TempDir()
+	localTOML := []byte("[layouts]\ndefault = \"focus\"\n")
+	localConfigPath := filepath.Join(workspaceDir, ".kwt.toml")
+	require.NoError(t, os.WriteFile(localConfigPath, localTOML, 0o644))
+
+	absPath, err := filepath.EvalSymlinks(localConfigPath)
+	require.NoError(t, err)
+	sum := sha256.Sum256(localTOML)
+	trustStorePath := filepath.Join(home, ".config", "kwt", "trusted_configs.json")
+	store, err := config.LoadTrustStore(trustStorePath)
+	require.NoError(t, err)
+	require.NoError(t, store.Add(absPath, hex.EncodeToString(sum[:])))
+
+	cfg := &models.Config{
+		Layouts: models.LayoutsConfig{
+			Default: "quad",
+			Presets: []models.Layout{
+				{Name: "quad", Arrange: "tiled", Panes: []string{"shell"}},
+				{Name: "focus", Arrange: "main-vertical", Panes: []string{"shell"}},
+			},
+		},
+	}
+	row := dashboard.Row{Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: workspaceDir}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	layout, err := backend.resolveLayout(row, "", false)
+
+	require.NoError(t, err)
+	assert.Equal(t, "focus", layout.Name,
+		"the workspace directory's .kwt.toml default must win over the global default")
 }
 
 func TestTUIBackendUnregisterWorkspace(t *testing.T) {
