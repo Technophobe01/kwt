@@ -1,0 +1,8 @@
+.kwt-discord-link {
+  color: var(--md-primary-bg-color);
+}
+
+.kwt-discord-link:hover,
+.kwt-discord-link:focus-visible {
+  color: var(--md-accent-fg-color);
+}

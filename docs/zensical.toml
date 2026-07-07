@@ -9,6 +9,7 @@ site_dir = "site"
 repo_url = "https://github.com/kenn-io/kwt"
 repo_name = "kenn-io/kwt"
 edit_uri = "edit/main/docs/"
+extra_css = ["stylesheets/extra.css"]
 nav = [
   { "Start" = [
     { "Overview" = "index.md" },
@@ -37,6 +38,7 @@ nav = [
 
 [project.theme]
 variant = "modern"
+custom_dir = "overrides"
 features = [
   "navigation.instant",
   "navigation.instant.progress",
