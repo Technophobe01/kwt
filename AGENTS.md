@@ -13,6 +13,7 @@
 - Prefer the repo's commands for verification: `make test`, `make build`, and focused `go test ./path` runs while iterating.
 
 <!-- BEGIN KATA (managed by `kata init --with-agents`) -->
+
 ## kata issue tracker
 
 This project uses [kata](https://github.com/kenn-io/kata) as its shared issue

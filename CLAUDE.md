@@ -43,6 +43,7 @@ make install        # Build and install kwt
 4. **Delete anything the agent can infer** from your code
 
 <!-- BEGIN KATA (managed by `kata init --with-agents`) -->
+
 ## kata issue tracker
 
 This project uses [kata](https://github.com/kenn-io/kata) as its shared issue
