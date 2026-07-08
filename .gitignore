@@ -32,3 +32,4 @@ dist/
 .superpowers/
 .vercel
 .env*
+.kata.local.toml
