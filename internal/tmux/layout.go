@@ -19,11 +19,21 @@ func ValidArranges() map[string]bool {
 	}
 }
 
+// BlankLayoutName is the reserved layout name for the blank session. It is
+// valid anywhere a layout name is accepted and cannot name a preset.
+const BlankLayoutName = "none"
+
+// BlankLayout returns the implicit single-pane, plain-login-shell layout used
+// when no preset is selected.
+func BlankLayout() models.Layout {
+	return models.Layout{Name: BlankLayoutName, Panes: []string{""}}
+}
+
 // BuildConstructionSequence returns the ordered, index-free tmux invocations
-// that create and arrange the panes for a layout with N panes. The
-// new-session and split-window commands each print the new pane's stable ID
-// (via -P -F '#{pane_id}'), which the runner captures to target panes by ID.
-// It performs no I/O.
+// that create and arrange the panes for a layout with N panes. Single-pane
+// layouts emit no select-layout call. The new-session and split-window
+// commands each print the new pane's stable ID (via -P -F '#{pane_id}'),
+// which the runner captures to target panes by ID. It performs no I/O.
 func BuildConstructionSequence(session, worktreeDir string, layout models.Layout) [][]string {
 	seq := [][]string{
 		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-c", worktreeDir},
@@ -32,7 +42,9 @@ func BuildConstructionSequence(session, worktreeDir string, layout models.Layout
 		seq = append(seq,
 			[]string{"split-window", "-P", "-F", "#{pane_id}", "-t", session, "-c", worktreeDir})
 	}
-	seq = append(seq, []string{"select-layout", "-t", session, layout.Arrange})
+	if len(layout.Panes) > 1 {
+		seq = append(seq, []string{"select-layout", "-t", session, layout.Arrange})
+	}
 	return seq
 }
 
@@ -58,15 +70,17 @@ func BuildPaneCommandSequence(paneIDs, panes []string) [][]string {
 	return seq
 }
 
-// ValidateLayouts checks arrange names, non-empty panes, and that the default
-// resolves to a preset. Called before any workspace launch.
+// ValidateLayouts checks arrange names, non-empty panes, agent references,
+// the reserved blank name, and that a non-blank default resolves to a preset.
+// Zero presets is valid: the blank session needs no configuration. Called
+// before any workspace launch.
 func ValidateLayouts(cfg models.LayoutsConfig, agents map[string]string) error {
-	if len(cfg.Presets) == 0 {
-		return fmt.Errorf("no layouts configured; add [layouts] and [[layouts.presets]] to config.toml")
-	}
 	valid := ValidArranges()
 	names := make(map[string]bool, len(cfg.Presets))
 	for _, p := range cfg.Presets {
+		if p.Name == BlankLayoutName {
+			return fmt.Errorf("layout name %q is reserved for the blank session", BlankLayoutName)
+		}
 		if !valid[p.Arrange] {
 			return fmt.Errorf("layout %q has invalid arrange %q; valid: %s",
 				p.Name, p.Arrange, arrangeList())
@@ -81,7 +95,7 @@ func ValidateLayouts(cfg models.LayoutsConfig, agents map[string]string) error {
 		}
 		names[p.Name] = true
 	}
-	if cfg.Default != "" && !names[cfg.Default] {
+	if cfg.Default != "" && cfg.Default != BlankLayoutName && !names[cfg.Default] {
 		return fmt.Errorf("layouts.default %q is not a defined preset (%s)",
 			cfg.Default, presetList(cfg))
 	}
@@ -150,7 +164,9 @@ func FindPreset(cfg models.LayoutsConfig, name string) (models.Layout, error) {
 
 // ResolveLayout applies the selection precedence: explicit --layout, then
 // --select-layout (via selectFn), then the target repo default, then the
-// global default. layoutFlag and selectFlag are mutually exclusive.
+// global default. layoutFlag and selectFlag are mutually exclusive. An empty
+// resolved name or the reserved name "none" yields the blank single-pane
+// layout.
 func ResolveLayout(
 	cfg models.LayoutsConfig,
 	layoutFlag string,
@@ -162,7 +178,7 @@ func ResolveLayout(
 		return models.Layout{}, fmt.Errorf("--layout and --select-layout are mutually exclusive")
 	}
 	if selectFlag {
-		return selectFn(cfg.Presets)
+		return selectFn(append([]models.Layout{BlankLayout()}, cfg.Presets...))
 	}
 	name := layoutFlag
 	if name == "" {
@@ -170,6 +186,9 @@ func ResolveLayout(
 	}
 	if name == "" {
 		name = cfg.Default
+	}
+	if name == "" || name == BlankLayoutName {
+		return BlankLayout(), nil
 	}
 	return FindPreset(cfg, name)
 }
