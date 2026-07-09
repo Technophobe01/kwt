@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.kenn.io/kwt/internal/config"
@@ -26,6 +27,10 @@ import (
 )
 
 type tuiBackend struct {
+	// mu serializes List and MergeFleet: List mutates cfg (launch project and
+	// workspace registration) while MergeFleet's manifest publish reads it,
+	// and the TUI runs the two as concurrent commands.
+	mu                        sync.Mutex
 	cfg                       *models.Config
 	tmux                      *tmux.TmuxCommand
 	launchDir                 string
@@ -67,6 +72,9 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 }
 
 func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
@@ -105,8 +113,17 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error
 		rows = append(rows, buildTUIRow(entry, st, liveSessions))
 	}
 	rows = append(rows, b.workspaceRows(sessions)...)
-	rows, warnings := b.mergeFleetRows(ctx, rows)
-	return rows, warnings, nil
+	return rows, nil, nil
+}
+
+// MergeFleet overlays hub state onto locally discovered rows. It publishes
+// this host's manifest and reads the hub synchronously, so callers must keep
+// it off the first-paint path and cancel ctx when the result is no longer
+// wanted.
+func (b *tuiBackend) MergeFleet(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.mergeFleetRows(ctx, rows)
 }
 
 func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
@@ -227,16 +244,28 @@ func localFleetObservation(currentHost string, localRow dashboard.Row, now time.
 }
 
 func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
-	var entries []*discovery.GlobalWorktreeEntry
-	for _, project := range b.cfg.Projects {
+	// Each project discovery spawns git subprocesses; run them concurrently
+	// and merge in config order so results stay deterministic.
+	results := make([][]*discovery.GlobalWorktreeEntry, len(b.cfg.Projects))
+	var wg sync.WaitGroup
+	for i, project := range b.cfg.Projects {
 		if project.Path == "" {
 			continue
 		}
-		projectEntries, err := b.discoverProjectWorktrees(project.Path)
-		if err != nil {
-			continue
-		}
-		projectEntries = applyProjectIdentityFallback(projectEntries, project)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			projectEntries, err := b.discoverProjectWorktrees(project.Path)
+			if err != nil {
+				return
+			}
+			results[i] = applyProjectIdentityFallback(projectEntries, project)
+		}()
+	}
+	wg.Wait()
+
+	var entries []*discovery.GlobalWorktreeEntry
+	for _, projectEntries := range results {
 		entries = mergeTUIEntries(entries, projectEntries)
 	}
 	return entries
@@ -677,13 +706,16 @@ func buildTUIRow(
 }
 
 func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetState, error) {
-	if cfg != nil && cfg.Fleet.Enabled {
-		var publishWarning bytes.Buffer
-		_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
-	}
+	// Create the client first: when the hub is unusable (bad URL, missing
+	// token) this returns immediately instead of paying for a manifest build
+	// whose publish would fail anyway.
 	client, err := newFleetClientFromConfig(cfg)
 	if err != nil {
 		return fleet.FleetState{}, err
+	}
+	if cfg != nil && cfg.Fleet.Enabled {
+		var publishWarning bytes.Buffer
+		_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
 	}
 	state, _, notModified, err := client.State(ctx, "")
 	if err != nil {

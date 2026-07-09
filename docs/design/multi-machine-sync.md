@@ -43,10 +43,12 @@ node. For a loopback-only hub it may default an empty `hub_url` from
 `[fleet.hub].listen_addr`; multi-machine clients should use an HTTPS `hub_url`
 that reaches the hub through a private TLS endpoint.
 
-Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
-deployment keeps the daemon listener on loopback and exposes it through HTTPS
-for other machines. Plain HTTP bearer-token requests are valid only for
-loopback hub URLs, and the hub rejects non-loopback listen addresses.
+Tokens must come from `token_file` or `token_env`, not inline TOML. The daemon
+listener stays on loopback. Plain HTTP bearer-token requests are valid only for
+loopback hub URLs, and the client bypasses environment proxies for those
+requests. Every multi-machine hub needs an HTTPS endpoint, commonly Tailscale
+Serve, Caddy, or another private TLS proxy forwarding to the loopback listener.
+The hub rejects every non-loopback listen address.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail

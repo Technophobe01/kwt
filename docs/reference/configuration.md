@@ -109,7 +109,9 @@ project bootstrap command manually after syncing if that branch needs it.
 ## Multi-machine sync config
 
 Multi-machine sync is an opt-in subsystem. The public command namespace is
-`kwt sync`, and the config section is `[fleet]`.
+`kwt sync`, and the config section is `[fleet]`. All `[fleet]` settings must be
+set in the global `config.toml`; values in repository-local `.kwt.toml` files
+are ignored.
 
 ```toml
 [fleet]
@@ -123,9 +125,10 @@ listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
-Plain `http://` hub URLs are accepted only for loopback hosts. Use HTTPS for a
-multi-machine hub URL, commonly by serving the loopback hub through a private TLS
-endpoint.
+Plain `http://` hub URLs and hub listeners are accepted only for loopback
+hosts. Loopback client requests bypass environment HTTP proxies. Every
+multi-machine hub URL must use HTTPS, commonly by serving the loopback hub
+through a private TLS endpoint.
 
 See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
 and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the

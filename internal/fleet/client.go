@@ -79,13 +79,31 @@ func NewClient(opts ClientOptions) *Client {
 	if timeout == 0 {
 		timeout = defaultFleetClientTimeout
 	}
-	return &Client{
-		hubURL: strings.TrimRight(strings.TrimSpace(opts.HubURL), "/"),
-		token:  strings.TrimSpace(opts.Token),
-		httpClient: &http.Client{
-			Timeout: timeout,
+	hubURL := strings.TrimRight(strings.TrimSpace(opts.HubURL), "/")
+	client := &Client{hubURL: hubURL, token: strings.TrimSpace(opts.Token)}
+	client.httpClient = &http.Client{
+		Timeout:   timeout,
+		Transport: fleetTransport(),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return validateBearerHubURL(req.URL.String())
 		},
 	}
+	return client
+}
+
+func fleetTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = func(req *http.Request) (*url.URL, error) {
+		if req != nil && req.URL != nil && req.URL.Scheme == "http" &&
+			isLoopbackHost(req.URL.Hostname()) {
+			return nil, nil
+		}
+		return http.ProxyFromEnvironment(req)
+	}
+	return transport
 }
 
 // Publish sends one manifest to the fleet hub.
@@ -200,6 +218,11 @@ func publishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 	if hubURL == "" {
 		return errors.New("sync hub URL is not configured")
 	}
+	// Fail before the manifest build: it spawns git subprocesses across every
+	// project and worktree, which is wasted work when the hub is unusable.
+	if err := validateBearerHubURL(hubURL); err != nil {
+		return err
+	}
 	token, err := LoadToken(cfg.Fleet)
 	if err != nil {
 		return err
@@ -243,6 +266,12 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 	return req, nil
 }
 
+// ValidateHubURL reports whether a hub URL is usable for bearer-token
+// requests, so callers can fail fast instead of at the first request.
+func ValidateHubURL(raw string) error {
+	return validateBearerHubURL(raw)
+}
+
 func validateBearerHubURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -251,10 +280,11 @@ func validateBearerHubURL(raw string) error {
 	if parsed.Scheme != "http" {
 		return nil
 	}
-	if isLoopbackHost(parsed.Hostname()) {
+	host := parsed.Hostname()
+	if isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback hosts; use https for multi-machine hubs", raw)
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback; use HTTPS for multi-machine hubs", raw)
 }
 
 func isLoopbackHost(host string) bool {

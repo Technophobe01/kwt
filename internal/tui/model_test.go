@@ -16,6 +16,8 @@ import (
 
 type fakeBackend struct {
 	rows            []Row
+	fleetRows       []Row
+	fleetWarnings   []string
 	layoutNames     []string
 	insideTmux      bool
 	createPath      string
@@ -26,6 +28,8 @@ type fakeBackend struct {
 	killErr         error
 	openErr         error
 	listCalls       int
+	mergeFleetCalls int
+	mergeCtx        context.Context
 	createCalls     []string
 	materializeRows []string
 	removeCalls     []string
@@ -38,6 +42,12 @@ type fakeBackend struct {
 func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
 	b.listCalls++
 	return append([]Row(nil), b.rows...), nil, nil
+}
+
+func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []string) {
+	b.mergeFleetCalls++
+	b.mergeCtx = ctx
+	return append(append([]Row(nil), rows...), b.fleetRows...), b.fleetWarnings
 }
 
 func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
@@ -945,12 +955,169 @@ func TestInitialAnchorSelectsLaunchWorkspaceRow(t *testing.T) {
 	require.NotNil(t, model.selectedRow().Workspace,
 		"first load must select the launch directory's workspace row despite activity sorting")
 	assert.Equal(t, "/Users/me/code", model.selectedRow().Workspace.Path)
+	assert.Equal(t, "code", model.projectPerspective,
+		"launching from a workspace directory must scope the view to it")
 
-	// The anchor is consumed: a refresh keeps the cursor by path instead of
-	// snapping back, and moving afterwards works normally.
+	// The anchor is consumed: after widening the view, a refresh keeps the
+	// cursor by path instead of snapping back, and moving works normally.
+	model, _ = updateModel(t, model, press("esc"))
 	model, _ = updateModel(t, model, press("g"))
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{active, workspace}})
 	require.NotNil(t, model.selectedRow().Entry, "anchor must not re-apply on later refreshes")
+}
+
+func TestInitialAnchorAppliesLaunchProjectPerspective(t *testing.T) {
+	launch := testRow("kwt", "main", "/w/kwt/main")
+	sibling := testRow("kwt", "feature", "/w/kwt/feature")
+	other := testRow("kata", "main", "/w/kata/main")
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/w/kwt/main")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{launch, sibling, other}})
+
+	rows := model.filteredRows()
+	require.Len(t, rows, 2, "first load must show only the launch repo's worktrees")
+	for _, row := range rows {
+		assert.Equal(t, "kwt", rowRepoName(row))
+	}
+	assert.Equal(t, "/w/kwt/main", rowPath(model.selectedRow()))
+
+	// Escape widens the view back to every project.
+	model, _ = updateModel(t, model, press("esc"))
+	assert.Empty(t, model.projectPerspective)
+	assert.Len(t, model.filteredRows(), 3)
+	assert.Equal(t, "/w/kwt/main", rowPath(model.selectedRow()),
+		"clearing the perspective must keep the selection")
+}
+
+func TestLaunchProjectPerspectiveFallsBackToCurrentRow(t *testing.T) {
+	other := testRow("kwt", "main", "/w/kwt/main")
+	current := testRow("kata", "feature", "/w/kata/feature")
+	current.Status.IsCurrent = true
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/w/kata/feature/sub/dir")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{other, current}})
+
+	rows := model.filteredRows()
+	require.Len(t, rows, 1, "launching from inside a worktree must filter to its repo")
+	assert.Equal(t, "/w/kata/feature", rowPath(rows[0]))
+}
+
+func TestNoLaunchProjectPerspectiveOutsideAnyRepo(t *testing.T) {
+	rows := []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kata", "main", "/w/kata/main"),
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/Users/me")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: rows})
+
+	assert.Empty(t, model.projectPerspective)
+	assert.Len(t, model.filteredRows(), 2,
+		"launching outside any repo must show everything")
+}
+
+func TestEscapeClearsSearchFilterBeforeProjectPerspective(t *testing.T) {
+	launch := testRow("kwt", "main", "/w/kwt/main")
+	other := testRow("kata", "main", "/w/kata/main")
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor("/w/kwt/main")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{launch, other}})
+
+	model, _ = updateModel(t, model, press("/"))
+	model, _ = updateModel(t, model, press("m"))
+	model, _ = updateModel(t, model, press("enter"))
+	require.Equal(t, "m", model.filter)
+
+	model, _ = updateModel(t, model, press("esc"))
+	assert.Empty(t, model.filter, "first escape clears the search filter")
+	assert.NotEmpty(t, model.projectPerspective, "perspective survives the first escape")
+
+	model, _ = updateModel(t, model, press("esc"))
+	assert.Empty(t, model.projectPerspective, "second escape clears the perspective")
+}
+
+func TestRowsLoadMergesFleetAsynchronously(t *testing.T) {
+	local := testRow("kwt", "main", "/w/kwt/main")
+	remote := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/kenn-io/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+	}}
+	backend := &fakeBackend{fleetRows: []Row{remote}, fleetWarnings: []string{"hub warning"}}
+	model := NewModel(backend, "/worktrees")
+
+	model, cmd := updateModel(t, model, rowsMsg{rows: []Row{local}})
+
+	// Local rows render immediately, before any fleet work.
+	assert.Len(t, model.rows, 1)
+	assert.False(t, model.fetching)
+	require.NotNil(t, cmd, "applying local rows must dispatch the fleet merge command")
+
+	msg := cmd()
+	fleetMsg, ok := msg.(fleetRowsMsg)
+	require.True(t, ok, "fleet merge command must produce a fleetRowsMsg, got %T", msg)
+	assert.Equal(t, 1, backend.mergeFleetCalls)
+
+	model, _ = updateModel(t, model, fleetMsg)
+	assert.Len(t, model.rows, 2, "fleet-only rows must appear after the merge")
+	assert.Equal(t, []string{"hub warning"}, model.warnings)
+}
+
+func TestRefreshCancelsInFlightFleetMerge(t *testing.T) {
+	local := testRow("kwt", "main", "/w/kwt/main")
+	backend := &fakeBackend{rows: []Row{local}}
+	model := NewModel(backend, "/worktrees")
+
+	model, fleetCmd := updateModel(t, model, rowsMsg{rows: []Row{local}})
+	require.NotNil(t, fleetCmd)
+
+	// Refresh before the merge runs: the merge's context must be cancelled so
+	// the backend can abandon hub work instead of blocking the new load.
+	model, _ = updateModel(t, model, press("r"))
+	fleetCmd()
+
+	require.NotNil(t, backend.mergeCtx)
+	assert.ErrorIs(t, backend.mergeCtx.Err(), context.Canceled)
+	_ = model
+}
+
+func TestStaleFleetMergeIsDropped(t *testing.T) {
+	local := testRow("kwt", "main", "/w/kwt/main")
+	remote := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/kenn-io/kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+	}}
+	backend := &fakeBackend{rows: []Row{local}, fleetRows: []Row{remote}}
+	model := NewModel(backend, "/worktrees")
+
+	model, cmd := updateModel(t, model, rowsMsg{rows: []Row{local}})
+	require.NotNil(t, cmd)
+	staleFleetMsg := cmd()
+
+	// A refresh dispatched before the fleet merge lands supersedes it.
+	model, _ = updateModel(t, model, press("r"))
+	model, _ = updateModel(t, model, staleFleetMsg)
+
+	assert.Len(t, model.rows, 1, "a stale fleet merge must not clobber a newer refresh")
+}
+
+func TestFleetMergePreservesCursorSelection(t *testing.T) {
+	first := testRow("kwt", "feature", "/w/kwt/feature")
+	second := testRow("kwt", "main", "/w/kwt/main")
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+
+	model, cmd := updateModel(t, model, rowsMsg{rows: []Row{first, second}})
+	model, _ = updateModel(t, model, press("G"))
+	selectedPath := rowPath(model.selectedRow())
+
+	require.NotNil(t, cmd)
+	model, _ = updateModel(t, model, cmd())
+
+	assert.Equal(t, selectedPath, rowPath(model.selectedRow()),
+		"the fleet merge must keep the user's selection")
 }
 
 func TestInitialAnchorMissFallsBackToCurrentRow(t *testing.T) {

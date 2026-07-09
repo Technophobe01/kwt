@@ -58,9 +58,14 @@ type FleetInfo struct {
 }
 
 type Backend interface {
-	// List returns dashboard rows plus non-fatal warnings (e.g. fleet hub
-	// state issues) that should be surfaced to the user.
+	// List returns local dashboard rows plus non-fatal warnings that should
+	// be surfaced to the user. It must stay fast: fleet hub work belongs in
+	// MergeFleet, which runs after the first paint.
 	List(ctx context.Context) ([]Row, []string, error)
+	// MergeFleet overlays multi-machine sync state onto rows and returns the
+	// merged rows plus hub warnings. When sync is disabled it returns rows
+	// unchanged.
+	MergeFleet(ctx context.Context, rows []Row) ([]Row, []string)
 	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
 	RemoveWorktree(ctx context.Context, row Row, force bool) error

@@ -45,6 +45,14 @@ type rowsMsg struct {
 	err      error
 }
 
+// fleetRowsMsg delivers the fleet overlay for the load identified by seq;
+// stale overlays (an intervening refresh bumped loadSeq) are dropped.
+type fleetRowsMsg struct {
+	seq      int
+	rows     []Row
+	warnings []string
+}
+
 type actionDoneMsg struct {
 	message    string
 	err        error
@@ -71,6 +79,9 @@ type Model struct {
 	inputMode           inputMode
 	confirm             confirmState
 	fetching            bool
+	fleetPending        bool
+	fleetCancel         context.CancelFunc
+	loadSeq             int
 	pendingRefresh      bool
 	showHelp            bool
 	message             string
@@ -102,9 +113,25 @@ func NewModel(backend Backend, baseDir string) Model {
 // WithInitialAnchor pre-selects the row whose path matches path on the first
 // rows load — typically the launch directory's workspace row, which the
 // activity-descending sort would otherwise bury at the bottom of the list.
+// It also scopes the initial view to the launch directory's project; Escape
+// widens back to every project.
 func (m Model) WithInitialAnchor(path string) Model {
 	m.anchorPath = path
 	return m
+}
+
+// launchPerspective resolves the project key of the row the TUI was launched
+// from: an exact anchor path match (repo root or workspace), else the row
+// whose worktree contains the launch directory. Empty when launched outside
+// any known worktree, which leaves the view unscoped.
+func launchPerspective(rows []Row, anchorPath string) string {
+	if index, ok := indexByPathOK(rows, anchorPath); ok {
+		return rowProjectKey(rows[index])
+	}
+	if index, ok := currentRowIndex(rows); ok {
+		return rowProjectKey(rows[index])
+	}
+	return ""
 }
 
 func (m Model) Init() tea.Cmd {
@@ -119,6 +146,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case rowsMsg:
 		return m.applyRows(msg)
+	case fleetRowsMsg:
+		return m.applyFleetRows(msg)
 	case actionDoneMsg:
 		return m.applyActionDone(msg)
 	case tea.KeyPressMsg:
@@ -195,6 +224,9 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	rows := append([]Row(nil), msg.rows...)
 	sortRows(rows)
 	m.rows = rows
+	if !hadRows && m.anchorPath != "" {
+		m.projectPerspective = launchPerspective(rows, m.anchorPath)
+	}
 	newRows := m.filteredRows()
 
 	if m.anchorPath != "" {
@@ -227,7 +259,30 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	}
 	m.cursor = clampCursor(m.cursor, len(newRows))
 	m.err = nil
-	return m.startPendingRefresh()
+	if m.pendingRefresh {
+		return m.startPendingRefresh()
+	}
+	m.fleetPending = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.fleetCancel = cancel
+	return m, m.fleetRowsCmd(ctx, m.loadSeq, m.rows)
+}
+
+func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
+	if msg.seq != m.loadSeq {
+		return m, nil
+	}
+	m.fleetPending = false
+	m = m.cancelFleetMerge()
+	m.warnings = msg.warnings
+
+	oldRows := m.filteredRows()
+	oldCursor := m.cursor
+	rows := append([]Row(nil), msg.rows...)
+	sortRows(rows)
+	m.rows = rows
+	m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
+	return m, nil
 }
 
 func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
@@ -246,8 +301,7 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.refresh {
-		m.fetching = true
-		return m, m.fetchRowsCmd()
+		return m.startFetch()
 	}
 	return m, nil
 }
@@ -257,8 +311,26 @@ func (m Model) startPendingRefresh() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.pendingRefresh = false
+	return m.startFetch()
+}
+
+// startFetch begins a new load generation: any fleet overlay still in flight
+// for a previous generation is cancelled, and its result dropped if it
+// arrives anyway.
+func (m Model) startFetch() (Model, tea.Cmd) {
+	m.loadSeq++
 	m.fetching = true
+	m.fleetPending = false
+	m = m.cancelFleetMerge()
 	return m, m.fetchRowsCmd()
+}
+
+func (m Model) cancelFleetMerge() Model {
+	if m.fleetCancel != nil {
+		m.fleetCancel()
+		m.fleetCancel = nil
+	}
+	return m
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -314,8 +386,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.startFilter()
 	case key.Matches(msg, m.keys.Refresh):
 		if !m.fetching {
-			m.fetching = true
-			return m, m.fetchRowsCmd()
+			return m.startFetch()
 		}
 	case key.Matches(msg, m.keys.Help):
 		m.showHelp = true
@@ -333,6 +404,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			selectedPath := rowPath(m.selectedRow())
 			m.projectFilter = ""
 			m.input.SetValue("")
+			if selectedPath != "" {
+				m.cursor = indexByPath(m.filteredRows(), selectedPath)
+			} else {
+				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			}
+		} else if m.projectPerspective != "" {
+			selectedPath := rowPath(m.selectedRow())
+			m.projectPerspective = ""
 			if selectedPath != "" {
 				m.cursor = indexByPath(m.filteredRows(), selectedPath)
 			} else {
@@ -719,9 +798,21 @@ func (m Model) startKill() (Model, tea.Cmd) {
 }
 
 func (m Model) fetchRowsCmd() tea.Cmd {
+	backend := m.backend
 	return func() tea.Msg {
-		rows, warnings, err := m.backend.List(context.Background())
+		rows, warnings, err := backend.List(context.Background())
 		return rowsMsg{rows: rows, warnings: warnings, err: err}
+	}
+}
+
+func (m Model) fleetRowsCmd(ctx context.Context, seq int, rows []Row) tea.Cmd {
+	backend := m.backend
+	// Copy: the merge mutates row elements while the UI keeps rendering the
+	// current slice.
+	rows = append([]Row(nil), rows...)
+	return func() tea.Msg {
+		merged, warnings := backend.MergeFleet(ctx, rows)
+		return fleetRowsMsg{seq: seq, rows: merged, warnings: warnings}
 	}
 }
 
@@ -802,6 +893,8 @@ func (m Model) renderHeader() string {
 	spinner := ""
 	if m.fetching {
 		spinner = " · fetching"
+	} else if m.fleetPending {
+		spinner = " · syncing"
 	}
 	left := fmt.Sprintf("kwt · %d %s · %d %s%s",
 		len(m.rows), plural(len(m.rows), "worktree", "worktrees"),

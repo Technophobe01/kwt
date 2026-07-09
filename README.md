@@ -144,8 +144,9 @@ kwt config set --local layouts.default stack
 
 Multi-machine sync is opt-in and uses static config. Set `[fleet].enabled =
 true`, configure a hub URL, and provide a bearer token through `token_env` or
-`token_file`. Non-loopback hub URLs must use HTTPS; plain HTTP is reserved for
-loopback listeners.
+`token_file`. Plain HTTP is allowed only for loopback hub URLs. Every
+multi-machine hub URL must use HTTPS, typically through a private TLS endpoint
+that forwards to the loopback listener.
 
 The hub is a dumb store for signed-in hosts' latest worktree manifests.
 Multi-machine status is advisory: it helps compare branch, commit, dirty-state,

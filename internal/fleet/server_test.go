@@ -244,7 +244,10 @@ func TestParseHubEndpoint(t *testing.T) {
 	}{
 		{name: "loopback", raw: "127.0.0.1:8787"},
 		{name: "localhost", raw: "localhost:8787"},
-		{name: "tailscale cgnat", raw: "100.64.1.2:8787", wantErr: true},
+		{name: "tailscale ipv4", raw: "100.64.1.2:8787", wantErr: true},
+		{name: "tailscale ipv6", raw: "[fd7a:115c:a1e0::ab12]:8787", wantErr: true},
+		{name: "non-self tailscale address", raw: "100.64.5.5:8787", wantErr: true},
+		{name: "below tailnet cgnat block", raw: "100.63.255.255:8787", wantErr: true},
 		{name: "private lan", raw: "192.168.1.10:8787", wantErr: true},
 		{name: "unspecified", raw: "0.0.0.0:8787", wantErr: true},
 		{name: "public", raw: "8.8.8.8:8787", wantErr: true},
