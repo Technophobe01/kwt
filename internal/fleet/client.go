@@ -21,16 +21,18 @@ const defaultFleetClientTimeout = 2 * time.Second
 
 // ClientOptions configures a fleet hub HTTP client.
 type ClientOptions struct {
-	HubURL  string
-	Token   string
-	Timeout time.Duration
+	HubURL        string
+	Token         string
+	Timeout       time.Duration
+	AllowInsecure bool
 }
 
 // Client publishes manifests to and reads state from a fleet hub.
 type Client struct {
-	hubURL     string
-	token      string
-	httpClient *http.Client
+	hubURL        string
+	token         string
+	allowInsecure bool
+	httpClient    *http.Client
 }
 
 // ManifestBuildProvider builds the local manifest used by best-effort publish.
@@ -79,13 +81,21 @@ func NewClient(opts ClientOptions) *Client {
 	if timeout == 0 {
 		timeout = defaultFleetClientTimeout
 	}
-	return &Client{
-		hubURL: strings.TrimRight(strings.TrimSpace(opts.HubURL), "/"),
-		token:  strings.TrimSpace(opts.Token),
-		httpClient: &http.Client{
-			Timeout: timeout,
+	client := &Client{
+		hubURL:        strings.TrimRight(strings.TrimSpace(opts.HubURL), "/"),
+		token:         strings.TrimSpace(opts.Token),
+		allowInsecure: opts.AllowInsecure,
+	}
+	client.httpClient = &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return validateBearerHubURL(req.URL.String(), client.allowInsecure)
 		},
 	}
+	return client
 }
 
 // Publish sends one manifest to the fleet hub.
@@ -202,7 +212,7 @@ func publishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 	}
 	// Fail before the manifest build: it spawns git subprocesses across every
 	// project and worktree, which is wasted work when the hub is unusable.
-	if err := validateBearerHubURL(hubURL); err != nil {
+	if err := validateBearerHubURL(hubURL, cfg.Fleet.AllowInsecure); err != nil {
 		return err
 	}
 	token, err := LoadToken(cfg.Fleet)
@@ -220,9 +230,10 @@ func publishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 		return errors.New("sync manifest builder returned nil manifest")
 	}
 	return NewClient(ClientOptions{
-		HubURL:  hubURL,
-		Token:   token,
-		Timeout: defaultFleetClientTimeout,
+		HubURL:        hubURL,
+		Token:         token,
+		Timeout:       defaultFleetClientTimeout,
+		AllowInsecure: cfg.Fleet.AllowInsecure,
 	}).Publish(ctx, *manifest)
 }
 
@@ -236,7 +247,7 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 	if c.hubURL == "" {
 		return nil, errors.New("sync hub URL is not configured")
 	}
-	if err := validateBearerHubURL(c.hubURL); err != nil {
+	if err := validateBearerHubURL(c.hubURL, c.allowInsecure); err != nil {
 		return nil, err
 	}
 
@@ -250,32 +261,19 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 
 // ValidateHubURL reports whether a hub URL is usable for bearer-token
 // requests, so callers can fail fast instead of at the first request.
-func ValidateHubURL(raw string) error {
-	return validateBearerHubURL(raw)
+func ValidateHubURL(raw string, allowInsecure bool) error {
+	return validateBearerHubURL(raw, allowInsecure)
 }
 
-func validateBearerHubURL(raw string) error {
+func validateBearerHubURL(raw string, allowInsecure bool) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("parse sync hub URL: %w", err)
 	}
-	if parsed.Scheme != "http" {
+	if parsed.Scheme != "http" || isLoopbackHost(parsed.Hostname()) || allowInsecure {
 		return nil
 	}
-	host := parsed.Hostname()
-	if isLoopbackHost(host) {
-		return nil
-	}
-	if isTailnetIP(host) {
-		if err := verifyTailnetPeerAddress(host); err != nil {
-			return fmt.Errorf(
-				"plaintext sync hub URL %q requires a verified tailnet destination: %v; start Tailscale or use https",
-				raw, err,
-			)
-		}
-		return nil
-	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or verified tailnet IPs; use https for other multi-machine hubs", raw)
+	return fmt.Errorf("plaintext sync hub URL %q requires explicit consent: set fleet.allow_insecure = true or use HTTPS", raw)
 }
 
 func isLoopbackHost(host string) bool {

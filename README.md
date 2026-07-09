@@ -119,6 +119,7 @@ panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 enabled = false
 host_id = "laptop"
 hub_url = "https://kwt-hub.example.net"
+# allow_insecure = true  # Required for every non-loopback http:// hub URL.
 token_env = "KWT_FLEET_TOKEN"
 # token_file = "~/.config/kwt/fleet.token"
 
@@ -144,9 +145,15 @@ kwt config set --local layouts.default stack
 
 Multi-machine sync is opt-in and uses static config. Set `[fleet].enabled =
 true`, configure a hub URL, and provide a bearer token through `token_env` or
-`token_file`. Plain HTTP is allowed for loopback hub URLs, and for Tailscale
-IP hub URLs verified against the local Tailscale daemon; anything else must
-use HTTPS.
+`token_file`. HTTPS is the recommended default, and loopback HTTP needs no
+additional opt-in. Every non-loopback HTTP hub URL requires
+`[fleet].allow_insecure = true`. This permits plaintext bearer-token transport
+without proving Tailscale membership, daemon state, or actual routing. Go's
+environment proxy settings remain honored, so the plaintext token may traverse
+a configured proxy. Enable this only when you trust the entire transport, such
+as a controlled tailnet. Hub listeners remain limited to loopback or this
+machine's verified local tailnet IP; the Tailscale CLI is required only to
+verify the latter listener address.
 
 The hub is a dumb store for signed-in hosts' latest worktree manifests.
 Multi-machine status is advisory: it helps compare branch, commit, dirty-state,

@@ -200,14 +200,18 @@ func defaultNewFleetClientFromConfig(cfg *models.Config) (fleetHubClient, error)
 	if strings.TrimSpace(hubURL) == "" {
 		return nil, errors.New("sync hub URL is not configured")
 	}
-	if err := fleet.ValidateHubURL(hubURL); err != nil {
+	if err := fleet.ValidateHubURL(hubURL, cfg.Fleet.AllowInsecure); err != nil {
 		return nil, err
 	}
 	token, err := fleet.LoadToken(cfg.Fleet)
 	if err != nil {
 		return nil, err
 	}
-	return fleet.NewClient(fleet.ClientOptions{HubURL: hubURL, Token: token}), nil
+	return fleet.NewClient(fleet.ClientOptions{
+		HubURL:        hubURL,
+		Token:         token,
+		AllowInsecure: cfg.Fleet.AllowInsecure,
+	}), nil
 }
 
 func currentFleetHostID(cfg *models.Config) (string, error) {
