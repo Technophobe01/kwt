@@ -1407,7 +1407,7 @@ func TestDefaultLayoutsConfig(t *testing.T) {
 	assert.Equal(t, "claude", cfg.Agents["claude"])
 	assert.Equal(t, "roborev tui", cfg.Agents["roborev"])
 	assert.Equal(t, "{{.FullPath}}/{{.Branch}}", cfg.Naming.Template)
-	assert.Equal(t, "quad", cfg.Layouts.Default)
+	assert.Empty(t, cfg.Layouts.Default, "fresh config must default to a blank session")
 	assert.True(t, cfg.Layouts.AutoLaunchOnAdd)
 	require.NotEmpty(t, cfg.Layouts.Presets)
 
@@ -1460,24 +1460,44 @@ auto_mkdir = true
 	assert.Equal(t, "codex", cfg.Agents["codex"])
 	assert.Equal(t, "claude", cfg.Agents["claude"])
 	assert.Equal(t, "roborev tui", cfg.Agents["roborev"])
-	assert.Equal(t, "quad", cfg.Layouts.Default)
-	assert.True(t, cfg.Layouts.AutoLaunchOnAdd)
-	require.NotEmpty(t, cfg.Layouts.Presets)
+	assert.Empty(t, cfg.Layouts.Default, "migration must not write a default layout")
+	assert.True(t, cfg.Layouts.AutoLaunchOnAdd, "auto_launch_on_add backfill stays")
+	assert.Empty(t, cfg.Layouts.Presets, "migration must not seed presets")
 
 	data, err := os.ReadFile(filepath.Join(kwtHome, "config.toml"))
 	require.NoError(t, err)
 	text := string(data)
 	assert.Contains(t, text, "[agents]")
-	assert.Contains(t, text, "[[layouts.presets]]")
+	assert.NotContains(t, text, "[[layouts.presets]]")
 	assert.Contains(t, text, "codex")
-	assert.Contains(t, text, "name")
-	assert.Contains(t, text, "arrange")
-	assert.Contains(t, text, "panes")
-	assert.NotContains(t, text, "Name")
-	assert.NotContains(t, text, "Arrange")
-	assert.NotContains(t, text, "Panes")
 	assert.NotContains(t, text, "dangerously-bypass-approvals-and-sandbox")
 	assert.NotContains(t, text, "dangerously-skip-permissions")
+}
+
+func TestInitLeavesExistingLayoutsUntouched(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	require.NoError(t, os.WriteFile(filepath.Join(kwtHome, "config.toml"), []byte(`
+[layouts]
+default = "quad"
+auto_launch_on_add = false
+
+[[layouts.presets]]
+name = "quad"
+arrange = "tiled"
+panes = [""]
+`), 0o600))
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "quad", cfg.Layouts.Default)
+	assert.False(t, cfg.Layouts.AutoLaunchOnAdd)
+	require.Len(t, cfg.Layouts.Presets, 1)
+	assert.Equal(t, "quad", cfg.Layouts.Presets[0].Name)
 }
 
 func TestInitMigratesLegacyDefaultNamingTemplate(t *testing.T) {
@@ -1534,7 +1554,7 @@ func TestInitIsGlobalOnly(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "quad", cfg.Layouts.Default, "Init must not merge cwd .kwt.toml")
+	assert.Empty(t, cfg.Layouts.Default, "Init must not merge cwd .kwt.toml")
 }
 
 func TestLoadRepoLayoutDefaultUntrustedSkipped(t *testing.T) {
