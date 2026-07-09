@@ -290,3 +290,21 @@ func TestResolveLayoutSelectPrependsBlank(t *testing.T) {
 	assert.Equal(t, []string{"none", "quad"}, offered)
 	assert.Equal(t, BlankLayout(), got)
 }
+
+func TestResolveLayoutGlobalDefaultNoneYieldsBlank(t *testing.T) {
+	cfg := models.LayoutsConfig{
+		Default: "none",
+		Presets: []models.Layout{{Name: "quad", Arrange: "tiled", Panes: []string{"a"}}},
+	}
+	got, err := ResolveLayout(cfg, "", false, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, BlankLayout(), got)
+}
+
+func TestResolveLayoutUnknownNameWithZeroPresets(t *testing.T) {
+	got, err := ResolveLayout(models.LayoutsConfig{}, "quad", false, "", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown layout \"quad\"")
+	assert.Contains(t, err.Error(), "no presets defined")
+	assert.Equal(t, models.Layout{}, got)
+}

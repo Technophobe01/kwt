@@ -209,9 +209,6 @@ func (f *Finder) SelectMultipleSessions(sessions []*tmux.Session) ([]*tmux.Sessi
 
 // SelectLayout displays a fuzzy finder for layout selection.
 func (f *Finder) SelectLayout(layouts []models.Layout) (*models.Layout, error) {
-	if len(layouts) == 0 {
-		return nil, fmt.Errorf("no layouts defined")
-	}
 	idx, err := fuzzyfinder.Find(
 		layouts,
 		func(i int) string { return layoutItemLabel(layouts[i]) },

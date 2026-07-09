@@ -59,7 +59,8 @@ func (r *WorkspaceRunner) create(
 	created := false
 	for i, args := range construction {
 		// The first len(Panes) commands (new-session + splits) each print a
-		// pane ID; the trailing select-layout prints nothing.
+		// pane ID; any commands after that (select-layout, present only for
+		// multi-pane layouts) print nothing.
 		if i < len(layout.Panes) {
 			out, err := r.tmux.RunCommandOutputContext(ctx, args...)
 			if err != nil {

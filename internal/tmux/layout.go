@@ -204,7 +204,7 @@ func arrangeList() string {
 
 func presetList(cfg models.LayoutsConfig) string {
 	if len(cfg.Presets) == 0 {
-		return "none"
+		return "no presets defined"
 	}
 	seen := make(map[string]bool, len(cfg.Presets))
 	out := make([]string, 0, len(cfg.Presets))
