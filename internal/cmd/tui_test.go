@@ -2102,6 +2102,20 @@ func TestRowPaneRoot(t *testing.T) {
 		"an empty row must fall back to an empty pane root")
 }
 
+func TestTUIBackendLayoutNamesPrependsNone(t *testing.T) {
+	backend := newTUIBackend(&models.Config{
+		Layouts: models.LayoutsConfig{
+			Presets: []models.Layout{{Name: "quad", Arrange: "tiled", Panes: []string{""}}},
+		},
+	})
+	assert.Equal(t, []string{"none", "quad"}, backend.LayoutNames())
+}
+
+func TestTUIBackendLayoutNamesBlankOnly(t *testing.T) {
+	backend := newTUIBackend(&models.Config{})
+	assert.Equal(t, []string{"none"}, backend.LayoutNames())
+}
+
 func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
 	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
 
