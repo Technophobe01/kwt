@@ -79,11 +79,14 @@ store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
 Use `token_file` or `token_env`; do not put the token inline in `config.toml`.
-Plain `http://` hub URLs are allowed for loopback and tailnet hosts
-(Tailscale IPs and `*.ts.net` names — WireGuard already encrypts that traffic
-end-to-end). Any other multi-machine hub URL must use HTTPS, typically by
-putting a loopback hub behind Tailscale Serve, Caddy, or an equivalent private
-TLS endpoint. The hub accepts loopback and tailnet listen addresses.
+Plain `http://` hub URLs are allowed for loopback hosts, and for tailnet IP
+literals (Tailscale's `100.64.0.0/10` and `fd7a:115c:a1e0::/48` ranges) when
+this machine has an active tailnet interface — WireGuard already encrypts
+that traffic end-to-end. MagicDNS (`*.ts.net`) names are not accepted for
+plaintext because DNS resolution is unauthenticated; use the tailnet IP or
+HTTPS. Any other multi-machine hub URL must use HTTPS, typically by putting a
+loopback hub behind Tailscale Serve, Caddy, or an equivalent private TLS
+endpoint. The hub accepts loopback and tailnet IP listen addresses.
 
 ## Freshness and differences
 

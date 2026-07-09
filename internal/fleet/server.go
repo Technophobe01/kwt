@@ -74,6 +74,9 @@ func ParseHubEndpoint(raw string) (daemon.Endpoint, error) {
 	})
 }
 
+// requireLoopbackOrTailnet accepts loopback and tailnet-range IP listen
+// addresses. Binding a tailnet address only succeeds when tailscaled has
+// assigned it to an interface, so no additional liveness check is needed.
 func requireLoopbackOrTailnet(addr string) error {
 	if daemon.RequireLoopback(addr) == nil {
 		return nil
@@ -82,11 +85,11 @@ func requireLoopbackOrTailnet(addr string) error {
 	if err != nil {
 		return fmt.Errorf("parse host:port: %w", err)
 	}
-	if isTailnetHost(host) {
+	if isTailnetIP(host) {
 		return nil
 	}
 	return fmt.Errorf(
-		"address %q must be loopback or a tailnet address; put other multi-machine hubs behind a TLS proxy on a loopback listener",
+		"address %q must be loopback or a tailnet IP; put other multi-machine hubs behind a TLS proxy on a loopback listener",
 		addr,
 	)
 }

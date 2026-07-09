@@ -44,10 +44,13 @@ node. For a loopback-only hub it may default an empty `hub_url` from
 that reaches the hub through a private TLS endpoint.
 
 Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
-deployment keeps the daemon listener on loopback or a tailnet address. Plain
-HTTP bearer-token requests are valid only for loopback and tailnet hub URLs
-(tailnet traffic is WireGuard-encrypted); anything else needs an HTTPS
-endpoint, and the hub rejects other listen addresses.
+deployment keeps the daemon listener on loopback or a tailnet IP. Plain HTTP
+bearer-token requests are valid for loopback hub URLs, and for tailnet-range
+IP literals when the client machine has an active tailnet interface (tailnet
+traffic is WireGuard-encrypted; the interface check guards against sending
+tokens over the default route when tailscaled is down). Hostnames never
+qualify for plaintext. Anything else needs an HTTPS endpoint, and the hub
+rejects other listen addresses.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail

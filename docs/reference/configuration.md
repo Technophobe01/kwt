@@ -123,9 +123,11 @@ listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
-Plain `http://` hub URLs are accepted for loopback and tailnet hosts
-(Tailscale IPs and `*.ts.net` names). Use HTTPS for any other multi-machine
-hub URL, commonly by serving a loopback hub through a private TLS endpoint.
+Plain `http://` hub URLs are accepted for loopback hosts, and for tailnet IP
+literals (Tailscale addresses) when the machine has an active tailnet
+interface. MagicDNS (`*.ts.net`) names require HTTPS or the tailnet IP. Use
+HTTPS for any other multi-machine hub URL, commonly by serving a loopback hub
+through a private TLS endpoint.
 
 See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
 and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the

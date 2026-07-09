@@ -263,10 +263,19 @@ func validateBearerHubURL(raw string) error {
 		return nil
 	}
 	host := parsed.Hostname()
-	if isLoopbackHost(host) || isTailnetHost(host) {
+	if isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or tailnet hosts; use https for other multi-machine hubs", raw)
+	if isTailnetIP(host) {
+		if hasTailnetInterface() {
+			return nil
+		}
+		return fmt.Errorf(
+			"plaintext sync hub URL %q targets a tailnet address but this machine has no active tailnet interface; start Tailscale or use https",
+			raw,
+		)
+	}
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or tailnet IPs; use https for other multi-machine hubs", raw)
 }
 
 func isLoopbackHost(host string) bool {

@@ -71,7 +71,17 @@ func TestClientUsesBearerTokenAndTimeout(t *testing.T) {
 	assert.Equal(t, "Bearer secret", gotAuth)
 }
 
+func stubTailnetInterface(t *testing.T, present bool) {
+	t.Helper()
+	old := hasTailnetInterface
+	hasTailnetInterface = func() bool { return present }
+	t.Cleanup(func() { hasTailnetInterface = old })
+}
+
 func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
+	// Even with an active tailnet interface, only tailnet-range IP literals
+	// qualify for plaintext.
+	stubTailnetInterface(t, true)
 	tests := []struct {
 		name   string
 		hubURL string
@@ -81,6 +91,7 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 		{name: "below tailnet cgnat block", hubURL: "http://100.63.255.255:8787"},
 		{name: "above tailnet cgnat block", hubURL: "http://100.128.0.1:8787"},
 		{name: "non-tailnet ula", hubURL: "http://[fd00::1]:8787"},
+		{name: "magicdns name resolves via unauthenticated dns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
 		{name: "ts.net lookalike", hubURL: "http://myhub-ts.net:8787"},
 	}
 
@@ -97,14 +108,14 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 	}
 }
 
-func TestClientAllowsPlaintextTailnetHubURL(t *testing.T) {
+func TestClientAllowsPlaintextTailnetHubURLWhenOnTailnet(t *testing.T) {
+	stubTailnetInterface(t, true)
 	tests := []struct {
 		name   string
 		hubURL string
 	}{
 		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
 		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
-		{name: "magicdns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
 	}
 
 	for _, tt := range tests {
@@ -117,6 +128,19 @@ func TestClientAllowsPlaintextTailnetHubURL(t *testing.T) {
 			assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
 		})
 	}
+}
+
+func TestClientRejectsPlaintextTailnetHubURLWithoutTailnetInterface(t *testing.T) {
+	// With tailscaled down, packets to a tailnet-range address follow the
+	// default route in cleartext; the bearer token must not be sent.
+	stubTailnetInterface(t, false)
+	client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, req)
+	assert.Contains(t, err.Error(), "no active tailnet interface")
 }
 
 func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {
