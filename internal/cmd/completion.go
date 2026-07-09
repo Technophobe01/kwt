@@ -119,7 +119,7 @@ func getConfigKeyCompletions(_ *cobra.Command, args []string, toComplete string)
 		{"agents.codex", "Codex agent command used by layouts"},
 		{"agents.claude", "Claude agent command used by layouts"},
 		{"agents.roborev", "Roborev command used by layouts"},
-		{"layouts.default", "Default workspace layout preset"},
+		{"layouts.default", "Default workspace layout preset; unset or 'none' means a blank session"},
 		{"layouts.auto_launch_on_add", "Launch a tmux workspace on 'kwt add' (default: true)"},
 	}
 
