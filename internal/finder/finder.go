@@ -214,16 +214,23 @@ func (f *Finder) SelectLayout(layouts []models.Layout) (*models.Layout, error) {
 	}
 	idx, err := fuzzyfinder.Find(
 		layouts,
-		func(i int) string {
-			l := layouts[i]
-			return fmt.Sprintf("%s (%s, %d panes)", l.Name, l.Arrange, len(l.Panes))
-		},
+		func(i int) string { return layoutItemLabel(layouts[i]) },
 		fuzzyfinder.WithPromptString("Select layout> "),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &layouts[idx], nil
+}
+
+// layoutItemLabel formats one layout picker row. The reserved blank layout
+// has no arrange or meaningful pane count, so it gets a descriptive label
+// instead of "none (, 1 panes)".
+func layoutItemLabel(l models.Layout) string {
+	if l.Name == tmux.BlankLayoutName {
+		return l.Name + " (blank session)"
+	}
+	return fmt.Sprintf("%s (%s, %d panes)", l.Name, l.Arrange, len(l.Panes))
 }
 
 // generateSessionPreview generates preview content for a session.
