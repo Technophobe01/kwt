@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,6 +236,56 @@ func TestReadTUIFleetStateIgnoresPublishWarningWithoutPanicking(t *testing.T) {
 	_, err := readTUIFleetState(context.Background(), cfg)
 
 	require.NoError(t, err)
+}
+
+func TestTUIBackendListAndMergeFleetAreConcurrencySafe(t *testing.T) {
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
+	}
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{Host: "github.com", Owner: "example", Repository: "kwt"},
+		Branch:         "main",
+		Path:           "/repos/kwt",
+		IsMain:         true,
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "/repos/kwt")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{launchEntry}, nil
+	}
+	backend.collectStatuses = func(
+		ctx context.Context,
+		baseDir string,
+		entries []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	// Read cfg.Projects the way the manifest builder does during publish.
+	backend.readFleetState = func(ctx context.Context, cfg *models.Config) (fleet.FleetState, error) {
+		for _, project := range cfg.Projects {
+			_ = project.Repository
+		}
+		return fleet.FleetState{}, nil
+	}
+
+	// List mutates cfg.Projects (launch registration) while MergeFleet reads
+	// it; run them concurrently so the race detector can catch unsynchronized
+	// access.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rows, _, err := backend.List(context.Background())
+			require.NoError(t, err)
+			backend.MergeFleet(context.Background(), rows)
+		}()
+	}
+	wg.Wait()
 }
 
 func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {

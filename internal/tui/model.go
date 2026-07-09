@@ -80,6 +80,7 @@ type Model struct {
 	confirm             confirmState
 	fetching            bool
 	fleetPending        bool
+	fleetCancel         context.CancelFunc
 	loadSeq             int
 	pendingRefresh      bool
 	showHelp            bool
@@ -262,7 +263,9 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 		return m.startPendingRefresh()
 	}
 	m.fleetPending = true
-	return m, m.fleetRowsCmd(m.loadSeq, m.rows)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.fleetCancel = cancel
+	return m, m.fleetRowsCmd(ctx, m.loadSeq, m.rows)
 }
 
 func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
@@ -270,6 +273,7 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.fleetPending = false
+	m = m.cancelFleetMerge()
 	m.warnings = msg.warnings
 
 	oldRows := m.filteredRows()
@@ -311,12 +315,22 @@ func (m Model) startPendingRefresh() (Model, tea.Cmd) {
 }
 
 // startFetch begins a new load generation: any fleet overlay still in flight
-// for a previous generation is dropped when it arrives.
+// for a previous generation is cancelled, and its result dropped if it
+// arrives anyway.
 func (m Model) startFetch() (Model, tea.Cmd) {
 	m.loadSeq++
 	m.fetching = true
 	m.fleetPending = false
+	m = m.cancelFleetMerge()
 	return m, m.fetchRowsCmd()
+}
+
+func (m Model) cancelFleetMerge() Model {
+	if m.fleetCancel != nil {
+		m.fleetCancel()
+		m.fleetCancel = nil
+	}
+	return m
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -791,13 +805,13 @@ func (m Model) fetchRowsCmd() tea.Cmd {
 	}
 }
 
-func (m Model) fleetRowsCmd(seq int, rows []Row) tea.Cmd {
+func (m Model) fleetRowsCmd(ctx context.Context, seq int, rows []Row) tea.Cmd {
 	backend := m.backend
 	// Copy: the merge mutates row elements while the UI keeps rendering the
 	// current slice.
 	rows = append([]Row(nil), rows...)
 	return func() tea.Msg {
-		merged, warnings := backend.MergeFleet(context.Background(), rows)
+		merged, warnings := backend.MergeFleet(ctx, rows)
 		return fleetRowsMsg{seq: seq, rows: merged, warnings: warnings}
 	}
 }

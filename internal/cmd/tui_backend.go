@@ -27,6 +27,10 @@ import (
 )
 
 type tuiBackend struct {
+	// mu serializes List and MergeFleet: List mutates cfg (launch project and
+	// workspace registration) while MergeFleet's manifest publish reads it,
+	// and the TUI runs the two as concurrent commands.
+	mu                        sync.Mutex
 	cfg                       *models.Config
 	tmux                      *tmux.TmuxCommand
 	launchDir                 string
@@ -68,6 +72,9 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 }
 
 func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
@@ -111,8 +118,11 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error
 
 // MergeFleet overlays hub state onto locally discovered rows. It publishes
 // this host's manifest and reads the hub synchronously, so callers must keep
-// it off the first-paint path.
+// it off the first-paint path and cancel ctx when the result is no longer
+// wanted.
 func (b *tuiBackend) MergeFleet(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.mergeFleetRows(ctx, rows)
 }
 

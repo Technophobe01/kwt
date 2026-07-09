@@ -29,6 +29,7 @@ type fakeBackend struct {
 	openErr         error
 	listCalls       int
 	mergeFleetCalls int
+	mergeCtx        context.Context
 	createCalls     []string
 	materializeRows []string
 	removeCalls     []string
@@ -45,6 +46,7 @@ func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
 
 func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []string) {
 	b.mergeFleetCalls++
+	b.mergeCtx = ctx
 	return append(append([]Row(nil), rows...), b.fleetRows...), b.fleetWarnings
 }
 
@@ -1060,6 +1062,24 @@ func TestRowsLoadMergesFleetAsynchronously(t *testing.T) {
 	model, _ = updateModel(t, model, fleetMsg)
 	assert.Len(t, model.rows, 2, "fleet-only rows must appear after the merge")
 	assert.Equal(t, []string{"hub warning"}, model.warnings)
+}
+
+func TestRefreshCancelsInFlightFleetMerge(t *testing.T) {
+	local := testRow("kwt", "main", "/w/kwt/main")
+	backend := &fakeBackend{rows: []Row{local}}
+	model := NewModel(backend, "/worktrees")
+
+	model, fleetCmd := updateModel(t, model, rowsMsg{rows: []Row{local}})
+	require.NotNil(t, fleetCmd)
+
+	// Refresh before the merge runs: the merge's context must be cancelled so
+	// the backend can abandon hub work instead of blocking the new load.
+	model, _ = updateModel(t, model, press("r"))
+	fleetCmd()
+
+	require.NotNil(t, backend.mergeCtx)
+	assert.ErrorIs(t, backend.mergeCtx.Err(), context.Canceled)
+	_ = model
 }
 
 func TestStaleFleetMergeIsDropped(t *testing.T) {
