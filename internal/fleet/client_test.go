@@ -82,12 +82,19 @@ func stubTailnetStatus(t *testing.T, status tailnetStatus, err error) {
 func runningTailnetStatus(selfIPs []string, peerIPs ...[]string) tailnetStatus {
 	status := tailnetStatus{
 		BackendState: "Running",
+		TUN:          true,
 		Self:         &tailnetNode{TailscaleIPs: selfIPs},
 		Peer:         map[string]*tailnetNode{},
 	}
 	for i, ips := range peerIPs {
 		status.Peer[fmt.Sprintf("peer-%d", i)] = &tailnetNode{TailscaleIPs: ips}
 	}
+	return status
+}
+
+func userspaceTailnetStatus() tailnetStatus {
+	status := runningTailnetStatus([]string{"100.64.9.9"}, []string{"100.64.1.2"})
+	status.TUN = false
 	return status
 }
 
@@ -187,6 +194,33 @@ func TestClientRejectsPlaintextTailnetHubURLWhenNotVerifiable(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, req)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestClientRejectsPlaintextTailnetHubURLWithoutKernelTUN(t *testing.T) {
+	stubTailnetStatus(t, userspaceTailnetStatus(), nil)
+	client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, req)
+	assert.Contains(t, err.Error(), "userspace")
+}
+
+func TestClientDisablesProxiesForPlaintextPrivateHubURLs(t *testing.T) {
+	tests := []string{
+		"http://127.0.0.1:8787",
+		"http://100.64.1.2:8787",
+	}
+	for _, hubURL := range tests {
+		t.Run(hubURL, func(t *testing.T) {
+			client := NewClient(ClientOptions{HubURL: hubURL, Token: "secret"})
+
+			transport, ok := client.httpClient.Transport.(*http.Transport)
+			require.True(t, ok, "plaintext private hubs must use a dedicated transport")
+			assert.Nil(t, transport.Proxy)
 		})
 	}
 }

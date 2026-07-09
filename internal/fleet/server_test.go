@@ -272,6 +272,15 @@ func TestParseHubEndpoint(t *testing.T) {
 	}
 }
 
+func TestParseHubEndpointRejectsTailnetAddressWithoutKernelTUN(t *testing.T) {
+	stubTailnetStatus(t, userspaceTailnetStatus(), nil)
+
+	_, err := ParseHubEndpoint("100.64.9.9:8787")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "userspace")
+}
+
 func encodeJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	body, err := json.Marshal(v)

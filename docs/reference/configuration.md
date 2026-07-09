@@ -125,10 +125,11 @@ store_path = "~/.local/share/kwt/fleet/state.json"
 
 Plain `http://` hub URLs are accepted for loopback hosts, and for tailnet IP
 literals (Tailscale addresses) that the local Tailscale daemon confirms
-belong to the active tailnet; the Tailscale CLI must be available. MagicDNS
-(`*.ts.net`) names require HTTPS or the tailnet IP. Use HTTPS for any other
-multi-machine hub URL, commonly by serving a loopback hub through a private
-TLS endpoint.
+belong to the active tailnet while a kernel TUN interface is active; the
+Tailscale CLI must be available. These plaintext connections bypass
+environment HTTP proxies. MagicDNS (`*.ts.net`) names require HTTPS or the
+tailnet IP. Use HTTPS for userspace-mode Tailscale and any other multi-machine
+hub URL, commonly by serving a loopback hub through a private TLS endpoint.
 
 See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
 and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the

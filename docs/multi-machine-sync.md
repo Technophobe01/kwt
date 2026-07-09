@@ -82,14 +82,17 @@ Use `token_file` or `token_env`; do not put the token inline in `config.toml`.
 Plain `http://` hub URLs are allowed for loopback hosts, and for tailnet IP
 literals (Tailscale's `100.64.0.0/10` and `fd7a:115c:a1e0::/48` ranges) that
 the local Tailscale daemon confirms are a current member of the active
-tailnet — WireGuard already encrypts that traffic end-to-end. The check runs
+tailnet and reports a kernel TUN interface — WireGuard already encrypts that
+traffic end-to-end. Userspace networking mode is rejected because ordinary
+HTTP connections do not use its proxy automatically. The check runs
 `tailscale status`, so the Tailscale CLI must be available (the macOS app
-bundles it). MagicDNS (`*.ts.net`) names are not accepted for plaintext
-because DNS resolution is unauthenticated; use the tailnet IP or HTTPS. Any
-other multi-machine hub URL must use HTTPS, typically by putting a loopback
-hub behind Tailscale Serve, Caddy, or an equivalent private TLS endpoint. The
-hub accepts loopback listen addresses and this machine's own verified tailnet
-IPs.
+bundles it). Plaintext loopback and tailnet connections also bypass
+environment-configured HTTP proxies. MagicDNS (`*.ts.net`) names are not
+accepted for plaintext because DNS resolution is unauthenticated; use the
+tailnet IP or HTTPS. Any other multi-machine hub URL must use HTTPS, typically
+by putting a loopback hub behind Tailscale Serve, Caddy, or an equivalent
+private TLS endpoint. The hub accepts loopback listen addresses and this
+machine's own verified tailnet IPs when a kernel TUN interface is active.
 
 ## Freshness and differences
 

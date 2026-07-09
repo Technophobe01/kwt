@@ -79,13 +79,26 @@ func NewClient(opts ClientOptions) *Client {
 	if timeout == 0 {
 		timeout = defaultFleetClientTimeout
 	}
+	hubURL := strings.TrimRight(strings.TrimSpace(opts.HubURL), "/")
 	return &Client{
-		hubURL: strings.TrimRight(strings.TrimSpace(opts.HubURL), "/"),
+		hubURL: hubURL,
 		token:  strings.TrimSpace(opts.Token),
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: fleetTransport(hubURL),
 		},
 	}
+}
+
+func fleetTransport(hubURL string) http.RoundTripper {
+	parsed, err := url.Parse(hubURL)
+	if err != nil || parsed.Scheme != "http" ||
+		(!isLoopbackHost(parsed.Hostname()) && !isTailnetIP(parsed.Hostname())) {
+		return nil
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
 }
 
 // Publish sends one manifest to the fleet hub.

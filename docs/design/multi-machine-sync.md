@@ -47,11 +47,14 @@ Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
 deployment keeps the daemon listener on loopback or a tailnet IP. Plain HTTP
 bearer-token requests are valid for loopback hub URLs, and for tailnet-range
 IP literals the local Tailscale daemon confirms as a self or peer address of
-the active tailnet (tailnet traffic is WireGuard-encrypted; range checks
-alone are insufficient because 100.64.0.0/10 is generic CGNAT space).
-Hostnames never qualify for plaintext. Anything else needs an HTTPS endpoint,
-and the hub rejects listen addresses that are not loopback or a
-daemon-verified self address.
+the active tailnet while reporting a kernel TUN interface (tailnet traffic is
+WireGuard-encrypted; range checks alone are insufficient because
+100.64.0.0/10 is generic CGNAT space). The client bypasses environment proxies
+for plaintext loopback and tailnet requests so the verified route cannot be
+replaced by an HTTP proxy. Hostnames and userspace-mode Tailscale never qualify
+for plaintext. Anything else needs an HTTPS endpoint, and the hub rejects
+listen addresses that are not loopback or a daemon-verified self address on a
+kernel TUN interface.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail

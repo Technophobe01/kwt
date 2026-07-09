@@ -39,6 +39,7 @@ func isTailnetIP(host string) bool {
 // whether an address belongs to the active tailnet.
 type tailnetStatus struct {
 	BackendState string
+	TUN          bool
 	Self         *tailnetNode
 	Peer         map[string]*tailnetNode
 }
@@ -74,6 +75,9 @@ func verifyTailnetAddress(host string, includePeers bool) error {
 	}
 	if status.BackendState != "Running" {
 		return fmt.Errorf("tailscale backend state is %q, not Running", status.BackendState)
+	}
+	if !status.TUN {
+		return errors.New("tailscale is running in userspace mode without a kernel TUN interface")
 	}
 	if nodeHasIP(status.Self, ip) {
 		return nil
