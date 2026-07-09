@@ -201,6 +201,27 @@ func TestPublishBestEffortWarnsAndReturnsNilOnUnreachableHub(t *testing.T) {
 	assert.Less(t, len(warn.String()), 240)
 }
 
+func TestPublishBestEffortSkipsManifestBuildWhenHubURLInvalid(t *testing.T) {
+	t.Setenv("KWT_FLEET_TOKEN", "secret")
+	builder := &stubFleetManifestBuilder{
+		manifest: ptrManifest(testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")),
+	}
+	var warn bytes.Buffer
+
+	err := PublishBestEffort(context.Background(), &models.Config{
+		Fleet: models.FleetConfig{
+			Enabled:  true,
+			HubURL:   "http://100.64.1.2:8787",
+			TokenEnv: "KWT_FLEET_TOKEN",
+		},
+	}, builder, &warn)
+
+	require.NoError(t, err)
+	assert.Zero(t, builder.calls,
+		"an unusable hub URL must fail before the expensive manifest build")
+	assert.Contains(t, warn.String(), "plaintext sync hub URL")
+}
+
 func TestPublishBestEffortNoopWhenFleetDisabled(t *testing.T) {
 	builder := &stubFleetManifestBuilder{
 		manifest: ptrManifest(testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")),

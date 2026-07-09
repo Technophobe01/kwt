@@ -209,7 +209,8 @@ func TestReadTUIFleetStatePublishesBeforeReadingHub(t *testing.T) {
 	_, err := readTUIFleetState(context.Background(), cfg)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"builder", "publish", "client", "state"}, sequence)
+	assert.Equal(t, []string{"client", "builder", "publish", "state"}, sequence,
+		"the client must be validated before the expensive manifest build")
 }
 
 func TestReadTUIFleetStateIgnoresPublishWarningWithoutPanicking(t *testing.T) {
@@ -343,7 +344,7 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 	})
 }
 
-func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
+func TestTUIBackendMergeFleetIncludesRemoteOnlyFleetRows(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: "/global"},
@@ -420,8 +421,9 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 	}
 
 	rows, _, err := backend.List(context.Background())
-
 	require.NoError(t, err)
+	rows, _ = backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, rows, 2)
 	remote := rows[0]
 	if remote.Fleet == nil || remote.Fleet.Ref != "feature/studio-only" {
@@ -442,7 +444,7 @@ func TestTUIBackendListIncludesRemoteOnlyFleetRows(t *testing.T) {
 	assert.Equal(t, 2, remote.Fleet.RemoteAhead)
 }
 
-func TestTUIBackendListDoesNotOfferSyncWithoutRegisteredProject(t *testing.T) {
+func TestTUIBackendMergeFleetDoesNotOfferSyncWithoutRegisteredProject(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: "/global"},
@@ -478,15 +480,16 @@ func TestTUIBackendListDoesNotOfferSyncWithoutRegisteredProject(t *testing.T) {
 	}
 
 	rows, _, err := backend.List(context.Background())
-
 	require.NoError(t, err)
+	rows, _ = backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, rows, 1)
 	require.NotNil(t, rows[0].Fleet)
 	assert.False(t, rows[0].Fleet.CanMaterialize,
 		"sync must not be offered when no registered project can host the worktree")
 }
 
-func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
+func TestTUIBackendMergeFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: "/global"},
@@ -569,8 +572,9 @@ func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 	}
 
 	rows, _, err := backend.List(context.Background())
-
 	require.NoError(t, err)
+	rows, _ = backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, rows, 2)
 	var local, remote dashboard.Row
 	for _, row := range rows {
@@ -592,7 +596,7 @@ func TestTUIBackendListFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) {
 	assert.Equal(t, "ddd", remote.Fleet.RemoteHead)
 }
 
-func TestTUIBackendListRendersFleetStatusFromLocalObservations(t *testing.T) {
+func TestTUIBackendMergeFleetRendersFleetStatusFromLocalObservations(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	headSHA := strings.Repeat("a", 40)
 	staleSHA := strings.Repeat("e", 40)
@@ -670,8 +674,9 @@ func TestTUIBackendListRendersFleetStatusFromLocalObservations(t *testing.T) {
 	}
 
 	rows, _, err := backend.List(context.Background())
-
 	require.NoError(t, err)
+	rows, _ = backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, rows, 2)
 	var local, remote dashboard.Row
 	for _, row := range rows {
@@ -693,7 +698,7 @@ func TestTUIBackendListRendersFleetStatusFromLocalObservations(t *testing.T) {
 	assert.Equal(t, "same", remote.Fleet.Sync)
 }
 
-func TestTUIBackendListMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
+func TestTUIBackendMergeFleetMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
 	observedAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	headSHA := strings.Repeat("a", 40)
 	cfg := &models.Config{
@@ -741,8 +746,9 @@ func TestTUIBackendListMatchesLocalDetachedWorktreeToFleetRow(t *testing.T) {
 	}
 
 	rows, _, err := backend.List(context.Background())
-
 	require.NoError(t, err)
+	rows, _ = backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, rows, 1, "detached fleet row must merge with the local row, not duplicate it")
 	require.NotNil(t, rows[0].Entry)
 	require.NotNil(t, rows[0].Fleet)
@@ -1832,7 +1838,7 @@ func stubTUIProjectRegistration(backend *tuiBackend) {
 	}
 }
 
-func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
+func TestTUIBackendMergeFleetReturnsHubWarnings(t *testing.T) {
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: "/global"},
 		Fleet:    models.FleetConfig{Enabled: true, HostID: "host-a"},
@@ -1858,9 +1864,10 @@ func TestTUIBackendListReturnsHubWarnings(t *testing.T) {
 		}}}, nil
 	}
 
-	_, warnings, err := backend.List(context.Background())
-
+	rows, _, err := backend.List(context.Background())
 	require.NoError(t, err)
+	_, warnings := backend.MergeFleet(context.Background(), rows)
+
 	require.Len(t, warnings, 1)
 	assert.Equal(t, `multiple machines are publishing as host ID "same" (host same)`, warnings[0])
 }

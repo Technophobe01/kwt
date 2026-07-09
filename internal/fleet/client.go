@@ -200,6 +200,11 @@ func publishBestEffort(ctx context.Context, cfg *models.Config, builder Manifest
 	if hubURL == "" {
 		return errors.New("sync hub URL is not configured")
 	}
+	// Fail before the manifest build: it spawns git subprocesses across every
+	// project and worktree, which is wasted work when the hub is unusable.
+	if err := validateBearerHubURL(hubURL); err != nil {
+		return err
+	}
 	token, err := LoadToken(cfg.Fleet)
 	if err != nil {
 		return err
@@ -241,6 +246,12 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	return req, nil
+}
+
+// ValidateHubURL reports whether a hub URL is usable for bearer-token
+// requests, so callers can fail fast instead of at the first request.
+func ValidateHubURL(raw string) error {
+	return validateBearerHubURL(raw)
 }
 
 func validateBearerHubURL(raw string) error {

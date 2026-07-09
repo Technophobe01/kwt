@@ -155,7 +155,7 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 		loadFleetConfig = func() (*models.Config, error) {
 			return &models.Config{Fleet: models.FleetConfig{
 				Enabled: true,
-				HubURL:  "http://hub.example.test",
+				HubURL:  "https://hub.example.test",
 			}}, nil
 		}
 		newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
@@ -169,6 +169,19 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "sync token is not configured")
 	})
+}
+
+func TestDefaultNewFleetClientFromConfigRejectsPlaintextNonLoopbackHub(t *testing.T) {
+	t.Setenv("KWT_FLEET_TOKEN", "secret")
+
+	_, err := defaultNewFleetClientFromConfig(&models.Config{Fleet: models.FleetConfig{
+		Enabled:  true,
+		HubURL:   "http://100.64.1.2:8787",
+		TokenEnv: "KWT_FLEET_TOKEN",
+	}})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plaintext sync hub URL")
 }
 
 func TestFleetPublishBestEffortForCommandNoopsWhenFleetDisabled(t *testing.T) {
