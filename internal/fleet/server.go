@@ -3,7 +3,9 @@ package fleet
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -59,16 +61,34 @@ func NewServer(opts ServerOptions) http.Handler {
 }
 
 // ParseHubEndpoint parses and validates a fleet hub listen endpoint.
-// TCP listeners are restricted to loopback: the hub speaks plain HTTP with
-// bearer auth, and clients refuse plaintext to non-loopback hosts, so a wider
-// bind would only expose the token-authenticated API in cleartext.
-// Multi-machine hubs are reached through a TLS endpoint (reverse proxy,
-// tailscale serve) that forwards to the loopback listener.
+// TCP listeners are restricted to loopback and tailnet addresses: the hub
+// speaks plain HTTP with bearer auth, and clients apply the same rule, so a
+// wider bind would only expose the token-authenticated API in cleartext.
+// Tailnet binds are safe because Tailscale encrypts peer traffic with
+// WireGuard; other multi-machine hubs are reached through a TLS endpoint
+// (reverse proxy, tailscale serve) that forwards to the loopback listener.
 func ParseHubEndpoint(raw string) (daemon.Endpoint, error) {
 	return daemon.ParseEndpoint(raw, daemon.ParseEndpointOptions{
 		DefaultTCPAddress: "",
-		TCPPolicy:         daemon.RequireLoopback,
+		TCPPolicy:         requireLoopbackOrTailnet,
 	})
+}
+
+func requireLoopbackOrTailnet(addr string) error {
+	if daemon.RequireLoopback(addr) == nil {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("parse host:port: %w", err)
+	}
+	if isTailnetHost(host) {
+		return nil
+	}
+	return fmt.Errorf(
+		"address %q must be loopback or a tailnet address; put other multi-machine hubs behind a TLS proxy on a loopback listener",
+		addr,
+	)
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

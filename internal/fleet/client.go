@@ -262,10 +262,11 @@ func validateBearerHubURL(raw string) error {
 	if parsed.Scheme != "http" {
 		return nil
 	}
-	if isLoopbackHost(parsed.Hostname()) {
+	host := parsed.Hostname()
+	if isLoopbackHost(host) || isTailnetHost(host) {
 		return nil
 	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback hosts; use https for multi-machine hubs", raw)
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or tailnet hosts; use https for other multi-machine hubs", raw)
 }
 
 func isLoopbackHost(host string) bool {

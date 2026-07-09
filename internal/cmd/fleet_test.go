@@ -176,7 +176,7 @@ func TestDefaultNewFleetClientFromConfigRejectsPlaintextNonLoopbackHub(t *testin
 
 	_, err := defaultNewFleetClientFromConfig(&models.Config{Fleet: models.FleetConfig{
 		Enabled:  true,
-		HubURL:   "http://100.64.1.2:8787",
+		HubURL:   "http://192.0.2.10:8787",
 		TokenEnv: "KWT_FLEET_TOKEN",
 	}})
 

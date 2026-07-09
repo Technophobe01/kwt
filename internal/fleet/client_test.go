@@ -72,13 +72,51 @@ func TestClientUsesBearerTokenAndTimeout(t *testing.T) {
 }
 
 func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
-	client := NewClient(ClientOptions{HubURL: "http://192.0.2.10:8787", Token: "secret"})
+	tests := []struct {
+		name   string
+		hubURL string
+	}{
+		{name: "public", hubURL: "http://192.0.2.10:8787"},
+		{name: "private lan", hubURL: "http://192.168.1.10:8787"},
+		{name: "below tailnet cgnat block", hubURL: "http://100.63.255.255:8787"},
+		{name: "above tailnet cgnat block", hubURL: "http://100.128.0.1:8787"},
+		{name: "non-tailnet ula", hubURL: "http://[fd00::1]:8787"},
+		{name: "ts.net lookalike", hubURL: "http://myhub-ts.net:8787"},
+	}
 
-	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(ClientOptions{HubURL: tt.hubURL, Token: "secret"})
 
-	require.Error(t, err)
-	assert.Nil(t, req)
-	assert.Contains(t, err.Error(), "plaintext sync hub URL")
+			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+			require.Error(t, err)
+			assert.Nil(t, req)
+			assert.Contains(t, err.Error(), "plaintext sync hub URL")
+		})
+	}
+}
+
+func TestClientAllowsPlaintextTailnetHubURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		hubURL string
+	}{
+		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
+		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "magicdns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(ClientOptions{HubURL: tt.hubURL, Token: "secret"})
+
+			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+			require.NoError(t, err)
+			assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
+		})
+	}
 }
 
 func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {
@@ -211,7 +249,7 @@ func TestPublishBestEffortSkipsManifestBuildWhenHubURLInvalid(t *testing.T) {
 	err := PublishBestEffort(context.Background(), &models.Config{
 		Fleet: models.FleetConfig{
 			Enabled:  true,
-			HubURL:   "http://100.64.1.2:8787",
+			HubURL:   "http://192.0.2.10:8787",
 			TokenEnv: "KWT_FLEET_TOKEN",
 		},
 	}, builder, &warn)
