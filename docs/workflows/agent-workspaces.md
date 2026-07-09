@@ -22,6 +22,10 @@ panes = ["agent:codex", "agent:roborev", ""]
 The empty string creates a plain shell. Agent commands can include flags, but
 approval and sandbox bypass flags should be deliberate local choices.
 
+Layouts are opt-in: without `--layout`, `--select-layout`, or a
+`layouts.default`, a workspace is a blank single-pane session. The reserved
+name `none` selects the blank session explicitly.
+
 ## Working loop
 
 ```sh

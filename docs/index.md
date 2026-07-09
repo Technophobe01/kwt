@@ -30,7 +30,8 @@ directory registers it as a directory workspace with its own tmux session.
 - Fast terminal workflows over browser dashboards.
 - Multiple active repositories without changing directories first.
 - Worktrees that are easy for humans and agents to locate.
-- Explicit tmux layouts for coding agents, shells, and review tools.
+- Blank tmux sessions by default, with opt-in layouts for coding agents,
+  shells, and review tools.
 - Local-first behavior by default. Optional multi-machine sync is advisory, not
   a hidden file synchronizer.
 
