@@ -109,9 +109,9 @@ project bootstrap command manually after syncing if that branch needs it.
 ## Multi-machine sync config
 
 Multi-machine sync is an opt-in subsystem. The public command namespace is
-`kwt sync`, and the config section is `[fleet]`. All `[fleet]` settings,
-including `allow_insecure`, must be set in the global `config.toml`; values in
-repository-local `.kwt.toml` files are ignored.
+`kwt sync`, and the config section is `[fleet]`. All `[fleet]` settings must be
+set in the global `config.toml`; values in repository-local `.kwt.toml` files
+are ignored.
 
 ```toml
 [fleet]
@@ -125,18 +125,13 @@ listen_addr = "127.0.0.1:8787"
 store_path = "~/.local/share/kwt/fleet/state.json"
 ```
 
-Plain `http://` hub URLs are accepted for loopback hosts without an additional
-opt-in. Every non-loopback `http://` hub URL requires
-`allow_insecure = true` under `[fleet]`; HTTPS remains the recommended default.
-The option permits plaintext bearer-token transport without proving Tailscale
-membership, daemon state, or actual routing. Go's environment proxy behavior is
-still honored, so the plaintext token may traverse an environment-configured
-proxy. Enable it only when the entire transport is trusted, such as a controlled
-tailnet.
-
-This client option does not relax the hub listener policy. `listen_addr` must be
-loopback or this machine's verified local tailnet IP. The Tailscale CLI and
-daemon are required only to verify a tailnet listener address.
+Plain `http://` hub URLs are accepted for loopback hosts, and for tailnet IP
+literals (Tailscale addresses) that the local Tailscale daemon confirms
+belong to the active tailnet while a kernel TUN interface is active; the
+Tailscale CLI must be available. These plaintext connections bypass
+environment HTTP proxies. MagicDNS (`*.ts.net`) names require HTTPS or the
+tailnet IP. Use HTTPS for userspace-mode Tailscale and any other multi-machine
+hub URL, commonly by serving a loopback hub through a private TLS endpoint.
 
 See [Multi-machine sync](../multi-machine-sync.md) for the user-facing workflow
 and [Multi-machine sync architecture](../design/multi-machine-sync.md) for the

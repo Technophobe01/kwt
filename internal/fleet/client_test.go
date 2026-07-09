@@ -86,7 +86,19 @@ func stubTailnetStatus(t *testing.T, status tailnetStatus, err error) {
 func runningTailnetStatus(selfIPs []string) tailnetStatus {
 	return tailnetStatus{
 		BackendState: "Running",
+		TUN:          true,
 		Self:         &tailnetNode{TailscaleIPs: selfIPs},
+	}
+}
+
+func verifiedTailnetPeerStatus(tun bool) tailnetStatus {
+	return tailnetStatus{
+		BackendState: "Running",
+		TUN:          tun,
+		Self:         &tailnetNode{TailscaleIPs: []string{"100.64.9.9"}},
+		Peer: map[string]*tailnetNode{
+			"peer": {TailscaleIPs: []string{"100.64.1.2", "fd7a:115c:a1e0::ab12"}},
+		},
 	}
 }
 
@@ -98,8 +110,6 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 		{name: "public", hubURL: "http://192.0.2.10:8787"},
 		{name: "private lan", hubURL: "http://192.168.1.10:8787"},
 		{name: "magicdns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
-		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
-		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
 	}
 
 	for _, tt := range tests {
@@ -110,25 +120,24 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 
 			require.Error(t, err)
 			assert.Nil(t, req)
-			assert.Contains(t, err.Error(), "fleet.allow_insecure")
+			assert.Contains(t, err.Error(), "plaintext sync hub URL")
 		})
 	}
 }
 
-func TestClientAllowsPlaintextNonLoopbackHubURLWithExplicitConsent(t *testing.T) {
+func TestClientAllowsPlaintextHubURLForVerifiedKernelTailnetPeer(t *testing.T) {
+	stubTailnetStatus(t, verifiedTailnetPeerStatus(true), nil)
 	tests := []struct {
 		name   string
 		hubURL string
 	}{
 		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
 		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
-		{name: "magicdns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
-		{name: "private lan", hubURL: "http://192.168.1.10:8787"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(ClientOptions{HubURL: tt.hubURL, Token: "secret", AllowInsecure: true})
+			client := NewClient(ClientOptions{HubURL: tt.hubURL, Token: "secret"})
 
 			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
 
@@ -136,6 +145,17 @@ func TestClientAllowsPlaintextNonLoopbackHubURLWithExplicitConsent(t *testing.T)
 			assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
 		})
 	}
+}
+
+func TestClientRejectsPlaintextTailnetHubURLWithoutKernelTUN(t *testing.T) {
+	stubTailnetStatus(t, verifiedTailnetPeerStatus(false), nil)
+	client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
+
+	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, req)
+	assert.Contains(t, err.Error(), "userspace")
 }
 
 func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {
@@ -156,7 +176,7 @@ func TestClientAllowsHTTPSHubURL(t *testing.T) {
 	assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
 }
 
-func TestClientRejectsPlaintextRedirectWithoutExplicitConsent(t *testing.T) {
+func TestClientRejectsPlaintextRedirectToUnverifiedHost(t *testing.T) {
 	var mu sync.Mutex
 	destinationRequests := 0
 	destinationAuth := ""
@@ -204,7 +224,7 @@ func TestClientRejectsPlaintextRedirectWithoutExplicitConsent(t *testing.T) {
 
 	assert.Error(t, err)
 	if err != nil {
-		assert.Contains(t, err.Error(), "fleet.allow_insecure")
+		assert.Contains(t, err.Error(), "plaintext sync hub URL")
 	}
 	mu.Lock()
 	assert.Zero(t, destinationRequests)
@@ -212,33 +232,25 @@ func TestClientRejectsPlaintextRedirectWithoutExplicitConsent(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestClientPlaintextProxyRequiresExplicitConsent(t *testing.T) {
+func TestClientBypassesEnvironmentProxyForPlaintextTailnetHub(t *testing.T) {
 	if os.Getenv("KWT_TEST_PROXY_HELPER") == "1" {
-		client := NewClient(ClientOptions{
-			HubURL:        "http://100.64.1.2:8787",
-			Token:         "secret",
-			AllowInsecure: os.Getenv("KWT_TEST_ALLOW_INSECURE") == "1",
-		})
-		_, _, _, err := client.State(context.Background(), "")
-		if os.Getenv("KWT_TEST_ALLOW_INSECURE") == "1" {
+		stubTailnetStatus(t, verifiedTailnetPeerStatus(true), nil)
+		for _, hubURL := range []string{"http://100.64.1.2:8787", "https://hub.example.test"} {
+			client := NewClient(ClientOptions{HubURL: hubURL, Token: "secret"})
+			transport, ok := client.httpClient.Transport.(*http.Transport)
+			require.True(t, ok, "all fleet clients must enforce the tailnet proxy policy across redirects")
+			require.NotNil(t, transport.Proxy)
+			req, err := http.NewRequest(http.MethodGet, "http://100.64.1.2:8787/api/v1/fleet/state", nil)
 			require.NoError(t, err)
-			return
+			proxyURL, err := transport.Proxy(req)
+			require.NoError(t, err)
+			assert.Nil(t, proxyURL)
 		}
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "fleet.allow_insecure")
 		return
 	}
 
-	var mu sync.Mutex
-	requestCount := 0
-	gotAuth := ""
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requestCount++
-		gotAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{}"))
+		t.Fatal("plaintext tailnet validation must not contact the environment proxy")
 	}))
 	defer proxy.Close()
 
@@ -246,38 +258,21 @@ func TestClientPlaintextProxyRequiresExplicitConsent(t *testing.T) {
 	for _, env := range os.Environ() {
 		key, _, _ := strings.Cut(env, "=")
 		if strings.EqualFold(key, "HTTP_PROXY") || strings.EqualFold(key, "NO_PROXY") || key == "REQUEST_METHOD" ||
-			key == "KWT_TEST_PROXY_HELPER" || key == "KWT_TEST_ALLOW_INSECURE" {
+			key == "KWT_TEST_PROXY_HELPER" {
 			continue
 		}
 		baseEnv = append(baseEnv, env)
 	}
-	runChild := func(t *testing.T, allowInsecure bool) {
-		t.Helper()
-		cmd := exec.Command(os.Args[0], "-test.run=^TestClientPlaintextProxyRequiresExplicitConsent$")
-		cmd.Env = append(baseEnv,
-			"HTTP_PROXY="+proxy.URL,
-			"http_proxy="+proxy.URL,
-			"NO_PROXY=",
-			"no_proxy=",
-			"KWT_TEST_PROXY_HELPER=1",
-		)
-		if allowInsecure {
-			cmd.Env = append(cmd.Env, "KWT_TEST_ALLOW_INSECURE=1")
-		}
-		output, err := cmd.CombinedOutput()
-		require.NoError(t, err, "%s", output)
-	}
-
-	runChild(t, false)
-	mu.Lock()
-	assert.Zero(t, requestCount)
-	mu.Unlock()
-
-	runChild(t, true)
-	mu.Lock()
-	assert.Equal(t, 1, requestCount)
-	assert.Equal(t, "Bearer secret", gotAuth)
-	mu.Unlock()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestClientBypassesEnvironmentProxyForPlaintextTailnetHub$")
+	cmd.Env = append(baseEnv,
+		"HTTP_PROXY="+proxy.URL,
+		"http_proxy="+proxy.URL,
+		"NO_PROXY=",
+		"no_proxy=",
+		"KWT_TEST_PROXY_HELPER=1",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
 }
 
 func TestClientHonorsTimeout(t *testing.T) {
@@ -410,28 +405,6 @@ func TestPublishBestEffortSkipsManifestBuildWhenHubURLInvalid(t *testing.T) {
 	assert.Zero(t, builder.calls,
 		"an unusable hub URL must fail before the expensive manifest build")
 	assert.Contains(t, warn.String(), "plaintext sync hub URL")
-}
-
-func TestPublishBestEffortPropagatesAllowInsecure(t *testing.T) {
-	t.Setenv("KWT_FLEET_TOKEN", "secret")
-	builder := &stubFleetManifestBuilder{
-		manifest: ptrManifest(testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := publishBestEffort(ctx, &models.Config{
-		Fleet: models.FleetConfig{
-			Enabled:       true,
-			HubURL:        "http://192.0.2.10:8787",
-			TokenEnv:      "KWT_FLEET_TOKEN",
-			AllowInsecure: true,
-		},
-	}, builder)
-
-	assert.Equal(t, 1, builder.calls)
-	require.ErrorIs(t, err, context.Canceled)
-	assert.NotContains(t, err.Error(), "fleet.allow_insecure")
 }
 
 func TestPublishBestEffortNoopWhenFleetDisabled(t *testing.T) {

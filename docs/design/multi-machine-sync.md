@@ -40,24 +40,21 @@ node without it is a publisher/client.
 
 The hub machine's CLI still publishes through the same HTTP API as any other
 node. For a loopback-only hub it may default an empty `hub_url` from
-`[fleet.hub].listen_addr`. HTTPS is the recommended default for multi-machine
-clients.
+`[fleet.hub].listen_addr`; multi-machine clients should use an HTTPS `hub_url`
+that reaches the hub through a private TLS endpoint.
 
 Tokens must come from `token_file` or `token_env`, not inline TOML. The expected
-deployment keeps the daemon listener on loopback or a tailnet IP. Clients allow
-plain HTTP bearer-token requests to loopback hub URLs without an opt-in. Every
-non-loopback HTTP hub URL requires `[fleet].allow_insecure = true`, regardless
-of whether it is an IP literal or hostname. This opt-in permits plaintext bearer
-transport; it does not verify Tailscale membership, daemon state, or actual
-routing. Go's environment proxy behavior remains in effect, so an
-environment-configured proxy may receive the plaintext bearer token. Operators
-should enable the option only when they trust the entire transport, such as a
-controlled tailnet.
-
-Client transport consent does not change hub listener validation. The hub
-rejects listener addresses that are not loopback or this machine's own verified
-local tailnet IP. Verifying the latter requires the Tailscale CLI and daemon;
-that requirement applies only to listener verification.
+deployment keeps the daemon listener on loopback or a tailnet IP. Plain HTTP
+bearer-token requests are valid for loopback hub URLs, and for tailnet-range
+IP literals the local Tailscale daemon confirms as a self or peer address of
+the active tailnet while reporting a kernel TUN interface (tailnet traffic is
+WireGuard-encrypted; range checks alone are insufficient because
+100.64.0.0/10 is generic CGNAT space). The client bypasses environment proxies
+for plaintext loopback and tailnet requests so the verified route cannot be
+replaced by an HTTP proxy. Hostnames and userspace-mode Tailscale never qualify
+for plaintext. Anything else needs an HTTPS endpoint, and the hub rejects
+listen addresses that are not loopback or a daemon-verified self address on a
+kernel TUN interface.
 
 If `host_id` is omitted, default from `os.Hostname()` after trimming whitespace
 and normalizing to lowercase `[a-z0-9._-]`. An empty or invalid host ID must fail

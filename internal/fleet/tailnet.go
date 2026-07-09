@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// Tailscale assigns IPv4 addresses from the CGNAT block 100.64.0.0/10 and
-// IPv6 addresses from fd7a:115c:a1e0::/48.
+// Tailscale encrypts tailnet traffic end-to-end, but the address ranges alone
+// do not prove that a process's connection uses the Tailscale tunnel. Client
+// plaintext therefore also requires daemon membership and a kernel TUN path.
 var (
 	tailnetIPv4Block = &net.IPNet{IP: net.IPv4(100, 64, 0, 0).To4(), Mask: net.CIDRMask(10, 32)}
 	tailnetIPv6Block = &net.IPNet{IP: net.ParseIP("fd7a:115c:a1e0::"), Mask: net.CIDRMask(48, 128)}
@@ -31,10 +32,12 @@ func isTailnetIP(host string) bool {
 }
 
 // tailnetStatus is the subset of `tailscale status --json` needed to validate
-// a hub listener address.
+// client and listener addresses.
 type tailnetStatus struct {
 	BackendState string
+	TUN          bool
 	Self         *tailnetNode
+	Peer         map[string]*tailnetNode
 }
 
 type tailnetNode struct {
@@ -45,9 +48,19 @@ type tailnetNode struct {
 // tests.
 var readTailnetStatus = defaultReadTailnetStatus
 
+// verifyTailnetPeerAddress confirms host is a current address of this machine
+// or one of its peers and that ordinary process traffic uses a kernel tunnel.
+func verifyTailnetPeerAddress(host string) error {
+	return verifyTailnetAddress(host, true)
+}
+
 // verifyTailnetSelfAddress confirms host is one of this machine's own
 // tailnet addresses, for validating listen addresses.
 func verifyTailnetSelfAddress(host string) error {
+	return verifyTailnetAddress(host, false)
+}
+
+func verifyTailnetAddress(host string, includePeers bool) error {
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return fmt.Errorf("%q is not an IP literal", host)
@@ -59,8 +72,18 @@ func verifyTailnetSelfAddress(host string) error {
 	if status.BackendState != "Running" {
 		return fmt.Errorf("tailscale backend state is %q, not Running", status.BackendState)
 	}
+	if !status.TUN {
+		return errors.New("tailscale is running in userspace mode without a kernel TUN interface")
+	}
 	if nodeHasIP(status.Self, ip) {
 		return nil
+	}
+	if includePeers {
+		for _, peer := range status.Peer {
+			if nodeHasIP(peer, ip) {
+				return nil
+			}
+		}
 	}
 	return fmt.Errorf("%s is not an address of the active tailnet", host)
 }

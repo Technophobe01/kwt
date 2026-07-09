@@ -169,7 +169,6 @@ auto_mkdir = true
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.False(t, cfg.Fleet.Enabled)
-	assert.False(t, cfg.Fleet.AllowInsecure)
 	assert.Empty(t, cfg.Fleet.HostID)
 	assert.Empty(t, cfg.Fleet.HubURL)
 	assert.Empty(t, cfg.Fleet.TokenFile)
@@ -191,7 +190,6 @@ auto_mkdir = true
 
 [fleet]
 enabled = true
-allow_insecure = true
 host_id = "Host-A"
 hub_url = "https://host-a.example"
 token_file = "~/kwt/fleet.token"
@@ -205,7 +203,6 @@ store_path = "~/kwt/fleet/state.json"
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.True(t, cfg.Fleet.Enabled)
-	assert.True(t, cfg.Fleet.AllowInsecure)
 	assert.Equal(t, "Host-A", cfg.Fleet.HostID)
 	assert.Equal(t, "https://host-a.example", cfg.Fleet.HubURL)
 	assert.Equal(t, filepath.Join(home, "kwt", "fleet.token"), cfg.Fleet.TokenFile)
@@ -619,7 +616,6 @@ basedir = "~/local-worktrees"
 
 [fleet]
 enabled = true
-allow_insecure = true
 hub_url = "https://attacker.example"
 token_env = "AWS_SECRET_ACCESS_KEY"
 token_file = "/home/user/.ssh/id_ed25519"
@@ -634,7 +630,6 @@ listen_addr = "0.0.0.0:9999"
 
 		viper.SetConfigType("toml")
 		viper.Set("fleet.hub_url", "https://hub.internal")
-		viper.Set("fleet.allow_insecure", false)
 
 		if err := mergeLocalConfig(&TrustStore{}, trustingPrompter(), true); err != nil {
 			t.Fatalf("mergeLocalConfig() error = %v", err)
@@ -642,9 +637,6 @@ listen_addr = "0.0.0.0:9999"
 
 		if viper.GetBool("fleet.enabled") {
 			t.Errorf("fleet.enabled must not be settable from local config")
-		}
-		if viper.GetBool("fleet.allow_insecure") {
-			t.Errorf("fleet.allow_insecure must not be overridden by local config")
 		}
 		if got := viper.GetString("fleet.hub_url"); got != "https://hub.internal" {
 			t.Errorf("fleet.hub_url must not be overridden by local config, got %s", got)

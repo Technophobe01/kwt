@@ -50,13 +50,12 @@ type Config struct {
 
 // FleetConfig contains optional multi-machine sync configuration.
 type FleetConfig struct {
-	Enabled       bool           `mapstructure:"enabled" toml:"enabled"`               // Enable multi-machine sync behavior
-	AllowInsecure bool           `mapstructure:"allow_insecure" toml:"allow_insecure"` // Consent to bearer-authenticated non-loopback HTTP
-	HostID        string         `mapstructure:"host_id" toml:"host_id"`               // Stable identity for this host
-	HubURL        string         `mapstructure:"hub_url" toml:"hub_url"`               // Hub API base URL
-	TokenFile     string         `mapstructure:"token_file" toml:"token_file"`         // Path to bearer token file
-	TokenEnv      string         `mapstructure:"token_env" toml:"token_env"`           // Environment variable containing bearer token
-	Hub           FleetHubConfig `mapstructure:"hub" toml:"hub"`                       // Hub listener/store configuration
+	Enabled   bool           `mapstructure:"enabled" toml:"enabled"`       // Enable multi-machine sync behavior
+	HostID    string         `mapstructure:"host_id" toml:"host_id"`       // Stable identity for this host
+	HubURL    string         `mapstructure:"hub_url" toml:"hub_url"`       // Hub API base URL
+	TokenFile string         `mapstructure:"token_file" toml:"token_file"` // Path to bearer token file
+	TokenEnv  string         `mapstructure:"token_env" toml:"token_env"`   // Environment variable containing bearer token
+	Hub       FleetHubConfig `mapstructure:"hub" toml:"hub"`               // Hub listener/store configuration
 }
 
 // FleetHubConfig contains configuration for running the fleet hub.

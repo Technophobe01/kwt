@@ -63,8 +63,7 @@ func NewServer(opts ServerOptions) http.Handler {
 // ParseHubEndpoint parses and validates a fleet hub listen endpoint.
 // TCP listeners are restricted to loopback and tailnet addresses: the hub
 // speaks plain HTTP with bearer auth, so a wider bind would expose the
-// token-authenticated API in cleartext. Outbound clients instead require
-// explicit allow_insecure consent for non-loopback HTTP URLs.
+// token-authenticated API in cleartext. Clients apply the same address rule.
 // Tailnet binds are safe because Tailscale encrypts peer traffic with
 // WireGuard; other multi-machine hubs are reached through a TLS endpoint
 // (reverse proxy, tailscale serve) that forwards to the loopback listener.

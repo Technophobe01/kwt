@@ -171,37 +171,17 @@ func TestFleetPublishErrorsWhenFleetDisabledOrTokenMissing(t *testing.T) {
 	})
 }
 
-func TestDefaultNewFleetClientFromConfigPlaintextNonLoopbackHub(t *testing.T) {
+func TestDefaultNewFleetClientFromConfigRejectsPlaintextNonLoopbackHub(t *testing.T) {
 	t.Setenv("KWT_FLEET_TOKEN", "secret")
 
-	t.Run("rejects plaintext by default", func(t *testing.T) {
-		_, err := defaultNewFleetClientFromConfig(&models.Config{Fleet: models.FleetConfig{
-			Enabled:  true,
-			HubURL:   "http://192.0.2.10:8787",
-			TokenEnv: "KWT_FLEET_TOKEN",
-		}})
+	_, err := defaultNewFleetClientFromConfig(&models.Config{Fleet: models.FleetConfig{
+		Enabled:  true,
+		HubURL:   "http://192.0.2.10:8787",
+		TokenEnv: "KWT_FLEET_TOKEN",
+	}})
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "plaintext sync hub URL")
-		assert.Contains(t, err.Error(), "fleet.allow_insecure")
-	})
-
-	t.Run("allows plaintext with explicit consent", func(t *testing.T) {
-		client, err := defaultNewFleetClientFromConfig(&models.Config{Fleet: models.FleetConfig{
-			Enabled:       true,
-			HubURL:        "http://192.0.2.10:8787",
-			TokenEnv:      "KWT_FLEET_TOKEN",
-			AllowInsecure: true,
-		}})
-		require.NoError(t, err)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		_, _, _, err = client.State(ctx, "")
-		require.Error(t, err)
-		assert.ErrorIs(t, err, context.Canceled)
-		assert.NotContains(t, err.Error(), "fleet.allow_insecure")
-	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plaintext sync hub URL")
 }
 
 func TestFleetPublishBestEffortForCommandNoopsWhenFleetDisabled(t *testing.T) {
