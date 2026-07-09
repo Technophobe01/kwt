@@ -51,7 +51,11 @@ single-pane layout, not just blank).
   arrange names, non-empty panes, and agent references for presets that exist.
   New error: a preset named `none` (reserved). Unchanged error: a non-empty
   `layouts.default` naming a nonexistent preset — except `"none"`, now valid.
-- The `--select-layout` picker list gets a `none` entry prepended.
+- The `--select-layout` picker list gets a `none` entry prepended. The
+  finder's item label (`internal/finder/finder.go` `SelectLayout`) formats
+  presets as `name (arrange, N panes)`, which would render the blank entry as
+  `none (, 1 panes)`; it special-cases the blank layout to display
+  `none (blank session)`.
 
 ### TUI (`internal/cmd/tui_backend.go`, `internal/tui/model.go`)
 
@@ -103,6 +107,7 @@ up the behavior with no per-command launch changes.
 - Migration: existing config with `default = "quad"` and presets is left
   untouched; config missing `layouts.default` is not backfilled.
 - TUI: `LayoutNames()` starts with `none`; cycling reaches `none` and wraps.
+- Picker label: blank entry displays as `none (blank session)`.
 - Update existing layout/config/add/open/tui tests that assume a mandatory
   default or preset library.
 
