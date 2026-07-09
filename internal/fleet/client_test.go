@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -71,17 +72,32 @@ func TestClientUsesBearerTokenAndTimeout(t *testing.T) {
 	assert.Equal(t, "Bearer secret", gotAuth)
 }
 
-func stubTailnetInterface(t *testing.T, present bool) {
+func stubTailnetStatus(t *testing.T, status tailnetStatus, err error) {
 	t.Helper()
-	old := hasTailnetInterface
-	hasTailnetInterface = func() bool { return present }
-	t.Cleanup(func() { hasTailnetInterface = old })
+	old := readTailnetStatus
+	readTailnetStatus = func() (tailnetStatus, error) { return status, err }
+	t.Cleanup(func() { readTailnetStatus = old })
+}
+
+func runningTailnetStatus(selfIPs []string, peerIPs ...[]string) tailnetStatus {
+	status := tailnetStatus{
+		BackendState: "Running",
+		Self:         &tailnetNode{TailscaleIPs: selfIPs},
+		Peer:         map[string]*tailnetNode{},
+	}
+	for i, ips := range peerIPs {
+		status.Peer[fmt.Sprintf("peer-%d", i)] = &tailnetNode{TailscaleIPs: ips}
+	}
+	return status
 }
 
 func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
-	// Even with an active tailnet interface, only tailnet-range IP literals
+	// Even with a running tailnet, only verified tailnet-range IP literals
 	// qualify for plaintext.
-	stubTailnetInterface(t, true)
+	stubTailnetStatus(t, runningTailnetStatus(
+		[]string{"100.64.9.9"},
+		[]string{"100.64.1.2", "fd7a:115c:a1e0::ab12"},
+	), nil)
 	tests := []struct {
 		name   string
 		hubURL string
@@ -108,14 +124,18 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 	}
 }
 
-func TestClientAllowsPlaintextTailnetHubURLWhenOnTailnet(t *testing.T) {
-	stubTailnetInterface(t, true)
+func TestClientAllowsPlaintextHubURLForVerifiedTailnetPeers(t *testing.T) {
+	stubTailnetStatus(t, runningTailnetStatus(
+		[]string{"100.64.9.9", "fd7a:115c:a1e0::self"},
+		[]string{"100.64.1.2", "fd7a:115c:a1e0::ab12"},
+	), nil)
 	tests := []struct {
 		name   string
 		hubURL string
 	}{
-		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
-		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "peer ipv4", hubURL: "http://100.64.1.2:8787"},
+		{name: "peer ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "self ipv4", hubURL: "http://100.64.9.9:8787"},
 	}
 
 	for _, tt := range tests {
@@ -130,17 +150,45 @@ func TestClientAllowsPlaintextTailnetHubURLWhenOnTailnet(t *testing.T) {
 	}
 }
 
-func TestClientRejectsPlaintextTailnetHubURLWithoutTailnetInterface(t *testing.T) {
-	// With tailscaled down, packets to a tailnet-range address follow the
-	// default route in cleartext; the bearer token must not be sent.
-	stubTailnetInterface(t, false)
-	client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
+func TestClientRejectsPlaintextTailnetHubURLWhenNotVerifiable(t *testing.T) {
+	// A tailnet-range address is generic CGNAT space; without confirmation
+	// from the local Tailscale daemon that the destination is a current
+	// tailnet member, the bearer token must not be sent over plain http.
+	tests := []struct {
+		name    string
+		status  tailnetStatus
+		readErr error
+		wantErr string
+	}{
+		{
+			name:    "tailscale cli unavailable",
+			readErr: errors.New("tailscale CLI not found"),
+			wantErr: "tailscale CLI not found",
+		},
+		{
+			name:    "tailscale not running",
+			status:  tailnetStatus{BackendState: "NeedsLogin"},
+			wantErr: "NeedsLogin",
+		},
+		{
+			name:    "address is not a tailnet member",
+			status:  runningTailnetStatus([]string{"100.64.9.9"}, []string{"100.64.5.5"}),
+			wantErr: "not an address of the active tailnet",
+		},
+	}
 
-	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubTailnetStatus(t, tt.status, tt.readErr)
+			client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
 
-	require.Error(t, err)
-	assert.Nil(t, req)
-	assert.Contains(t, err.Error(), "no active tailnet interface")
+			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
+
+			require.Error(t, err)
+			assert.Nil(t, req)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {

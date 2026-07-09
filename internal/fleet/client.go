@@ -267,15 +267,15 @@ func validateBearerHubURL(raw string) error {
 		return nil
 	}
 	if isTailnetIP(host) {
-		if hasTailnetInterface() {
-			return nil
+		if err := verifyTailnetPeerAddress(host); err != nil {
+			return fmt.Errorf(
+				"plaintext sync hub URL %q requires a verified tailnet destination: %v; start Tailscale or use https",
+				raw, err,
+			)
 		}
-		return fmt.Errorf(
-			"plaintext sync hub URL %q targets a tailnet address but this machine has no active tailnet interface; start Tailscale or use https",
-			raw,
-		)
+		return nil
 	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or tailnet IPs; use https for other multi-machine hubs", raw)
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or verified tailnet IPs; use https for other multi-machine hubs", raw)
 }
 
 func isLoopbackHost(host string) bool {

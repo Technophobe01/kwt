@@ -237,6 +237,13 @@ func TestServerUnsupportedMethodsReturnMethodNotAllowed(t *testing.T) {
 }
 
 func TestParseHubEndpoint(t *testing.T) {
+	// The tailnet addresses below are this machine's own per the stubbed
+	// daemon status; a peer's address must not be accepted as a listen
+	// address.
+	stubTailnetStatus(t, runningTailnetStatus(
+		[]string{"100.64.1.2", "fd7a:115c:a1e0::ab12"},
+		[]string{"100.64.5.5"},
+	), nil)
 	tests := []struct {
 		name    string
 		raw     string
@@ -244,8 +251,9 @@ func TestParseHubEndpoint(t *testing.T) {
 	}{
 		{name: "loopback", raw: "127.0.0.1:8787"},
 		{name: "localhost", raw: "localhost:8787"},
-		{name: "tailscale cgnat", raw: "100.64.1.2:8787"},
-		{name: "tailscale ipv6", raw: "[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "own tailscale ipv4", raw: "100.64.1.2:8787"},
+		{name: "own tailscale ipv6", raw: "[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "peer tailscale address", raw: "100.64.5.5:8787", wantErr: true},
 		{name: "below tailnet cgnat block", raw: "100.63.255.255:8787", wantErr: true},
 		{name: "private lan", raw: "192.168.1.10:8787", wantErr: true},
 		{name: "unspecified", raw: "0.0.0.0:8787", wantErr: true},
