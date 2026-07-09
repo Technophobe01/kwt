@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -238,12 +237,6 @@ func TestServerUnsupportedMethodsReturnMethodNotAllowed(t *testing.T) {
 }
 
 func TestParseHubEndpoint(t *testing.T) {
-	// The tailnet addresses below are this machine's own per the stubbed
-	// daemon status; a non-self tailnet address must not be accepted as a
-	// listen address.
-	stubTailnetStatus(t, runningTailnetStatus(
-		[]string{"100.64.1.2", "fd7a:115c:a1e0::ab12"},
-	), nil)
 	tests := []struct {
 		name    string
 		raw     string
@@ -251,8 +244,8 @@ func TestParseHubEndpoint(t *testing.T) {
 	}{
 		{name: "loopback", raw: "127.0.0.1:8787"},
 		{name: "localhost", raw: "localhost:8787"},
-		{name: "own tailscale ipv4", raw: "100.64.1.2:8787"},
-		{name: "own tailscale ipv6", raw: "[fd7a:115c:a1e0::ab12]:8787"},
+		{name: "tailscale ipv4", raw: "100.64.1.2:8787", wantErr: true},
+		{name: "tailscale ipv6", raw: "[fd7a:115c:a1e0::ab12]:8787", wantErr: true},
 		{name: "non-self tailscale address", raw: "100.64.5.5:8787", wantErr: true},
 		{name: "below tailnet cgnat block", raw: "100.63.255.255:8787", wantErr: true},
 		{name: "private lan", raw: "192.168.1.10:8787", wantErr: true},
@@ -268,37 +261,6 @@ func TestParseHubEndpoint(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-		})
-	}
-}
-
-func TestParseHubEndpointFailsClosedWhenTailnetStatusUnavailable(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  tailnetStatus
-		readErr error
-		wantErr string
-	}{
-		{
-			name:    "status read fails",
-			readErr: errors.New("tailscale status unavailable"),
-			wantErr: "tailscale status unavailable",
-		},
-		{
-			name:    "backend not running",
-			status:  tailnetStatus{BackendState: "NeedsLogin"},
-			wantErr: "NeedsLogin",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stubTailnetStatus(t, tt.status, tt.readErr)
-
-			_, err := ParseHubEndpoint("100.64.1.2:8787")
-
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }

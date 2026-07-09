@@ -3,9 +3,7 @@ package fleet
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -61,41 +59,14 @@ func NewServer(opts ServerOptions) http.Handler {
 }
 
 // ParseHubEndpoint parses and validates a fleet hub listen endpoint.
-// TCP listeners are restricted to loopback and tailnet addresses: the hub
-// speaks plain HTTP with bearer auth, so a wider bind would expose the
-// token-authenticated API in cleartext. Clients apply the same address rule.
-// Tailnet binds are safe because Tailscale encrypts peer traffic with
-// WireGuard; other multi-machine hubs are reached through a TLS endpoint
+// TCP listeners are restricted to loopback because the hub speaks plain HTTP
+// with bearer auth. Multi-machine hubs are reached through a TLS endpoint
 // (reverse proxy, tailscale serve) that forwards to the loopback listener.
 func ParseHubEndpoint(raw string) (daemon.Endpoint, error) {
 	return daemon.ParseEndpoint(raw, daemon.ParseEndpointOptions{
 		DefaultTCPAddress: "",
-		TCPPolicy:         requireLoopbackOrTailnet,
+		TCPPolicy:         daemon.RequireLoopback,
 	})
-}
-
-// requireLoopbackOrTailnet accepts loopback listen addresses, and tailnet
-// addresses the local Tailscale daemon confirms as this machine's own —
-// carrier NAT can hand out 100.64.0.0/10 addresses too, and a plaintext hub
-// must not be exposed on such an interface.
-func requireLoopbackOrTailnet(addr string) error {
-	if daemon.RequireLoopback(addr) == nil {
-		return nil
-	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("parse host:port: %w", err)
-	}
-	if isTailnetIP(host) {
-		if err := verifyTailnetSelfAddress(host); err != nil {
-			return fmt.Errorf("address %q is not this machine's tailnet address: %w", addr, err)
-		}
-		return nil
-	}
-	return fmt.Errorf(
-		"address %q must be loopback or this machine's tailnet IP; put other multi-machine hubs behind a TLS proxy on a loopback listener",
-		addr,
-	)
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

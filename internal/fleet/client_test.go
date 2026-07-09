@@ -76,32 +76,6 @@ func TestClientUsesBearerTokenAndTimeout(t *testing.T) {
 	assert.Equal(t, "Bearer secret", gotAuth)
 }
 
-func stubTailnetStatus(t *testing.T, status tailnetStatus, err error) {
-	t.Helper()
-	old := readTailnetStatus
-	readTailnetStatus = func() (tailnetStatus, error) { return status, err }
-	t.Cleanup(func() { readTailnetStatus = old })
-}
-
-func runningTailnetStatus(selfIPs []string) tailnetStatus {
-	return tailnetStatus{
-		BackendState: "Running",
-		TUN:          true,
-		Self:         &tailnetNode{TailscaleIPs: selfIPs},
-	}
-}
-
-func verifiedTailnetPeerStatus(tun bool) tailnetStatus {
-	return tailnetStatus{
-		BackendState: "Running",
-		TUN:          tun,
-		Self:         &tailnetNode{TailscaleIPs: []string{"100.64.9.9"}},
-		Peer: map[string]*tailnetNode{
-			"peer": {TailscaleIPs: []string{"100.64.1.2", "fd7a:115c:a1e0::ab12"}},
-		},
-	}
-}
-
 func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -110,27 +84,6 @@ func TestClientRejectsPlaintextNonLoopbackHubURL(t *testing.T) {
 		{name: "public", hubURL: "http://192.0.2.10:8787"},
 		{name: "private lan", hubURL: "http://192.168.1.10:8787"},
 		{name: "magicdns", hubURL: "http://myhub.tailnet-1234.ts.net:8787"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(ClientOptions{HubURL: tt.hubURL, Token: "secret"})
-
-			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
-
-			require.Error(t, err)
-			assert.Nil(t, req)
-			assert.Contains(t, err.Error(), "plaintext sync hub URL")
-		})
-	}
-}
-
-func TestClientAllowsPlaintextHubURLForVerifiedKernelTailnetPeer(t *testing.T) {
-	stubTailnetStatus(t, verifiedTailnetPeerStatus(true), nil)
-	tests := []struct {
-		name   string
-		hubURL string
-	}{
 		{name: "tailscale ipv4", hubURL: "http://100.64.1.2:8787"},
 		{name: "tailscale ipv6", hubURL: "http://[fd7a:115c:a1e0::ab12]:8787"},
 	}
@@ -141,21 +94,11 @@ func TestClientAllowsPlaintextHubURLForVerifiedKernelTailnetPeer(t *testing.T) {
 
 			req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
 
-			require.NoError(t, err)
-			assert.Equal(t, "Bearer secret", req.Header.Get("Authorization"))
+			require.Error(t, err)
+			assert.Nil(t, req)
+			assert.Contains(t, err.Error(), "only allowed for loopback")
 		})
 	}
-}
-
-func TestClientRejectsPlaintextTailnetHubURLWithoutKernelTUN(t *testing.T) {
-	stubTailnetStatus(t, verifiedTailnetPeerStatus(false), nil)
-	client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
-
-	req, err := client.newRequest(context.Background(), http.MethodGet, "/api/v1/fleet/state", nil)
-
-	require.Error(t, err)
-	assert.Nil(t, req)
-	assert.Contains(t, err.Error(), "userspace")
 }
 
 func TestClientAllowsPlaintextLoopbackHubURL(t *testing.T) {
@@ -232,25 +175,21 @@ func TestClientRejectsPlaintextRedirectToUnverifiedHost(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestClientBypassesEnvironmentProxyForPlaintextTailnetHub(t *testing.T) {
+func TestClientRejectsPlaintextTailnetBeforeEnvironmentProxy(t *testing.T) {
 	if os.Getenv("KWT_TEST_PROXY_HELPER") == "1" {
-		stubTailnetStatus(t, verifiedTailnetPeerStatus(true), nil)
-		for _, hubURL := range []string{"http://100.64.1.2:8787", "https://hub.example.test"} {
-			client := NewClient(ClientOptions{HubURL: hubURL, Token: "secret"})
-			transport, ok := client.httpClient.Transport.(*http.Transport)
-			require.True(t, ok, "all fleet clients must enforce the tailnet proxy policy across redirects")
-			require.NotNil(t, transport.Proxy)
-			req, err := http.NewRequest(http.MethodGet, "http://100.64.1.2:8787/api/v1/fleet/state", nil)
-			require.NoError(t, err)
-			proxyURL, err := transport.Proxy(req)
-			require.NoError(t, err)
-			assert.Nil(t, proxyURL)
-		}
+		client := NewClient(ClientOptions{HubURL: "http://100.64.1.2:8787", Token: "secret"})
+		_, _, _, err := client.State(context.Background(), "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only allowed for loopback")
 		return
 	}
 
+	var mu sync.Mutex
+	proxyRequests := 0
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("plaintext tailnet validation must not contact the environment proxy")
+		mu.Lock()
+		proxyRequests++
+		mu.Unlock()
 	}))
 	defer proxy.Close()
 
@@ -263,7 +202,7 @@ func TestClientBypassesEnvironmentProxyForPlaintextTailnetHub(t *testing.T) {
 		}
 		baseEnv = append(baseEnv, env)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestClientBypassesEnvironmentProxyForPlaintextTailnetHub$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestClientRejectsPlaintextTailnetBeforeEnvironmentProxy$")
 	cmd.Env = append(baseEnv,
 		"HTTP_PROXY="+proxy.URL,
 		"http_proxy="+proxy.URL,
@@ -273,6 +212,9 @@ func TestClientBypassesEnvironmentProxyForPlaintextTailnetHub(t *testing.T) {
 	)
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", output)
+	mu.Lock()
+	assert.Zero(t, proxyRequests)
+	mu.Unlock()
 }
 
 func TestClientHonorsTimeout(t *testing.T) {

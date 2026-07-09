@@ -98,7 +98,7 @@ func fleetTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = func(req *http.Request) (*url.URL, error) {
 		if req != nil && req.URL != nil && req.URL.Scheme == "http" &&
-			(isLoopbackHost(req.URL.Hostname()) || isTailnetIP(req.URL.Hostname())) {
+			isLoopbackHost(req.URL.Hostname()) {
 			return nil, nil
 		}
 		return http.ProxyFromEnvironment(req)
@@ -284,16 +284,7 @@ func validateBearerHubURL(raw string) error {
 	if isLoopbackHost(host) {
 		return nil
 	}
-	if isTailnetIP(host) {
-		if err := verifyTailnetPeerAddress(host); err != nil {
-			return fmt.Errorf(
-				"plaintext sync hub URL %q requires a verified kernel-routed tailnet destination: %v; start Tailscale in kernel mode or use HTTPS",
-				raw, err,
-			)
-		}
-		return nil
-	}
-	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback or verified tailnet IPs; use HTTPS for other multi-machine hubs", raw)
+	return fmt.Errorf("plaintext sync hub URL %q is only allowed for loopback; use HTTPS for multi-machine hubs", raw)
 }
 
 func isLoopbackHost(host string) bool {
