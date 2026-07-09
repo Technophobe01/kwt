@@ -40,7 +40,7 @@ resolved layout if it does not yet exist.`,
 
 func init() {
 	rootCmd.AddCommand(openCmd)
-	openCmd.Flags().StringVar(&openLayout, "layout", "", "Workspace layout preset to launch")
+	openCmd.Flags().StringVar(&openLayout, "layout", "", "Workspace layout preset to launch (\"none\" = blank session)")
 	openCmd.Flags().BoolVarP(&openSelectLayout, "select-layout", "L", false,
 		"Fuzzy-pick a workspace layout")
 	openCmd.MarkFlagsMutuallyExclusive("layout", "select-layout")

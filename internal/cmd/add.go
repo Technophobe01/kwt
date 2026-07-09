@@ -63,7 +63,7 @@ func init() {
 	addCmd.Flags().BoolVarP(&addInteractive, "interactive", "i", false, "Select branch using fuzzy finder")
 	addCmd.Flags().BoolVarP(&addForce, "force", "f", false, "Overwrite existing directory")
 	addCmd.Flags().StringVar(&addExpires, "expires", "", "Set expiration (e.g., 1d, 7d, 1h)")
-	addCmd.Flags().StringVar(&addLayout, "layout", "", "Workspace layout preset to launch")
+	addCmd.Flags().StringVar(&addLayout, "layout", "", "Workspace layout preset to launch (\"none\" = blank session)")
 	addCmd.Flags().BoolVarP(&addSelectLayout, "select-layout", "L", false,
 		"Fuzzy-pick a workspace layout")
 	addCmd.Flags().BoolVar(&addNoLaunch, "no-launch", false,

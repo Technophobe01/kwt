@@ -31,9 +31,8 @@ func TestBuildConstructionSequenceSinglePane(t *testing.T) {
 	got := BuildConstructionSequence("s", "/wt", layout)
 	want := [][]string{
 		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt"},
-		{"select-layout", "-t", "s", "tiled"},
 	}
-	assert.Equal(t, want, got)
+	assert.Equal(t, want, got, "single-pane layouts need no select-layout")
 }
 
 func TestBuildPaneCommandSequence(t *testing.T) {
@@ -123,6 +122,22 @@ func TestValidateLayouts(t *testing.T) {
 				Presets: []models.Layout{{Name: "quad", Arrange: "tiled", Panes: []string{"a"}}},
 			},
 			wantErr: true,
+		},
+		{
+			name: "zero presets is valid",
+			cfg:  models.LayoutsConfig{},
+		},
+		{
+			name: "default none is valid without presets",
+			cfg:  models.LayoutsConfig{Default: "none"},
+		},
+		{
+			name: "preset named none is reserved",
+			cfg: models.LayoutsConfig{
+				Presets: []models.Layout{{Name: "none", Arrange: "tiled", Panes: []string{"a"}}},
+			},
+			wantErr:     true,
+			errContains: "reserved",
 		},
 	}
 	for _, tc := range tests {
@@ -216,6 +231,16 @@ func TestResolveLayout(t *testing.T) {
 			useSelectFn:   true,
 			wantName:      "focus",
 		},
+		{
+			name:       "layout flag none yields blank",
+			layoutFlag: "none",
+			wantName:   "none",
+		},
+		{
+			name:          "target default none yields blank",
+			targetDefault: "none",
+			wantName:      "none",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,4 +264,47 @@ func TestResolveLayout(t *testing.T) {
 			assert.Equal(t, tc.wantName, got.Name)
 		})
 	}
+}
+
+func TestResolveLayoutBlankWhenNothingConfigured(t *testing.T) {
+	got, err := ResolveLayout(models.LayoutsConfig{}, "", false, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, BlankLayout(), got)
+	require.Len(t, got.Panes, 1)
+	assert.Empty(t, got.Panes[0], "blank pane must be a plain login shell")
+}
+
+func TestResolveLayoutSelectPrependsBlank(t *testing.T) {
+	cfg := models.LayoutsConfig{
+		Presets: []models.Layout{{Name: "quad", Arrange: "tiled", Panes: []string{"a"}}},
+	}
+	var offered []string
+	selectFn := func(ls []models.Layout) (models.Layout, error) {
+		for _, l := range ls {
+			offered = append(offered, l.Name)
+		}
+		return ls[0], nil
+	}
+	got, err := ResolveLayout(cfg, "", true, "", selectFn)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"none", "quad"}, offered)
+	assert.Equal(t, BlankLayout(), got)
+}
+
+func TestResolveLayoutGlobalDefaultNoneYieldsBlank(t *testing.T) {
+	cfg := models.LayoutsConfig{
+		Default: "none",
+		Presets: []models.Layout{{Name: "quad", Arrange: "tiled", Panes: []string{"a"}}},
+	}
+	got, err := ResolveLayout(cfg, "", false, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, BlankLayout(), got)
+}
+
+func TestResolveLayoutUnknownNameWithZeroPresets(t *testing.T) {
+	got, err := ResolveLayout(models.LayoutsConfig{}, "quad", false, "", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown layout \"quad\"")
+	assert.Contains(t, err.Error(), "no presets defined")
+	assert.Equal(t, models.Layout{}, got)
 }

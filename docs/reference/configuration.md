@@ -25,7 +25,7 @@ claude = "claude"
 roborev = "roborev tui"
 
 [layouts]
-default = "quad"
+# default = "quad"  # unset or "none" = blank single-pane session
 auto_launch_on_add = true
 
 [[layouts.presets]]
@@ -41,6 +41,12 @@ panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
 table before tmux starts, so command flags live in one local config file.
+
+`layouts.default` is optional. When it is unset — or set to the reserved name
+`none` — workspaces launch as a blank single-pane session in the worktree
+directory. Repository-local `.kwt.toml` files may also set
+`layouts.default = "none"` to opt a single project back into blank sessions
+when the global config names a preset.
 
 ## Project registry
 

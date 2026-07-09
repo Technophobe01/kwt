@@ -1179,8 +1179,11 @@ func (b *tuiBackend) AttachOutsideTmux(row dashboard.Row, layoutName string) err
 	return b.attachWorkspace(context.Background(), row, layoutName, false, config.StdinInteractive())
 }
 
+// LayoutNames returns the names the TUI layout cycler offers: the reserved
+// blank session first, then the configured presets.
 func (b *tuiBackend) LayoutNames() []string {
-	names := make([]string, 0, len(b.cfg.Layouts.Presets))
+	names := make([]string, 0, len(b.cfg.Layouts.Presets)+1)
+	names = append(names, tmux.BlankLayoutName)
 	for _, layout := range b.cfg.Layouts.Presets {
 		names = append(names, layout.Name)
 	}

@@ -34,20 +34,6 @@ func defaultAgents() map[string]string {
 	}
 }
 
-func defaultLayouts() models.LayoutsConfig {
-	panes := []string{"agent:codex", "agent:claude", "agent:roborev", ""}
-	return models.LayoutsConfig{
-		Default:         "quad",
-		AutoLaunchOnAdd: true,
-		Presets: []models.Layout{
-			{Name: "quad", Arrange: "even-horizontal", Panes: panes},
-			{Name: "grid", Arrange: "tiled", Panes: panes},
-			{Name: "focus", Arrange: "main-vertical", Panes: panes},
-			{Name: "stack", Arrange: "even-vertical", Panes: panes},
-		},
-	}
-}
-
 // getConfigDir returns the configuration directory path.
 func getConfigDir() string {
 	if kwtHome := os.Getenv("KWT_HOME"); kwtHome != "" {
@@ -284,19 +270,8 @@ func backfillWorkspaceConfig(configPath string) (bool, error) {
 		migrated = true
 	}
 
-	var layouts models.LayoutsConfig
-	_ = globalViper.UnmarshalKey("layouts", &layouts)
-	defaults := defaultLayouts()
-	if strings.TrimSpace(layouts.Default) == "" {
-		globalViper.Set("layouts.default", defaults.Default)
-		migrated = true
-	}
 	if !globalViper.IsSet("layouts.auto_launch_on_add") {
-		globalViper.Set("layouts.auto_launch_on_add", defaults.AutoLaunchOnAdd)
-		migrated = true
-	}
-	if len(layouts.Presets) == 0 {
-		globalViper.Set("layouts.presets", defaults.Presets)
+		globalViper.Set("layouts.auto_launch_on_add", true)
 		migrated = true
 	}
 
@@ -351,7 +326,9 @@ claude = "claude"
 roborev = "roborev tui"
 
 [layouts]
-default = "quad"
+# Unset (or "none") launches a blank single-pane session.
+# Set to a preset name below to launch that layout by default.
+# default = "quad"
 auto_launch_on_add = true
 
 [[layouts.presets]]

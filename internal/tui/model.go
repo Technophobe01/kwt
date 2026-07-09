@@ -541,7 +541,6 @@ func (m Model) shellSelected() (Model, tea.Cmd) {
 
 func (m Model) cycleLayout() (Model, tea.Cmd) {
 	if len(m.layouts) == 0 {
-		m.message = "no layouts configured"
 		return m, nil
 	}
 	if m.selectedLayout == "" {

@@ -665,3 +665,13 @@ func BenchmarkGenerateBranchPreview(b *testing.B) {
 		finder.generateBranchPreview(branch, 20)
 	}
 }
+
+func TestLayoutItemLabel(t *testing.T) {
+	if result := layoutItemLabel(tmux.BlankLayout()); result != "none (blank session)" {
+		t.Errorf("layoutItemLabel(tmux.BlankLayout()) = %q, expected %q", result, "none (blank session)")
+	}
+	quad := models.Layout{Name: "quad", Arrange: "tiled", Panes: []string{"a", ""}}
+	if result := layoutItemLabel(quad); result != "quad (tiled, 2 panes)" {
+		t.Errorf("layoutItemLabel(quad) = %q, expected %q", result, "quad (tiled, 2 panes)")
+	}
+}

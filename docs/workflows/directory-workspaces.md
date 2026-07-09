@@ -38,8 +38,9 @@ covers the directory path. Renaming a workspace re-attaches to its existing
 live session instead of orphaning it; the session adopts the new name the next
 time it is created from scratch.
 
-Layouts behave exactly as for worktrees, including the trust-gated
-per-directory default in the directory's `.kwt.toml`:
+Layouts behave exactly as for worktrees: blank single-pane sessions by
+default, with the same opt-ins, including the trust-gated per-directory
+default in the directory's `.kwt.toml`:
 
 ```toml
 [layouts]

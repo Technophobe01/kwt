@@ -75,9 +75,12 @@ Global config lives at `~/.config/kwt/config.toml`, or
 `$KWT_HOME/config.toml` when `KWT_HOME` is set. Repository-local overrides live
 in `.kwt.toml` and are trust-gated before use.
 
-`config.toml` is the source of truth for layouts and agent commands. When kwt
-creates the file for the first time, it writes a starter set of agents and
-layouts. After that, kwt does not rely on hidden layout or agent defaults in the
+`config.toml` is the source of truth for layouts and agent commands. Workspaces
+launch as a blank single-pane session unless a layout is selected — via
+`--layout`, `--select-layout`, the TUI `L` key, or `layouts.default`. The name
+`none` is reserved and always means a blank session. When kwt creates the file
+for the first time, it writes a starter set of agents and layout presets to opt
+into; after that, kwt does not rely on hidden layout or agent defaults in the
 binary.
 
 ```toml
@@ -98,7 +101,7 @@ claude = "claude"
 roborev = "roborev tui"
 
 [layouts]
-default = "quad"
+# default = "quad"  # unset or "none" = blank single-pane session
 auto_launch_on_add = true
 
 [[layouts.presets]]

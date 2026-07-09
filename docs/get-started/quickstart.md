@@ -51,8 +51,9 @@ Useful keys:
 kwt add -b feature/new-ui
 ```
 
-By default, `kwt add` creates the worktree and launches the configured tmux
-workspace. To create without launching:
+By default, `kwt add` creates the worktree and launches a tmux workspace — a
+blank single-pane session unless a [layout](../reference/configuration.md) is
+selected. To create without launching:
 
 ```sh
 kwt add --no-launch -b feature/new-ui
