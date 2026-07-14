@@ -50,6 +50,10 @@ kwt remove feature/new-ui
 kwt remove -b feature/new-ui
 ```
 
+When `-b` creates a branch, `kwt` fetches `origin` and starts from its default
+branch. If that remote base is unavailable, it falls back to local `main`, then
+`master`, then the branch checked out in the primary worktree.
+
 ### Dashboard Keys
 
 | Key       | Action                                  |

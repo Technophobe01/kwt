@@ -107,6 +107,26 @@ func (r *TestRepository) getCurrentBranch() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\nOutput: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func commitTestFile(t *testing.T, dir, name, contents, message string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	gitOutput(t, dir, "add", name)
+	gitOutput(t, dir, "commit", "-m", message)
+}
+
 func TestNew(t *testing.T) {
 	repo := NewTestRepository(t)
 	g := New(repo.Path)
@@ -223,6 +243,45 @@ func TestAddWorktree(t *testing.T) {
 		}
 	})
 
+	t.Run("ExistingBranchDoesNotFetch", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		remoteParent := t.TempDir()
+		remotePath := filepath.Join(remoteParent, "origin.git")
+		gitOutput(t, remoteParent, "init", "--bare", "-b", "trunk", remotePath)
+		if err := repo.run("remote", "add", "origin", remotePath); err != nil {
+			t.Fatalf("add origin: %v", err)
+		}
+		if err := repo.run("push", "origin", "main:trunk"); err != nil {
+			t.Fatalf("push initial remote default: %v", err)
+		}
+		if err := repo.run("fetch", "origin"); err != nil {
+			t.Fatalf("fetch initial remote state: %v", err)
+		}
+		staleRemoteHead := gitOutput(t, repo.Path, "rev-parse", "refs/remotes/origin/trunk")
+		if err := repo.run("branch", "existing-branch"); err != nil {
+			t.Fatalf("create existing branch: %v", err)
+		}
+
+		updaterParent := t.TempDir()
+		updaterPath := filepath.Join(updaterParent, "updater")
+		gitOutput(t, updaterParent, "clone", remotePath, updaterPath)
+		gitOutput(t, updaterPath, "config", "user.name", "Test User")
+		gitOutput(t, updaterPath, "config", "user.email", "test@example.com")
+		commitTestFile(t, updaterPath, "remote.txt", "remote\n", "Advance remote default")
+		gitOutput(t, updaterPath, "push", "origin", "trunk")
+		if remoteHead := gitOutput(t, remotePath, "rev-parse", "refs/heads/trunk"); remoteHead == staleRemoteHead {
+			t.Fatal("test setup did not advance the remote default")
+		}
+
+		worktreePath := filepath.Join(t.TempDir(), "existing-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "existing-branch", false); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, repo.Path, "rev-parse", "refs/remotes/origin/trunk"); got != staleRemoteHead {
+			t.Fatalf("existing-branch creation fetched origin: tracking ref = %s, want stale %s", got, staleRemoteHead)
+		}
+	})
+
 	t.Run("NewBranch", func(t *testing.T) {
 		// Add worktree with new branch
 		worktreePath := filepath.Join(t.TempDir(), "new-wt")
@@ -258,6 +317,136 @@ func TestAddWorktree(t *testing.T) {
 		}
 		if !found {
 			t.Error("New branch worktree not found")
+		}
+	})
+
+	t.Run("NewBranchFromRemoteDefault", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		remoteParent := t.TempDir()
+		remotePath := filepath.Join(remoteParent, "origin.git")
+		gitOutput(t, remoteParent, "init", "--bare", "-b", "trunk", remotePath)
+		if err := repo.run("remote", "add", "origin", remotePath); err != nil {
+			t.Fatalf("add origin: %v", err)
+		}
+		if err := repo.run("push", "origin", "main:trunk"); err != nil {
+			t.Fatalf("push initial remote default: %v", err)
+		}
+
+		repo.CreateBranch(t, "feature/current")
+		commitTestFile(t, repo.Path, "feature.txt", "feature\n", "Feature commit")
+
+		updaterParent := t.TempDir()
+		updaterPath := filepath.Join(updaterParent, "updater")
+		gitOutput(t, updaterParent, "clone", remotePath, updaterPath)
+		gitOutput(t, updaterPath, "config", "user.name", "Test User")
+		gitOutput(t, updaterPath, "config", "user.email", "test@example.com")
+		commitTestFile(t, updaterPath, "remote.txt", "remote\n", "Advance remote default")
+		gitOutput(t, updaterPath, "push", "origin", "trunk")
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-default", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+
+		got := gitOutput(t, worktreePath, "rev-parse", "HEAD")
+		want := gitOutput(t, remotePath, "rev-parse", "refs/heads/trunk")
+		if got != want {
+			t.Fatalf("new worktree HEAD = %s, want fetched remote default %s", got, want)
+		}
+	})
+
+	t.Run("NewBranchFromLocalMain", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		want := gitOutput(t, repo.Path, "rev-parse", "main")
+		repo.CreateBranch(t, "feature/current")
+		commitTestFile(t, repo.Path, "feature.txt", "feature\n", "Feature commit")
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-main", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("new worktree HEAD = %s, want local main %s", got, want)
+		}
+	})
+
+	t.Run("NewBranchPrefersLocalMainOverMaster", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		want := gitOutput(t, repo.Path, "rev-parse", "main")
+		repo.CreateBranch(t, "master")
+		commitTestFile(t, repo.Path, "master.txt", "master\n", "Advance master")
+		repo.CreateBranch(t, "feature/current")
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-main", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("new worktree HEAD = %s, want preferred local main %s", got, want)
+		}
+	})
+
+	t.Run("NewBranchFromLocalMaster", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		if err := repo.run("branch", "-m", "master"); err != nil {
+			t.Fatalf("rename main to master: %v", err)
+		}
+		want := gitOutput(t, repo.Path, "rev-parse", "master")
+		repo.CreateBranch(t, "feature/current")
+		commitTestFile(t, repo.Path, "feature.txt", "feature\n", "Feature commit")
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-master", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("new worktree HEAD = %s, want local master %s", got, want)
+		}
+	})
+
+	t.Run("NewBranchFromPrimaryWorktree", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		if err := repo.run("branch", "-m", "trunk"); err != nil {
+			t.Fatalf("rename main to trunk: %v", err)
+		}
+		want := gitOutput(t, repo.Path, "rev-parse", "trunk")
+		if err := repo.run("branch", "feature/current"); err != nil {
+			t.Fatalf("create feature branch: %v", err)
+		}
+		featurePath := filepath.Join(t.TempDir(), "feature-wt")
+		if err := repo.run("worktree", "add", featurePath, "feature/current"); err != nil {
+			t.Fatalf("create feature worktree: %v", err)
+		}
+		commitTestFile(t, featurePath, "feature.txt", "feature\n", "Feature commit")
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(featurePath).AddWorktree(worktreePath, "new-from-primary", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("new worktree HEAD = %s, want primary worktree branch %s", got, want)
+		}
+	})
+
+	t.Run("NewBranchFailsWithoutDefaultBase", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		if err := repo.run("branch", "-m", "trunk"); err != nil {
+			t.Fatalf("rename main to trunk: %v", err)
+		}
+		if err := repo.run("checkout", "--detach"); err != nil {
+			t.Fatalf("detach primary worktree: %v", err)
+		}
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		err := New(repo.Path).AddWorktree(worktreePath, "new-without-base", true)
+		if err == nil {
+			t.Fatal("AddWorktree() error = nil, want base resolution error")
+		}
+		if !strings.Contains(err.Error(), "no local main, master, or primary worktree branch") {
+			t.Fatalf("AddWorktree() error = %q, want local fallback details", err)
+		}
+		if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
+			t.Fatalf("worktree path created despite resolution failure: stat error = %v", statErr)
 		}
 	})
 }

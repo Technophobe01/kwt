@@ -51,6 +51,10 @@ Useful keys:
 kwt add -b feature/new-ui
 ```
 
+When `-b` creates a branch, `kwt` fetches `origin` and starts from its default
+branch. If that remote base is unavailable, it falls back to local `main`, then
+`master`, then the branch checked out in the primary worktree.
+
 By default, `kwt add` creates the worktree and launches a tmux workspace — a
 blank single-pane session unless a [layout](../reference/configuration.md) is
 selected. To create without launching:
