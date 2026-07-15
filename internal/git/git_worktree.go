@@ -148,11 +148,12 @@ func (g *Git) remoteDefaultWorktreeBase() (string, error) {
 		return "", fmt.Errorf("origin did not advertise a default branch")
 	}
 
-	if _, err := g.run("fetch", "origin"); err != nil {
-		return "", fmt.Errorf("fetch origin: %w", err)
+	ref := "refs/remotes/origin/" + branch
+	refspec := "+refs/heads/" + branch + ":" + ref
+	if _, err := g.run("fetch", "origin", refspec); err != nil {
+		return "", fmt.Errorf("fetch origin default branch: %w", err)
 	}
 
-	ref := "refs/remotes/origin/" + branch
 	if !g.refExists(ref) {
 		return "", fmt.Errorf("fetched origin default ref %s does not exist", ref)
 	}

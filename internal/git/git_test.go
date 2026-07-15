@@ -355,6 +355,52 @@ func TestAddWorktree(t *testing.T) {
 		}
 	})
 
+	t.Run("NewBranchFetchesRemoteDefaultOutsideConfiguredRefspec", func(t *testing.T) {
+		repo := NewTestRepository(t)
+		remoteParent := t.TempDir()
+		remotePath := filepath.Join(remoteParent, "origin.git")
+		gitOutput(t, remoteParent, "init", "--bare", "-b", "trunk", remotePath)
+		if err := repo.run("remote", "add", "origin", remotePath); err != nil {
+			t.Fatalf("add origin: %v", err)
+		}
+		if err := repo.run("push", "origin", "main:trunk", "main:other"); err != nil {
+			t.Fatalf("push initial remote branches: %v", err)
+		}
+		if err := repo.run("fetch", "origin"); err != nil {
+			t.Fatalf("fetch initial remote state: %v", err)
+		}
+		staleRemoteHead := gitOutput(t, repo.Path, "rev-parse", "refs/remotes/origin/trunk")
+		if err := repo.run("config", "--unset-all", "remote.origin.fetch"); err != nil {
+			t.Fatalf("clear origin fetch refspec: %v", err)
+		}
+		if err := repo.run("config", "--add", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"); err != nil {
+			t.Fatalf("set restrictive origin fetch refspec: %v", err)
+		}
+
+		repo.CreateBranch(t, "feature/current")
+		commitTestFile(t, repo.Path, "feature.txt", "feature\n", "Feature commit")
+
+		updaterParent := t.TempDir()
+		updaterPath := filepath.Join(updaterParent, "updater")
+		gitOutput(t, updaterParent, "clone", remotePath, updaterPath)
+		gitOutput(t, updaterPath, "config", "user.name", "Test User")
+		gitOutput(t, updaterPath, "config", "user.email", "test@example.com")
+		commitTestFile(t, updaterPath, "remote.txt", "remote\n", "Advance remote default")
+		gitOutput(t, updaterPath, "push", "origin", "trunk")
+		freshRemoteHead := gitOutput(t, remotePath, "rev-parse", "refs/heads/trunk")
+		if freshRemoteHead == staleRemoteHead {
+			t.Fatal("test setup did not advance the remote default")
+		}
+
+		worktreePath := filepath.Join(t.TempDir(), "new-wt")
+		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-default", true); err != nil {
+			t.Fatalf("AddWorktree() error = %v", err)
+		}
+		if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != freshRemoteHead {
+			t.Fatalf("new worktree HEAD = %s, want fetched remote default %s", got, freshRemoteHead)
+		}
+	})
+
 	t.Run("NewBranchFromLocalMain", func(t *testing.T) {
 		repo := NewTestRepository(t)
 		want := gitOutput(t, repo.Path, "rev-parse", "main")
