@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -342,6 +343,26 @@ func TestAddWorktree(t *testing.T) {
 		gitOutput(t, updaterPath, "config", "user.email", "test@example.com")
 		commitTestFile(t, updaterPath, "remote.txt", "remote\n", "Advance remote default")
 		gitOutput(t, updaterPath, "push", "origin", "trunk")
+
+		if runtime.GOOS != "windows" {
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatalf("find git executable: %v", err)
+			}
+			wrapperDir := t.TempDir()
+			wrapperPath := filepath.Join(wrapperDir, "git")
+			wrapper := `#!/bin/sh
+if [ "$1" = "ls-remote" ] && [ "$2" = "--symref" ]; then
+	exit 129
+fi
+exec "$REAL_GIT" "$@"
+`
+			if err := os.WriteFile(wrapperPath, []byte(wrapper), 0755); err != nil {
+				t.Fatalf("write git compatibility wrapper: %v", err)
+			}
+			t.Setenv("REAL_GIT", realGit)
+			t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		}
 
 		worktreePath := filepath.Join(t.TempDir(), "new-wt")
 		if err := New(repo.Path).AddWorktree(worktreePath, "new-from-default", true); err != nil {

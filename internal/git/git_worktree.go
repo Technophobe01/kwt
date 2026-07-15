@@ -131,31 +131,13 @@ func (g *Git) defaultWorktreeBase() (string, error) {
 }
 
 func (g *Git) remoteDefaultWorktreeBase() (string, error) {
-	output, err := g.run("ls-remote", "--symref", "origin", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("discover origin default branch: %w", err)
-	}
-
-	var branch string
-	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 3 && fields[0] == "ref:" && fields[2] == "HEAD" {
-			branch = strings.TrimPrefix(fields[1], "refs/heads/")
-			break
-		}
-	}
-	if branch == "" {
-		return "", fmt.Errorf("origin did not advertise a default branch")
-	}
-
-	ref := "refs/remotes/origin/" + branch
-	refspec := "+refs/heads/" + branch + ":" + ref
-	if _, err := g.run("fetch", "origin", refspec); err != nil {
+	const ref = "refs/kwt/origin/default"
+	if _, err := g.run("fetch", "origin", "+HEAD:"+ref); err != nil {
 		return "", fmt.Errorf("fetch origin default branch: %w", err)
 	}
 
 	if !g.refExists(ref) {
-		return "", fmt.Errorf("fetched origin default ref %s does not exist", ref)
+		return "", fmt.Errorf("fetched origin default ref does not exist")
 	}
 	return ref, nil
 }
