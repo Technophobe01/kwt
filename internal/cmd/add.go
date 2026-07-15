@@ -34,7 +34,11 @@ var addCmd = &cobra.Command{
 	Long: `Create a new worktree for the specified branch.
 
 If no path is provided, it will be generated based on the configuration template.
-Use -i flag to interactively select a branch using fuzzy finder.`,
+Use -i flag to interactively select a branch using fuzzy finder.
+
+When -b creates a branch, kwt fetches origin and starts from its default branch.
+If that remote base is unavailable, it falls back to local main, then master,
+then the branch checked out in the primary worktree.`,
 	Example: `  # Create worktree from existing branch
   kwt add feature/new-ui
 

@@ -35,6 +35,10 @@ kwt config get layouts.default
 kwt config set --local layouts.default stack
 ```
 
+When `kwt add -b` creates a branch, it fetches `origin` and starts from its
+default branch. If that remote base is unavailable, it falls back to local
+`main`, then `master`, then the branch checked out in the primary worktree.
+
 ## Exit behavior
 
 Commands intended to launch the dashboard or attach to tmux require an

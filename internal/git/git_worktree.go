@@ -84,7 +84,11 @@ func (g *Git) AddWorktree(path, branch string, createBranch bool) error {
 	args := []string{"worktree", "add"}
 
 	if createBranch {
-		args = append(args, "-b", branch, path)
+		base, err := g.defaultWorktreeBase()
+		if err != nil {
+			return err
+		}
+		args = append(args, "-b", branch, path, base)
 	} else {
 		args = append(args, path, branch)
 	}
@@ -94,6 +98,53 @@ func (g *Git) AddWorktree(path, branch string, createBranch bool) error {
 	}
 
 	return nil
+}
+
+func (g *Git) defaultWorktreeBase() (string, error) {
+	remoteBase, remoteErr := g.remoteDefaultWorktreeBase()
+	if remoteErr == nil {
+		return remoteBase, nil
+	}
+
+	for _, branch := range []string{"main", "master"} {
+		ref := "refs/heads/" + branch
+		if g.refExists(ref) {
+			return ref, nil
+		}
+	}
+
+	root, rootErr := g.getMainRepoRoot()
+	if rootErr == nil {
+		output, branchErr := g.run("-C", root, "symbolic-ref", "--quiet", "--short", "HEAD")
+		if branchErr == nil {
+			ref := "refs/heads/" + strings.TrimSpace(output)
+			if g.refExists(ref) {
+				return ref, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf(
+		"could not resolve default worktree base: remote default unavailable (%v); no local main, master, or primary worktree branch",
+		remoteErr,
+	)
+}
+
+func (g *Git) remoteDefaultWorktreeBase() (string, error) {
+	const ref = "refs/kwt/origin/default"
+	if _, err := g.run("fetch", "origin", "+HEAD:"+ref); err != nil {
+		return "", fmt.Errorf("fetch origin default branch: %w", err)
+	}
+
+	if !g.refExists(ref) {
+		return "", fmt.Errorf("fetched origin default ref does not exist")
+	}
+	return ref, nil
+}
+
+func (g *Git) refExists(ref string) bool {
+	_, err := g.run("show-ref", "--verify", "--quiet", ref)
+	return err == nil
 }
 
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
