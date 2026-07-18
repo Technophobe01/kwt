@@ -217,6 +217,7 @@ spaces.
 | `kwt open`       | Fuzzy-pick and attach to a workspace      |
 | `kwt list`       | List worktrees                            |
 | `kwt status`     | Show git status, sync state, and activity |
+| `kwt projects`   | List registered project repositories      |
 | `kwt get`        | Print a matching worktree path            |
 | `kwt cd`         | Open a shell in a matching worktree       |
 | `kwt exec`       | Run a command in a matching worktree      |

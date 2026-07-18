@@ -243,7 +243,7 @@ func prepareLaunch(ctx *CommandContext) (models.Layout, *url.RepositoryInfo, err
 		return models.Layout{}, nil, err
 	}
 
-	info, err := worktree.RepositoryInfoFromGit(ctx.Git)
+	info, err := worktree.RepositoryInfoWithProjects(ctx.Git, ctx.Config.Projects)
 	if err != nil {
 		return models.Layout{}, nil, fmt.Errorf("failed to determine repository identity: %w", err)
 	}

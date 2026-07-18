@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kwt/internal/tmux"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -71,6 +73,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			}
 
 			if listJSON {
+				enrichWorktreeIdentity(ctx.Git, ctx.Config.Projects, worktrees)
 				return ctx.Printer.PrintWorktreesJSON(worktrees)
 			}
 
@@ -91,6 +94,11 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 	}
 
 	if len(worktreePointers) == 0 {
+		// JSON mode always emits a JSON array, empty included, so scripts can
+		// parse the output unconditionally; the prose message is non-JSON only.
+		if listJSON {
+			return ctx.Printer.PrintWorktreesJSON([]models.Worktree{})
+		}
 		ctx.Printer.PrintInfo("No worktrees found in " + ctx.Config.Worktree.BaseDir)
 		return nil
 	}
@@ -107,4 +115,22 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 
 	ctx.Printer.PrintWorktrees(worktrees, listVerbose)
 	return nil
+}
+
+// enrichWorktreeIdentity fills the repository slug and session name for each
+// local worktree so JSON surfaces carry the same identity fields as global
+// (-g) mode. Identity follows the single registered-identity precedence: a
+// registered project's canonical identity wins over a fork origin, so these
+// surfaces join with `kwt projects` and derive the same session names as
+// every other path. Best effort: when repository identity cannot be resolved
+// the fields stay empty.
+func enrichWorktreeIdentity(g worktree.RepoIdentityGit, projects []models.Project, worktrees []models.Worktree) {
+	info, err := worktree.RepositoryInfoWithProjects(g, projects)
+	if err != nil {
+		return
+	}
+	for i := range worktrees {
+		worktrees[i].Repository = info.FullPath
+		worktrees[i].SessionName = tmux.WorkspaceSessionName(info, worktrees[i].Branch, worktrees[i].Path)
+	}
 }

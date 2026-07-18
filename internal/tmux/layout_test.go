@@ -8,16 +8,15 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
-func TestBuildConstructionSequenceQuad(t *testing.T) {
+func TestBuildRemainingPaneSequenceQuad(t *testing.T) {
 	layout := models.Layout{
 		Name:    "quad",
 		Arrange: "even-horizontal",
 		Panes:   []string{"codex", "claude", "roborev tui", ""},
 	}
-	got := BuildConstructionSequence("kwt-workspace-x", "/wt", layout)
+	got := BuildRemainingPaneSequence("kwt-workspace-x", "/wt", layout)
 
 	want := [][]string{
-		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "kwt-workspace-x", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "kwt-workspace-x", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "kwt-workspace-x", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "kwt-workspace-x", "-c", "/wt"},
@@ -26,13 +25,24 @@ func TestBuildConstructionSequenceQuad(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func TestBuildConstructionSequenceSinglePane(t *testing.T) {
-	layout := models.Layout{Arrange: "tiled", Panes: []string{"codex"}}
-	got := BuildConstructionSequence("s", "/wt", layout)
-	want := [][]string{
-		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt"},
+func TestBuildSessionCreateCommandSinglePane(t *testing.T) {
+	got := BuildSessionCreateCommand("s", "/wt")
+
+	want := []string{
+		"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt", "sleep", "2147483647",
 	}
-	assert.Equal(t, want, got, "single-pane layouts need no select-layout")
+	assert.Equal(t, want, got)
+
+	layout := models.Layout{Arrange: "tiled", Panes: []string{"codex"}}
+	assert.Empty(t, BuildRemainingPaneSequence("s", "/wt", layout),
+		"single-pane layouts need no split-window or select-layout")
+}
+
+func TestBuildFirstPaneRespawnCommandUsesDirectShellArgv(t *testing.T) {
+	got := BuildFirstPaneRespawnCommand("%0", "/wt", "/usr/bin/fish")
+
+	want := []string{"respawn-pane", "-k", "-c", "/wt", "-t", "%0", "/usr/bin/fish", "-l"}
+	assert.Equal(t, want, got)
 }
 
 func TestBuildPaneCommandSequence(t *testing.T) {

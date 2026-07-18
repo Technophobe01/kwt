@@ -5,11 +5,13 @@ import "time"
 
 // Worktree represents a Git worktree with its associated metadata.
 type Worktree struct {
-	Path       string    `json:"path"`        // Absolute path to the worktree directory
-	Branch     string    `json:"branch"`      // Branch name associated with this worktree
-	CommitHash string    `json:"commit_hash"` // Current HEAD commit hash
-	IsMain     bool      `json:"is_main"`     // Whether this is the main worktree
-	CreatedAt  time.Time `json:"created_at"`  // Creation timestamp
+	Path        string    `json:"path"`         // Absolute path to the worktree directory
+	Branch      string    `json:"branch"`       // Branch name associated with this worktree
+	CommitHash  string    `json:"commit_hash"`  // Current HEAD commit hash
+	IsMain      bool      `json:"is_main"`      // Whether this is the main worktree
+	CreatedAt   time.Time `json:"created_at"`   // Worktree directory modification time
+	Repository  string    `json:"repository"`   // Repository slug, e.g. github.com/owner/name
+	SessionName string    `json:"session_name"` // Computed tmux workspace session name
 }
 
 // Branch represents a Git branch with its metadata.
@@ -89,10 +91,10 @@ type RepositorySetting struct {
 // Project records a repository kwt has touched so cross-project commands can
 // discover its worktrees even when they live outside the global base directory.
 type Project struct {
-	Repository  string `mapstructure:"repository" toml:"repository"`     // Stable repository identifier, usually host/owner/name
-	Name        string `mapstructure:"name" toml:"name"`                 // Human-friendly display name
-	Path        string `mapstructure:"path" toml:"path"`                 // Main repository root path
-	LastTouched string `mapstructure:"last_touched" toml:"last_touched"` // RFC3339 UTC timestamp
+	Repository  string `mapstructure:"repository" toml:"repository" json:"repository"`       // Stable repository identifier, usually host/owner/name
+	Name        string `mapstructure:"name" toml:"name" json:"name"`                         // Human-friendly display name
+	Path        string `mapstructure:"path" toml:"path" json:"path"`                         // Main repository root path
+	LastTouched string `mapstructure:"last_touched" toml:"last_touched" json:"last_touched"` // RFC3339 UTC timestamp
 }
 
 // Workspace records a plain directory kwt can open as a tmux workspace,

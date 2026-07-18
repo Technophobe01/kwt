@@ -29,15 +29,66 @@ func BlankLayout() models.Layout {
 	return models.Layout{Name: BlankLayoutName, Panes: []string{""}}
 }
 
-// BuildConstructionSequence returns the ordered, index-free tmux invocations
-// that create and arrange the panes for a layout with N panes. Single-pane
-// layouts emit no select-layout call. The new-session and split-window
-// commands each print the new pane's stable ID (via -P -F '#{pane_id}'),
-// which the runner captures to target panes by ID. It performs no I/O.
-func BuildConstructionSequence(session, worktreeDir string, layout models.Layout) [][]string {
-	seq := [][]string{
-		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-c", worktreeDir},
-	}
+// BuildSessionCreateCommand returns the new-session invocation that creates the
+// session and its first pane. It prints the pane's stable ID (via -P -F
+// '#{pane_id}'), which the runner captures to target the pane by ID. The pane
+// runs the inert placeholder, NOT the login-shell bootstrap: it necessarily
+// spawns before the session bootstrap's remove-markers can exist, and a login
+// shell started here would source the user's profile scripts under the
+// launcher-polluted environment only to be killed and re-sourced by the
+// post-bootstrap respawn (see FirstPanePlaceholderArgv and
+// BuildFirstPaneRespawnCommand). The placeholder's words are appended as
+// separate arguments so tmux execs it directly instead of wrapping it in
+// `$SHELL -c`, which would fire user startup hooks (zsh .zshenv, bash
+// $BASH_ENV) pre-markers. tmux sets TERM_PROGRAM/TERM_PROGRAM_VERSION
+// itself in every pane, so kwt does not inject them. It performs no I/O.
+//
+// It is deliberately separate from BuildRemainingPaneSequence so the runner
+// can apply the session bootstrap (default-command + remove-markers) after the
+// first pane exists but before the remaining panes are spawned: the strips
+// must be in place before split-window creates any further pane, or those
+// panes inherit a dirty server-global environment table.
+func BuildSessionCreateCommand(session, worktreeDir string) []string {
+	return append([]string{
+		"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-c", worktreeDir,
+	}, FirstPanePlaceholderArgv()...)
+}
+
+// BuildFirstPaneRespawnCommand returns the respawn-pane invocation that
+// replaces the first pane's inert placeholder with the real login shell after
+// the session bootstrap has applied. The first pane necessarily spawns before
+// the session exists to carry remove-markers (new-session creates both at
+// once), when the server-global environment table still holds launcher state —
+// the launcher's EDITOR/VISUAL on a server kwt just started (kept there for
+// tmux's server-start key-mode detection; see serverStartExclusions), or the
+// whole dirty table of a pre-existing server — so it starts as the
+// FirstPanePlaceholderArgv sleep and the login shell first spawns here, from the
+// same stripped session environment as every later pane, its profile scripts
+// sourced exactly once. -k kills the placeholder (an inert sleep; nothing has
+// been sent to the pane), -c re-anchors the worktree directory, and the pane
+// ID is stable across respawn, so the captured ID remains valid for the
+// pane-command sequence. The explicit shell argv is load-bearing:
+// respawn-pane without a command re-runs the pane's original command — the
+// placeholder — not the session's default-command. Separate argv words
+// (shell, then -l) make tmux execute the configured shell directly as a login
+// shell instead of wrapping a command string in default-shell -c: non-POSIX
+// shells such as fish and tcsh never have to interpret POSIX parameter
+// expansion, and startup hooks from an extra non-login shell do not run. It
+// performs no I/O.
+func BuildFirstPaneRespawnCommand(paneID, worktreeDir, shell string) []string {
+	return []string{"respawn-pane", "-k", "-c", worktreeDir, "-t", paneID, shell, "-l"}
+}
+
+// BuildRemainingPaneSequence returns the tmux invocations that create the
+// panes after the first (one split-window per extra pane) and arrange them
+// (select-layout, emitted only for multi-pane layouts). Each split-window
+// prints the new pane's stable ID; select-layout prints nothing. Every pane
+// runs the login-shell bootstrap. The runner issues this sequence only after
+// BuildSessionCreateCommand and the session bootstrap have run, so the panes
+// created here start from an already-stripped session environment. It performs
+// no I/O.
+func BuildRemainingPaneSequence(session, worktreeDir string, layout models.Layout) [][]string {
+	seq := make([][]string, 0, len(layout.Panes))
 	for i := 1; i < len(layout.Panes); i++ {
 		seq = append(seq,
 			[]string{"split-window", "-P", "-F", "#{pane_id}", "-t", session, "-c", worktreeDir})

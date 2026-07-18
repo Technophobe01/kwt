@@ -96,20 +96,15 @@ func CreateGlobalFinder(cfg *models.Config) *finder.Finder {
 
 // DiscoverGlobalWorktrees discovers global worktrees when -g flag is used.
 func (ctx *CommandContext) DiscoverGlobalWorktrees() ([]*models.Worktree, error) {
-	entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir)
+	entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir, ctx.Config.Projects)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert GlobalWorktreeEntry to models.Worktree
-	var worktrees []*models.Worktree
+	worktrees := make([]*models.Worktree, 0, len(entries))
 	for _, entry := range entries {
-		worktrees = append(worktrees, &models.Worktree{
-			Path:       entry.Path,
-			Branch:     entry.Branch,
-			CommitHash: entry.CommitHash,
-			IsMain:     entry.IsMain,
-		})
+		model := entry.Model()
+		worktrees = append(worktrees, &model)
 	}
 
 	return worktrees, nil

@@ -214,6 +214,16 @@ func TestStorePutIdentityErrorDoesNotEchoSubmittedValue(t *testing.T) {
 		"validation errors travel back in HTTP responses and must not echo credentials")
 }
 
+func TestStorePutAcceptsCanonicalIdentityWithExplicitPort(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	identity := "github.com:2222/kenn-io/kwt"
+	manifest := testManifest("host-a", "Host-A", "darwin/arm64", identity, "branch", "feature/fleet", "aaa")
+
+	err := store.Put(context.Background(), manifest)
+
+	require.NoError(t, err)
+}
+
 func TestStoreStateVersionDeterministicRegardlessOfWriteOrder(t *testing.T) {
 	ctx := context.Background()
 	first := testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "aaa")

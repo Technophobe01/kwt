@@ -126,7 +126,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 }
 
 func getGlobalWorktreePath(cfg *models.Config, args []string) error {
-	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir)
+	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir, cfg.Projects)
 	if err != nil {
 		return err
 	}

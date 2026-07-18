@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -55,10 +56,15 @@ func newTUIBackend(cfg *models.Config) *tuiBackend {
 func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBackend {
 	tmuxCmd := tmux.NewTmuxCommand("")
 	return &tuiBackend{
-		cfg:                      cfg,
-		tmux:                     tmuxCmd,
-		launchDir:                launchDir,
-		discoverGlobalWorktrees:  discovery.DiscoverGlobalWorktrees,
+		cfg:       cfg,
+		tmux:      tmuxCmd,
+		launchDir: launchDir,
+		// Registered projects flow into base-dir discovery so a registered
+		// canonical identity wins over a fork origin (the same precedence
+		// applyProjectIdentityFallback applies to per-project discovery).
+		discoverGlobalWorktrees: func(baseDir string) ([]*discovery.GlobalWorktreeEntry, error) {
+			return discovery.DiscoverGlobalWorktrees(baseDir, cfg.Projects)
+		},
 		discoverProjectWorktrees: discoverLaunchRepoWorktrees,
 		discoverLaunchWorktrees:  discoverLaunchRepoWorktrees,
 		collectStatuses:          collectTUIStatuses,
@@ -279,8 +285,10 @@ func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEn
 	if !ok {
 		return
 	}
-	if existing, found := b.projectByPath(project.Path); found && shouldReuseExistingProject(existing, project) {
-		project = existing
+	if existing, found := b.projectByPath(project.Path); found {
+		if reusable, ok := reusableExistingProject(existing, project); ok {
+			project = reusable
+		}
 	}
 	if err := b.registerProject(project); err != nil {
 		return
@@ -378,6 +386,7 @@ func (b *tuiBackend) projectByPath(projectPath string) (models.Project, bool) {
 
 func projectFromEntries(entries []*discovery.GlobalWorktreeEntry, fallbackPath string) (models.Project, bool) {
 	var info *url.RepositoryInfo
+	remoteURL := ""
 	projectPath := fallbackPath
 	for _, entry := range entries {
 		if entry == nil {
@@ -385,12 +394,17 @@ func projectFromEntries(entries []*discovery.GlobalWorktreeEntry, fallbackPath s
 		}
 		if info == nil && entry.RepositoryInfo != nil {
 			info = entry.RepositoryInfo
+			remoteURL = entry.RepositoryURL
 		}
 		if entry.IsMain && entry.Path != "" {
 			projectPath = entry.Path
 		}
 	}
 	if info == nil || projectPath == "" {
+		return models.Project{}, false
+	}
+	info, ok := registrableProjectIdentity(info, remoteURL, projectPath)
+	if !ok {
 		return models.Project{}, false
 	}
 	repository := info.FullPath
@@ -402,6 +416,31 @@ func projectFromEntries(entries []*discovery.GlobalWorktreeEntry, fallbackPath s
 		Name:       info.Repository,
 		Path:       projectPath,
 	}, true
+}
+
+// registrableProjectIdentity gates a git-derived identity behind the
+// remote-provenance canonical bar before it is persisted as
+// project.Repository. Stored registry identities ride the relaxed CONFIGURED
+// bar (url.CanonicalRepositoryIdentity) on every later manifest build, so
+// persisting raw origin-derived output would launder a relative dotless
+// remote ("cache/team/repo.git" — a machine-local filesystem path git happily
+// serves) into a publishable "cache/team/repo" fleet identity. When the
+// remote bar rejects the origin, the canonical local-path fallback is
+// persisted instead; entries without a remote URL already carry it.
+func registrableProjectIdentity(
+	info *url.RepositoryInfo, remoteURL, projectPath string,
+) (*url.RepositoryInfo, bool) {
+	if strings.TrimSpace(remoteURL) == "" {
+		return info, true
+	}
+	if _, ok := url.CanonicalRepositoryIdentityFromRemote(remoteURL); ok {
+		return info, true
+	}
+	localInfo, err := worktree.RepositoryInfoFromLocalPath(projectPath)
+	if err != nil {
+		return nil, false
+	}
+	return localInfo, true
 }
 
 func (b *tuiBackend) upsertProject(project models.Project) {
@@ -429,27 +468,23 @@ func sameRegisteredProject(a, b models.Project) bool {
 	return false
 }
 
-func shouldReuseExistingProject(existing, discovered models.Project) bool {
+func reusableExistingProject(existing, discovered models.Project) (models.Project, bool) {
 	// A publish-canonical identity is authoritative: manifest publishing
 	// prefers project.Repository over origin, so launch registration must
 	// not replace it with an origin-derived identity (e.g. a fork remote).
 	// Weaker identities (path-like, local/...) never reach the hub, so an
 	// origin-derived identity may upgrade them — but a path fallback must
 	// not downgrade a stable one.
-	if hasPublishableProjectIdentity(existing) {
-		return true
+	if info, ok := url.CanonicalRepositoryInfo(existing.Repository); ok {
+		existing.Repository = info.FullPath
+		return existing, true
 	}
-	return hasStableProjectIdentity(existing) && !hasStableProjectIdentity(discovered)
-}
-
-func hasPublishableProjectIdentity(project models.Project) bool {
-	_, ok := fleet.CanonicalRepositoryIdentity(project.Repository)
-	return ok
+	return existing, hasStableProjectIdentity(existing) && !hasStableProjectIdentity(discovered)
 }
 
 func hasStableProjectIdentity(project models.Project) bool {
 	repository := strings.TrimSpace(project.Repository)
-	return repository != "" && !isAbsoluteSlashPath(repository)
+	return repository != "" && !url.IsPathFallbackIdentity(repository)
 }
 
 func discoverLaunchRepoWorktrees(launchDir string) ([]*discovery.GlobalWorktreeEntry, error) {
@@ -470,8 +505,11 @@ func discoverLaunchRepoWorktrees(launchDir string) ([]*discovery.GlobalWorktreeE
 	repoURL := ""
 	repoInfo := repositoryInfoFromRootPath(rootPath)
 	if gotURL, err := g.GetRepositoryURL(); err == nil {
-		if parsedInfo, parseErr := url.ParseRepositoryURL(gotURL); parseErr == nil {
-			repoURL = gotURL
+		repoURL = gotURL
+		// The remote-derived bar keeps a relative dotless filesystem remote
+		// from surfacing as an identity; barred remotes keep the local/...
+		// fallback.
+		if parsedInfo, ok := url.CanonicalRepositoryInfoFromRemote(gotURL); ok {
 			repoInfo = parsedInfo
 		}
 	}
@@ -504,23 +542,33 @@ func applyProjectIdentityFallback(
 	// configured identity overrides a fork origin, while path-like or
 	// local/... identities never reach the hub and must not displace the
 	// origin-derived identity that does.
-	override := hasPublishableProjectIdentity(project)
+	configuredInfo, override := url.CanonicalRepositoryInfo(project.Repository)
 	for _, entry := range entries {
 		if entry == nil {
 			continue
 		}
-		if entry.RepositoryURL != "" && !override {
-			continue
+		if override {
+			entry.RepositoryInfo = configuredInfo
+		} else if entry.RepositoryURL == "" {
+			entry.RepositoryInfo = info
 		}
-		entry.RepositoryInfo = info
 	}
 	return entries
 }
 
 func repositoryInfoFromProject(project models.Project) *url.RepositoryInfo {
 	repository := strings.TrimSpace(project.Repository)
-	if repository != "" {
-		if info, err := url.ParseRepositoryURL(repository); err == nil {
+	// Path fallbacks are not URLs: parsing a canonical "local/..." identity
+	// or retaining a legacy absolute identity produces a different
+	// WorkspaceSessionName than the canonical local-path resolver. Reconstruct
+	// every path fallback through the same resolver instead.
+	if repository != "" && url.IsPathFallbackIdentity(repository) && project.Path != "" {
+		if info, err := worktree.RepositoryInfoFromLocalPath(project.Path); err == nil {
+			return info
+		}
+	}
+	if repository != "" && !url.IsPathFallbackIdentity(repository) {
+		if info, ok := url.CanonicalRepositoryInfo(repository); ok {
 			return info
 		}
 	}
@@ -542,26 +590,16 @@ func repositoryInfoFromProject(project models.Project) *url.RepositoryInfo {
 	}
 }
 
+// repositoryInfoFromRootPath builds the local fallback identity for a
+// registered project's root path. It delegates to the single canonical
+// resolver so a no-remote project gets the same "local/..." identity that kwt
+// list and kwt list -g discovery report, keeping the JSON surfaces joinable.
 func repositoryInfoFromRootPath(rootPath string) *url.RepositoryInfo {
-	rootPath = strings.TrimSpace(rootPath)
-	if rootPath == "" {
+	info, err := worktree.RepositoryInfoFromLocalPath(rootPath)
+	if err != nil {
 		return nil
 	}
-	cleanPath := rootPath
-	if absPath, err := filepath.Abs(cleanPath); err == nil {
-		cleanPath = absPath
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(cleanPath); err == nil {
-		cleanPath = resolvedPath
-	}
-	name := filepath.Base(cleanPath)
-	if name == "" || name == "." || name == string(filepath.Separator) {
-		name = filepath.ToSlash(cleanPath)
-	}
-	return &url.RepositoryInfo{
-		Repository: name,
-		FullPath:   filepath.ToSlash(cleanPath),
-	}
+	return info
 }
 
 func mergeTUIEntries(
@@ -616,7 +654,7 @@ func usesPathFallbackIdentity(entry *discovery.GlobalWorktreeEntry) bool {
 	if entry == nil || entry.RepositoryURL != "" || entry.RepositoryInfo == nil {
 		return false
 	}
-	return isAbsoluteSlashPath(entry.RepositoryInfo.FullPath)
+	return url.IsPathFallbackIdentity(entry.RepositoryInfo.FullPath)
 }
 
 func hasStableNonPathIdentity(entry *discovery.GlobalWorktreeEntry) bool {
@@ -624,32 +662,10 @@ func hasStableNonPathIdentity(entry *discovery.GlobalWorktreeEntry) bool {
 		return false
 	}
 	info := entry.RepositoryInfo
-	if info.FullPath != "" && !isAbsoluteSlashPath(info.FullPath) {
+	if info.FullPath != "" && !url.IsPathFallbackIdentity(info.FullPath) {
 		return true
 	}
 	return info.Host != "" && info.Repository != ""
-}
-
-func isAbsoluteSlashPath(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false
-	}
-	if filepath.IsAbs(filepath.FromSlash(value)) {
-		return true
-	}
-	slashPath := strings.ReplaceAll(value, `\`, "/")
-	// Treat leading-slash paths as absolute fallbacks even when running on
-	// Windows, where filepath.IsAbs("\\path") is false without a drive.
-	return strings.HasPrefix(slashPath, "/") || isWindowsDriveAbsolutePath(slashPath)
-}
-
-func isWindowsDriveAbsolutePath(value string) bool {
-	if len(value) < 3 || value[1] != ':' || value[2] != '/' {
-		return false
-	}
-	drive := value[0]
-	return (drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')
 }
 
 func collectTUIStatuses(
@@ -1186,14 +1202,7 @@ func samePath(a string, b string) bool {
 }
 
 func cleanComparablePath(path string) string {
-	cleaned := filepath.Clean(path)
-	if abs, err := filepath.Abs(cleaned); err == nil {
-		cleaned = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		cleaned = resolved
-	}
-	return cleaned
+	return utils.CanonicalPath(path)
 }
 
 func (b *tuiBackend) KillSession(row dashboard.Row) error {
@@ -1238,7 +1247,9 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 	if err != nil {
 		return err
 	}
-	return tmux.NewWorkspaceRunner(b.tmux).EnsureAndAttach(ctx, sessionName, rowPaneRoot(row), layout, insideTmux)
+	return tmux.NewWorkspaceRunner(b.tmux).EnsureAndAttach(
+		ctx, sessionName, rowPaneRoot(row), layout, insideTmux,
+	)
 }
 
 func rowPaneRoot(row dashboard.Row) string {

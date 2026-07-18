@@ -221,3 +221,30 @@ func TestProcessor_GeneratePath_BranchOnlySanitization(t *testing.T) {
 		t.Errorf("GeneratePath() = %s, want %s", result, expected)
 	}
 }
+
+func TestProcessorGeneratePathEncodesRepositoryAuthority(t *testing.T) {
+	processor, err := New("{{.FullPath}}/{{.Host}}/{{.Branch}}", nil)
+	if err != nil {
+		t.Fatalf("New() unexpected error: %v", err)
+	}
+	repoInfo := &url.RepositoryInfo{
+		Host:       "[2001:db8::1]:2222",
+		Owner:      "org",
+		Repository: "repo",
+		FullPath:   "[2001:db8::1]:2222/org/repo",
+	}
+
+	got, err := processor.GeneratePath("/tmp/worktrees", repoInfo, "main")
+	if err != nil {
+		t.Fatalf("GeneratePath() unexpected error: %v", err)
+	}
+	want := filepath.Join(
+		"/tmp/worktrees",
+		"%5B2001%3Adb8%3A%3A1%5D%3A2222/org/repo",
+		"%5B2001%3Adb8%3A%3A1%5D%3A2222",
+		"main",
+	)
+	if got != want {
+		t.Fatalf("GeneratePath() = %q, want %q", got, want)
+	}
+}

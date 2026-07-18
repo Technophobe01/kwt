@@ -15,6 +15,8 @@ import (
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/status"
+	"go.kenn.io/kwt/internal/utils"
+	repositoryurl "go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -22,16 +24,20 @@ import (
 type ManifestBuilderOptions struct {
 	Now                     func() time.Time
 	Hostname                func() (string, error)
-	DiscoverGlobalWorktrees func(baseDir string) ([]*discovery.GlobalWorktreeEntry, error)
-	ListProjectWorktrees    func(ctx context.Context, project models.Project) ([]models.Worktree, error)
+	DiscoverGlobalWorktrees func(
+		baseDir string, projects []models.Project,
+	) ([]*discovery.GlobalWorktreeEntry, error)
+	ListProjectWorktrees func(ctx context.Context, project models.Project) ([]models.Worktree, error)
 }
 
 // ManifestBuilder builds local advisory fleet manifests.
 type ManifestBuilder struct {
 	now                     func() time.Time
 	hostname                func() (string, error)
-	discoverGlobalWorktrees func(baseDir string) ([]*discovery.GlobalWorktreeEntry, error)
-	listProjectWorktrees    func(ctx context.Context, project models.Project) ([]models.Worktree, error)
+	discoverGlobalWorktrees func(
+		baseDir string, projects []models.Project,
+	) ([]*discovery.GlobalWorktreeEntry, error)
+	listProjectWorktrees func(ctx context.Context, project models.Project) ([]models.Worktree, error)
 }
 
 // NewManifestBuilder creates a manifest builder with optional dependency hooks.
@@ -181,8 +187,9 @@ func (b *ManifestBuilder) addConfiguredProject(
 		return err
 	}
 
-	remoteURL := remoteURLForPath(projectPath)
-	identity, ok := configuredProjectIdentity(project.Repository, remoteURL)
+	identity, ok := configuredProjectIdentity(project.Repository, func() string {
+		return remoteURLForPath(projectPath)
+	})
 	if !ok {
 		return nil
 	}
@@ -216,7 +223,7 @@ func (b *ManifestBuilder) addGlobalWorktrees(
 		return nil
 	}
 
-	entries, err := b.discoverGlobalWorktrees(baseDir)
+	entries, err := b.discoverGlobalWorktrees(baseDir, cfg.Projects)
 	if err != nil {
 		return fmt.Errorf("discover global worktrees: %w", err)
 	}
@@ -403,80 +410,24 @@ func collectChangeStatus(ctx context.Context, cfg *models.Config, worktree model
 	}, statuses[0].LastActivity, nil
 }
 
-func configuredProjectIdentity(configuredRepository, remoteURL string) (string, bool) {
-	configuredRepository = strings.TrimSpace(configuredRepository)
-	if configuredRepository != "" {
-		identity, ok := normalizeFleetRepositoryIdentity(configuredRepository)
-		if ok {
-			return identity, true
-		}
+// configuredProjectIdentity resolves a publishable identity: a configured
+// registry identity that passes the canonical bar is authoritative, otherwise
+// the remote must pass the provenance-aware remote bar. remoteURL is a
+// thunk so callers whose remote costs a git subprocess only pay it when the
+// stored identity does not already qualify.
+func configuredProjectIdentity(configuredRepository string, remoteURL func() string) (string, bool) {
+	if identity, ok := repositoryurl.CanonicalRepositoryIdentity(configuredRepository); ok {
+		return identity, true
 	}
-	if strings.TrimSpace(remoteURL) == "" {
-		return "", false
-	}
-	identity, ok := normalizeFleetRepositoryIdentity(remoteURL)
-	if !ok {
-		return "", false
-	}
-	return identity, true
+	return repositoryurl.CanonicalRepositoryIdentityFromRemote(remoteURL())
 }
 
 func globalProjectIdentity(entry *discovery.GlobalWorktreeEntry) (string, bool) {
-	if strings.TrimSpace(entry.RepositoryURL) == "" {
-		return "", false
+	configured := ""
+	if entry.RepositoryInfo != nil {
+		configured = entry.RepositoryInfo.FullPath
 	}
-	return normalizeFleetRepositoryIdentity(entry.RepositoryURL)
-}
-
-func normalizeFleetRepositoryIdentity(raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if !isFleetRepositoryIdentityCandidate(raw) {
-		return "", false
-	}
-	identity, err := NormalizeRepositoryIdentity(raw)
-	if err != nil {
-		return "", false
-	}
-	return identity, true
-}
-
-func isFleetRepositoryIdentityCandidate(raw string) bool {
-	if raw == "" {
-		return false
-	}
-	if filepath.IsAbs(raw) || strings.HasPrefix(raw, ".") || strings.HasPrefix(raw, "~") {
-		return false
-	}
-	if strings.Contains(raw, `\`) || looksLikeWindowsDrivePath(raw) {
-		return false
-	}
-	if strings.Contains(raw, "://") {
-		scheme, _, _ := strings.Cut(raw, "://")
-		return isNetworkGitURLScheme(scheme)
-	}
-	if strings.Contains(raw, ":") {
-		return true
-	}
-
-	firstSegment, _, _ := strings.Cut(raw, "/")
-	return strings.Contains(firstSegment, ".")
-}
-
-func isNetworkGitURLScheme(scheme string) bool {
-	switch strings.ToLower(scheme) {
-	case "git", "git+ssh", "http", "https", "ssh":
-		return true
-	default:
-		return false
-	}
-}
-
-func looksLikeWindowsDrivePath(raw string) bool {
-	if len(raw) < 3 || raw[1] != ':' {
-		return false
-	}
-	drive := raw[0]
-	return ((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) && (raw[2] == '/' || raw[2] == '\\')
+	return configuredProjectIdentity(configured, func() string { return entry.RepositoryURL })
 }
 
 func projectDisplayName(configuredName, identity, projectPath string) string {
@@ -548,13 +499,7 @@ func hasSeenPath(seen map[string]struct{}, path string) bool {
 }
 
 func canonicalPathKey(path string) string {
-	if absPath, err := filepath.Abs(path); err == nil {
-		path = absPath
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolvedPath
-	}
-	return filepath.Clean(path)
+	return utils.CanonicalPath(path)
 }
 
 func remoteURLForPath(path string) string {

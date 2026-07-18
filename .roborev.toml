@@ -15,4 +15,19 @@ Threat model for multi-machine sync (fleet):
   published to the hub, persisted in hub state, or echoed in fleet state.
 - Plaintext HTTP to the hub is only acceptable for loopback addresses;
   multi-machine hubs require HTTPS.
+
+Threat model for local execution:
+
+- kwt is a local developer CLI run by the machine's owner. The user's own
+  execution environment — PATH, SHELL, shell profiles and rc files, tmux
+  configuration, and environment variables — is trusted input. Do not
+  flag attacks that presuppose a hostile or misconfigured local
+  environment: relative PATH components (".", "bin") causing
+  working-directory-relative binary resolution, malicious binaries
+  already on PATH, or hostile shell aliases/profile hooks. Any such
+  precondition already grants arbitrary code execution through git, make,
+  or the shell itself, independent of anything kwt does.
+- Repository *contents* remain untrusted for machine-level configuration
+  (the `.kwt.toml` rule above), but command resolution through the
+  user's PATH is the user's domain, not the repository's.
 """

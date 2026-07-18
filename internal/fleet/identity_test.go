@@ -39,6 +39,7 @@ func TestNormalizeRepositoryIdentity(t *testing.T) {
 		"https://github.com/kenn-io/kwt":     "github.com/kenn-io/kwt",
 		"https://github.com/kenn-io/kwt.git": "github.com/kenn-io/kwt",
 		"https://github.com/fork/kwt.git":    "github.com/fork/kwt",
+		"github.com:2222/kenn-io/kwt":        "github.com:2222/kenn-io/kwt",
 	}
 	for input, want := range tests {
 		got, err := NormalizeRepositoryIdentity(input)
@@ -71,17 +72,5 @@ func TestNormalizeRepositoryIdentityDropsURLCredentials(t *testing.T) {
 
 		require.NoError(t, err, raw)
 		assert.Equal(t, "github.com/org/repo", identity, raw)
-	}
-}
-
-func TestCanonicalRepositoryIdentityRejectsCredentialBearingRemotes(t *testing.T) {
-	for _, raw := range []string{
-		"user:token@github.com:org/repo.git",
-		"ssh://user:token@github.com/org/repo.git",
-	} {
-		identity, ok := CanonicalRepositoryIdentity(raw)
-
-		assert.False(t, ok, raw)
-		assert.NotContains(t, identity, "token", raw)
 	}
 }

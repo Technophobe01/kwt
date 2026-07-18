@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,10 +36,35 @@ type mockWorkspaceTmux struct {
 	runCalls          int
 	killSessionCalled bool
 	killedSession     string
+	defaultShell      string
+	globalEnv         string
+	globalEnvErr      error
+	sessionEnv        string
+	sessionEnvErr     error
+	sessionEnvQueried bool
 }
 
 func (m *mockWorkspaceTmux) HasSession(string) bool {
 	return m.hasSession
+}
+
+func (m *mockWorkspaceTmux) GlobalEnvironment() (string, error) {
+	return m.globalEnv, m.globalEnvErr
+}
+
+func (m *mockWorkspaceTmux) SessionEnvironment(string) (string, error) {
+	m.sessionEnvQueried = true
+	return m.sessionEnv, m.sessionEnvErr
+}
+
+// expectedBootstrapCommand derives the bootstrap invocation a test should
+// expect: the canonical exact names plus the launcher-derived names from the
+// test process's own environment, plus any names the mock's server/session
+// tables contribute. It mirrors sessionStripNames deliberately so the
+// sequencing assertions stay valid in any test environment.
+func expectedBootstrapCommand(session string, tableDerived ...[]string) []string {
+	sets := append([][]string{CanonicalStripExactNames(), StripEnvNames(os.Environ())}, tableDerived...)
+	return BuildSessionBootstrapCommand(session, MergeStripNames(sets...))
 }
 
 func (m *mockWorkspaceTmux) RunCommandContext(_ context.Context, args ...string) error {
@@ -60,6 +86,12 @@ func (m *mockWorkspaceTmux) RunCommandOutputContext(
 	}
 	if m.failOutputOnCall != 0 && m.outputCalls == m.failOutputOnCall {
 		return "", fmt.Errorf("boom on call %d", m.outputCalls)
+	}
+	if len(args) > 0 && args[0] == "show-options" {
+		if m.defaultShell != "" {
+			return m.defaultShell + "\n", nil
+		}
+		return "/bin/sh\n", nil
 	}
 	m.paneSeq++
 	return fmt.Sprintf("%%%d\n", m.paneSeq), nil
@@ -95,8 +127,19 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 	err := r.EnsureAndAttach(context.Background(), "s", "/wt", layout, false)
 	require.NoError(t, err)
 
+	// The session bootstrap (one batched set-option + remove-marker command)
+	// runs after the first pane but before the split-windows, so the strips
+	// are in place before any further pane spawns. The first pane spawns as
+	// the inert placeholder (a login shell there would run profile scripts
+	// under the dirty environment and then again after the respawn) and is
+	// respawned into the real login shell — explicitly, since respawn-pane
+	// without a command would re-run the placeholder — only once the strips
+	// exist.
 	want := [][]string{
-		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt"},
+		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt", "sleep", "2147483647"},
+		expectedBootstrapCommand("s"),
+		{"show-options", "-v", "-t", "s", "default-shell"},
+		{"respawn-pane", "-k", "-c", "/wt", "-t", "%1", "/bin/sh", "-l"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
 		{"select-layout", "-t", "s", "even-horizontal"},
@@ -109,19 +152,72 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 	assert.Equal(t, want, m.calls)
 	assert.Equal(t, "s", m.attachedTo)
 	assert.Empty(t, m.switchedTo)
+	assert.False(t, m.sessionEnvQueried,
+		"the create path must not query the session table of a session that does not exist yet")
 }
 
-func TestEnsureAndAttachReusesExistingSessionWithoutConstructing(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: true}
+func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
+	m := &mockWorkspaceTmux{hasSession: false, defaultShell: "/opt/homebrew/bin/fish"}
+	r := NewWorkspaceRunner(m)
+
+	err := r.EnsureAndAttach(
+		context.Background(), "workspace", "/wt",
+		models.Layout{Arrange: "tiled", Panes: []string{""}}, false,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, m.calls,
+		[]string{"show-options", "-v", "-t", "workspace", "default-shell"},
+		"the first pane must use the target session's effective shell")
+}
+
+// TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing pins
+// the forward-repair path: an already-existing session (e.g. one an external
+// tool created bare with new-session) must have the safe bootstrap subset
+// re-applied — default-command plus the remove-markers, including names read
+// from the server-global and session-local environment tables — but no
+// construction or pane commands, so future windows behave consistently
+// without disturbing the running session.
+func TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession: true,
+		globalEnv:  "STARSHIP_SESSION_KEY=abc\nHOME=/home/u",
+		sessionEnv: "VSCODE_GIT_IPC_HANDLE=/tmp/ipc\nPATH=/bin",
+	}
 	r := NewWorkspaceRunner(m)
 	layout := models.Layout{Arrange: "tiled", Panes: []string{"codex"}}
 
 	err := r.EnsureAndAttach(context.Background(), "s", "/wt", layout, false)
 	require.NoError(t, err)
 
-	assert.Empty(t, m.calls, "existing session must not be re-created")
+	want := [][]string{
+		expectedBootstrapCommand("s",
+			[]string{"STARSHIP_SESSION_KEY"}, []string{"VSCODE_GIT_IPC_HANDLE"}),
+	}
+	assert.Equal(t, want, m.calls, "existing session must be repaired but not re-created")
+	assert.Equal(t, 0, m.outputCalls, "repair issues no pane-capturing commands")
 	assert.Equal(t, "s", m.attachedTo)
 	assert.Empty(t, m.switchedTo)
+}
+
+// TestEnsureAndAttachRepairSurvivesEnvReadFailures pins the graceful
+// degradation of the strip-name derivation: a show-environment failure on
+// either table drops that source but never fails the attach.
+func TestEnsureAndAttachRepairSurvivesEnvReadFailures(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:    true,
+		globalEnvErr:  errors.New("no server"),
+		sessionEnvErr: errors.New("no session"),
+	}
+	r := NewWorkspaceRunner(m)
+
+	err := r.EnsureAndAttach(context.Background(), "s", "/wt",
+		models.Layout{Arrange: "tiled", Panes: []string{""}}, false)
+	require.NoError(t, err)
+
+	want := [][]string{expectedBootstrapCommand("s")}
+	assert.Equal(t, want, m.calls,
+		"env-table read failures fall back to the launcher and exact sources")
 }
 
 func TestEnsureAndAttachSwitchesClientInsideTmux(t *testing.T) {
@@ -154,7 +250,7 @@ func TestEnsureAndAttachReturnsErrorOnCaptureFailure(t *testing.T) {
 // construction command failing must kill the now-partially-built session so
 // a subsequent EnsureAndAttach rebuilds instead of attaching to it broken.
 func TestEnsureAndAttachKillsPartialSessionOnCreateFailure(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: false, failOutputOnCall: 2}
+	m := &mockWorkspaceTmux{hasSession: false, failOutputOnCall: 3}
 	r := NewWorkspaceRunner(m)
 	layout := models.Layout{Arrange: "even-horizontal", Panes: []string{"codex", "vim"}}
 
@@ -168,14 +264,35 @@ func TestEnsureAndAttachKillsPartialSessionOnCreateFailure(t *testing.T) {
 	assert.Empty(t, m.switchedTo, "must not switch to a killed session")
 }
 
+// TestEnsureAndAttachKillsPartialSessionOnRespawnFailure covers cleanup when
+// the first-pane respawn (RunCommandContext call 2, after the bootstrap's
+// set-option default-command) fails: the session exists by then, so it must be
+// killed rather than left half-built.
+func TestEnsureAndAttachKillsPartialSessionOnRespawnFailure(t *testing.T) {
+	m := &mockWorkspaceTmux{hasSession: false, failRunOnCall: 2}
+	r := NewWorkspaceRunner(m)
+	layout := models.Layout{Arrange: "even-horizontal", Panes: []string{"codex", "vim"}}
+
+	err := r.EnsureAndAttach(context.Background(), "s", "/wt", layout, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "respawn-pane")
+	assert.True(t, m.killSessionCalled, "must kill the partially built session")
+	assert.Equal(t, "s", m.killedSession)
+	assert.Empty(t, m.attachedTo, "must not attach to a killed session")
+	assert.Empty(t, m.switchedTo, "must not switch to a killed session")
+}
+
 // TestEnsureAndAttachKillsPartialSessionOnLayoutFailure covers cleanup when a
-// RunCommandContext call fails at select-layout -- the first such call, which
-// runs after new-session and split-window (both RunCommandOutputContext) have
-// created the session. The RunCommandOutputContext branch is covered by
+// RunCommandContext call fails at select-layout. It is the third
+// RunCommandContext call: call 1 is the bootstrap's set-option default-command
+// (applied right after new-session, before the split-windows), call 2 is the
+// first-pane respawn, and the split-windows are RunCommandOutputContext. The
+// RunCommandOutputContext branch is covered by
 // TestEnsureAndAttachKillsPartialSessionOnCreateFailure, and the
 // BuildPaneCommandSequence branch by the pane-command test below.
 func TestEnsureAndAttachKillsPartialSessionOnLayoutFailure(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: false, failRunOnCall: 1}
+	m := &mockWorkspaceTmux{hasSession: false, failRunOnCall: 3}
 	r := NewWorkspaceRunner(m)
 	layout := models.Layout{Arrange: "even-horizontal", Panes: []string{"codex", "vim"}}
 
@@ -191,9 +308,11 @@ func TestEnsureAndAttachKillsPartialSessionOnLayoutFailure(t *testing.T) {
 
 // TestEnsureAndAttachKillsPartialSessionOnPaneCommandFailure covers the last
 // cleanup branch: a BuildPaneCommandSequence send-keys failing after the panes
-// exist. failRunOnCall 2 targets the first send-keys (call 1 is select-layout).
+// exist and the bootstrap has applied. failRunOnCall 4 targets the first
+// send-keys (call 1 is the bootstrap's set-option default-command, call 2 is
+// the first-pane respawn, call 3 is select-layout).
 func TestEnsureAndAttachKillsPartialSessionOnPaneCommandFailure(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: false, failRunOnCall: 2}
+	m := &mockWorkspaceTmux{hasSession: false, failRunOnCall: 4}
 	r := NewWorkspaceRunner(m)
 	layout := models.Layout{Arrange: "even-horizontal", Panes: []string{"codex", "vim"}}
 

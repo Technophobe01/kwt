@@ -577,6 +577,199 @@ func TestGenerateWorktreePathDefaultTemplatePreservesNestedRemoteNamespace(t *te
 	}
 }
 
+// TestRepositoryInfoFromGitCanonicalResolver pins the single canonical
+// resolver every identity-reporting surface routes through: an origin URL wins,
+// a no-remote repository falls back to the "local/..." identity, and a
+// non-git directory (no URL and no main-repo path) yields an error.
+func TestRepositoryInfoFromGitCanonicalResolver(t *testing.T) {
+	repoPath, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval repo path: %v", err)
+	}
+	localInfo, err := RepositoryInfoFromLocalPath(repoPath)
+	if err != nil {
+		t.Fatalf("building expected local identity: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		git      *mockGit
+		wantFull string
+		wantErr  bool
+	}{
+		{
+			name:     "normal remote",
+			git:      &mockGit{repoURL: "https://github.com/example/demo.git"},
+			wantFull: "github.com/example/demo",
+		},
+		{
+			name:     "no remote falls back to local identity",
+			git:      &mockGit{repoURLError: errors.New("no origin"), repoPath: repoPath},
+			wantFull: localInfo.FullPath,
+		},
+		{
+			// git accepts a relative filesystem path with no leading "./" as a
+			// remote; it must fall back to the local identity, not launder into
+			// a shareable-looking "cache/team/repo" slug (the remote-derived
+			// canonical bar every other provenance-gated surface applies).
+			name:     "relative dotless remote falls back to local identity",
+			git:      &mockGit{repoURL: "cache/team/repo.git", repoPath: repoPath},
+			wantFull: localInfo.FullPath,
+		},
+		{
+			// A dotted directory name does not make a relative path a remote:
+			// git only reads a remote as non-path when it has a URL scheme or
+			// an scp-style colon before the first slash (git-clone(1)).
+			name:     "relative dotted remote falls back to local identity",
+			git:      &mockGit{repoURL: "cache.example/team/repo.git", repoPath: repoPath},
+			wantFull: localInfo.FullPath,
+		},
+		{
+			// git-clone(1): scp-like syntax "is only recognized if there are
+			// no slashes before the first colon", so this is a local path.
+			name:     "colon after slash falls back to local identity",
+			git:      &mockGit{repoURL: "team/na:me/repo", repoPath: repoPath},
+			wantFull: localInfo.FullPath,
+		},
+		{
+			name:     "scp alias remote resolves canonically",
+			git:      &mockGit{repoURL: "workgit:org/repo.git"},
+			wantFull: "workgit/org/repo",
+		},
+		{
+			name:    "non-git dir yields an error",
+			git:     &mockGit{repoURLError: errors.New("no origin"), mainRepoPathError: errors.New("not a git dir")},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := RepositoryInfoFromGit(tt.git)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("RepositoryInfoFromGit() = %+v, want error", info)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RepositoryInfoFromGit() error = %v", err)
+			}
+			if info.FullPath != tt.wantFull {
+				t.Errorf("FullPath = %q, want %q", info.FullPath, tt.wantFull)
+			}
+		})
+	}
+}
+
+// TestRepositoryInfoWithProjects pins the single registered-identity
+// precedence policy: when the repository's main path matches a registered
+// project whose configured Repository is canonical, the registered identity
+// wins over the origin-derived one (a registered upstream identity beats a
+// fork origin); otherwise the canonical resolver's origin-then-local
+// precedence applies unchanged.
+func TestRepositoryInfoWithProjects(t *testing.T) {
+	repoPath, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval repo path: %v", err)
+	}
+	localInfo, err := RepositoryInfoFromLocalPath(repoPath)
+	if err != nil {
+		t.Fatalf("building expected local identity: %v", err)
+	}
+	forkGit := &mockGit{repoURL: "https://github.com/fork/demo.git", repoPath: repoPath}
+
+	tests := []struct {
+		name     string
+		git      *mockGit
+		projects []models.Project
+		wantFull string
+		wantErr  bool
+	}{
+		{
+			name: "registered fork: registered identity wins over origin",
+			git:  forkGit,
+			projects: []models.Project{
+				{Repository: "github.com/upstream/demo", Path: repoPath},
+			},
+			wantFull: "github.com/upstream/demo",
+		},
+		{
+			name:     "unregistered repo: origin-derived",
+			git:      forkGit,
+			projects: nil,
+			wantFull: "github.com/fork/demo",
+		},
+		{
+			name: "registered project at a different path: origin-derived",
+			git:  forkGit,
+			projects: []models.Project{
+				{Repository: "github.com/upstream/demo", Path: filepath.Join(repoPath, "elsewhere")},
+			},
+			wantFull: "github.com/fork/demo",
+		},
+		{
+			name: "registered non-canonical identity: origin-derived",
+			git:  forkGit,
+			projects: []models.Project{
+				{Repository: "local/home/user/demo", Path: repoPath},
+			},
+			wantFull: "github.com/fork/demo",
+		},
+		{
+			name: "configured identity stays authoritative over a barred relative remote",
+			git:  &mockGit{repoURL: "cache/team/repo.git", repoPath: repoPath},
+			projects: []models.Project{
+				{Repository: "cache/team/repo", Path: repoPath},
+			},
+			wantFull: "cache/team/repo",
+		},
+		{
+			name: "configured port-authority identity stays authoritative",
+			git:  &mockGit{repoURL: "localhost:8080/user/repo.git", repoPath: repoPath},
+			projects: []models.Project{
+				{Repository: "localhost:8080/user/repo", Path: repoPath},
+			},
+			wantFull: "localhost:8080/user/repo",
+		},
+		{
+			name:     "no remote, unregistered: local fallback",
+			git:      &mockGit{repoURLError: errors.New("no origin"), repoPath: repoPath},
+			projects: nil,
+			wantFull: localInfo.FullPath,
+		},
+		{
+			name: "no remote, registered canonical: registered identity wins",
+			git:  &mockGit{repoURLError: errors.New("no origin"), repoPath: repoPath},
+			projects: []models.Project{
+				{Repository: "github.com/upstream/demo", Path: repoPath},
+			},
+			wantFull: "github.com/upstream/demo",
+		},
+		{
+			name:    "non-git dir yields an error",
+			git:     &mockGit{repoURLError: errors.New("no origin"), mainRepoPathError: errors.New("not a git dir")},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := RepositoryInfoWithProjects(tt.git, tt.projects)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("RepositoryInfoWithProjects() = %+v, want error", info)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RepositoryInfoWithProjects() error = %v", err)
+			}
+			if info.FullPath != tt.wantFull {
+				t.Errorf("FullPath = %q, want %q", info.FullPath, tt.wantFull)
+			}
+		})
+	}
+}
+
 func TestManagerAddGeneratesPathForLocalOnlyRepository(t *testing.T) {
 	baseDir := t.TempDir()
 	repoPath, err := filepath.EvalSymlinks(t.TempDir())

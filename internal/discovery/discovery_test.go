@@ -6,9 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/worktree"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 // TestRepository creates a test git repository (copy from git package for testing)
@@ -110,7 +114,7 @@ func (r *TestRepository) AddRemote(t *testing.T, name, url string) {
 }
 
 func TestDiscoverGlobalWorktrees_EmptyBaseDir(t *testing.T) {
-	entries, err := DiscoverGlobalWorktrees("")
+	entries, err := DiscoverGlobalWorktrees("", nil)
 	if err == nil {
 		t.Error("Expected error for empty base directory")
 	}
@@ -120,7 +124,7 @@ func TestDiscoverGlobalWorktrees_EmptyBaseDir(t *testing.T) {
 }
 
 func TestDiscoverGlobalWorktrees_NonExistentBaseDir(t *testing.T) {
-	entries, err := DiscoverGlobalWorktrees("/nonexistent/path")
+	entries, err := DiscoverGlobalWorktrees("/nonexistent/path", nil)
 	if err != nil {
 		t.Errorf("Unexpected error for non-existent directory: %v", err)
 	}
@@ -139,7 +143,7 @@ func TestDiscoverGlobalWorktrees_NoWorktrees(t *testing.T) {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
 
-	entries, err := DiscoverGlobalWorktrees(tmpDir)
+	entries, err := DiscoverGlobalWorktrees(tmpDir, nil)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -193,7 +197,7 @@ func TestDiscoverGlobalWorktrees_IncludesMainWorktree(t *testing.T) {
 	repoDir := filepath.Join(baseDir, "github.com", "user", "repo", "main")
 	initRepoAt(t, repoDir, "https://github.com/user/repo.git")
 
-	entries, err := DiscoverGlobalWorktrees(baseDir)
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -215,7 +219,7 @@ func TestDiscoverGlobalWorktrees_IncludesLocalOnlyMainWorktree(t *testing.T) {
 	repoDir := filepath.Join(baseDir, "local", "service")
 	initLocalRepoAt(t, repoDir)
 
-	entries, err := DiscoverGlobalWorktrees(baseDir)
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -236,9 +240,59 @@ func TestDiscoverGlobalWorktrees_IncludesLocalOnlyMainWorktree(t *testing.T) {
 	if entry.RepositoryInfo.Repository != "service" {
 		t.Errorf("Expected fallback repository name service, got %q", entry.RepositoryInfo.Repository)
 	}
-	wantFullPath := filepath.ToSlash(cleanDiscoveryTestPath(repoDir))
-	if entry.RepositoryInfo.FullPath != wantFullPath {
-		t.Errorf("Expected fallback full path %q, got %q", wantFullPath, entry.RepositoryInfo.FullPath)
+	// Discovery routes through the single canonical resolver, so a no-remote
+	// repository gets the same "local/..." identity that kwt list and project
+	// registration report, keeping the JSON surfaces joinable.
+	wantInfo, err := worktree.RepositoryInfoFromLocalPath(repoDir)
+	if err != nil {
+		t.Fatalf("building expected local identity: %v", err)
+	}
+	if entry.RepositoryInfo.FullPath != wantInfo.FullPath {
+		t.Errorf("Expected fallback full path %q, got %q", wantInfo.FullPath, entry.RepositoryInfo.FullPath)
+	}
+}
+
+// TestDiscoverGlobalWorktrees_RegisteredIdentityWinsForForkOrigin pins the
+// registered-identity precedence on the discovery surface: a repository whose
+// origin is a fork but whose main path is registered as a project with a
+// canonical upstream identity reports the REGISTERED identity (matching the
+// registry-backed projects surface and the session names other paths derive),
+// while the raw origin URL is still carried alongside.
+func TestDiscoverGlobalWorktrees_RegisteredIdentityWinsForForkOrigin(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "github.com", "fork", "repo", "main")
+	repo := initRepoAt(t, repoDir, "https://github.com/fork/repo.git")
+
+	repo.CreateBranch(t, "feature")
+	worktreePath := filepath.Join(baseDir, "github.com", "fork", "repo", "feature")
+	repo.CreateWorktree(t, worktreePath, "feature")
+
+	projects := []models.Project{
+		{Repository: "github.com/upstream/repo", Path: repoDir},
+	}
+	entries, err := DiscoverGlobalWorktrees(baseDir, projects)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Expected 2 entries, got %d", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.RepositoryInfo == nil {
+			t.Fatalf("entry %s: missing repository info", entry.Path)
+		}
+		if entry.RepositoryInfo.FullPath != "github.com/upstream/repo" {
+			t.Errorf("entry %s: FullPath = %q, want registered identity github.com/upstream/repo",
+				entry.Path, entry.RepositoryInfo.FullPath)
+		}
+		if entry.RepositoryURL != "https://github.com/fork/repo.git" {
+			t.Errorf("entry %s: RepositoryURL = %q, want raw origin preserved",
+				entry.Path, entry.RepositoryURL)
+		}
+		wantSession := tmux.WorkspaceSessionName(entry.RepositoryInfo, entry.Branch, entry.Path)
+		if got := entry.Model().SessionName; got != wantSession {
+			t.Errorf("entry %s: SessionName = %q, want %q", entry.Path, got, wantSession)
+		}
 	}
 }
 
@@ -256,7 +310,7 @@ func TestDiscoverGlobalWorktrees_MainAndLinkedWorktrees(t *testing.T) {
 	worktreeDir := filepath.Join(baseDir, "github.com", "user", "repo", "feature")
 	repo.CreateWorktree(t, worktreeDir, "feature")
 
-	entries, err := DiscoverGlobalWorktrees(baseDir)
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -289,7 +343,7 @@ func TestDiscoverGlobalWorktrees_DoesNotDescendIntoMainRepo(t *testing.T) {
 
 	// SkipDir on the main repo means nothing inside it (submodules, nested
 	// repos, etc.) is ever visited. Verify only the main worktree is found.
-	entries, err := DiscoverGlobalWorktrees(baseDir)
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -529,16 +583,6 @@ func TestIsSubmoduleGitDir(t *testing.T) {
 	}
 }
 
-func cleanDiscoveryTestPath(path string) string {
-	if absPath, err := filepath.Abs(path); err == nil {
-		path = absPath
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolvedPath
-	}
-	return filepath.Clean(path)
-}
-
 func TestDiscoverGlobalWorktrees_SkipsSubmodules(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -553,13 +597,60 @@ func TestDiscoverGlobalWorktrees_SkipsSubmodules(t *testing.T) {
 		t.Fatalf("Failed to create .git file: %v", err)
 	}
 
-	entries, err := DiscoverGlobalWorktrees(tmpDir)
+	entries, err := DiscoverGlobalWorktrees(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	if len(entries) != 0 {
 		t.Errorf("Expected no entries (submodule should be skipped), got %d", len(entries))
+	}
+}
+
+func TestGlobalWorktreeEntryModelCarriesRepositoryAndCreatedAt(t *testing.T) {
+	created := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	entry := &GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host:       "github.com",
+			Owner:      "wesm",
+			Repository: "kwt",
+			FullPath:   "github.com/wesm/kwt",
+		},
+		Branch:     "feature/foo",
+		Path:       "/wt/github.com/wesm/kwt/feature-foo",
+		CommitHash: "abc123",
+		IsMain:     false,
+		CreatedAt:  created,
+	}
+
+	got := entry.Model()
+
+	if got.Repository != "github.com/wesm/kwt" {
+		t.Errorf("Repository = %q, want github.com/wesm/kwt", got.Repository)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, created)
+	}
+	if got.Path != entry.Path || got.Branch != entry.Branch ||
+		got.CommitHash != entry.CommitHash || got.IsMain != entry.IsMain {
+		t.Errorf("Model() did not copy core fields: %+v", got)
+	}
+}
+
+func TestDiscoverGlobalWorktreesPopulatesCreatedAt(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "github.com", "user", "repo", "main")
+	initRepoAt(t, repoDir, "https://github.com/user/repo.git")
+
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].CreatedAt.IsZero() {
+		t.Errorf("CreatedAt should be populated from directory mtime, got zero")
 	}
 }
 
@@ -587,7 +678,7 @@ func BenchmarkDiscoverGlobalWorktrees(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// This will mostly test the filesystem walking since we don't have full git repos
 		// It will return errors for the mock .git files, but tests the core discovery logic
-		_, _ = DiscoverGlobalWorktrees(baseDir)
+		_, _ = DiscoverGlobalWorktrees(baseDir, nil)
 	}
 }
 
@@ -604,5 +695,29 @@ func BenchmarkFilterGlobalWorktrees(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		FilterGlobalWorktrees(entries, "branch-500")
+	}
+}
+
+func TestGlobalWorktreeEntryModelExposesSessionName(t *testing.T) {
+	info := &url.RepositoryInfo{
+		Host:       "github.com",
+		Owner:      "wesm",
+		Repository: "kwt",
+		FullPath:   "github.com/wesm/kwt",
+	}
+	entry := &GlobalWorktreeEntry{
+		RepositoryInfo: info,
+		Branch:         "feature/foo",
+		Path:           "/wt/github.com/wesm/kwt/feature-foo",
+	}
+
+	got := entry.Model()
+
+	want := tmux.WorkspaceSessionName(info, "feature/foo", "/wt/github.com/wesm/kwt/feature-foo")
+	if got.SessionName != want {
+		t.Errorf("SessionName = %q, want %q", got.SessionName, want)
+	}
+	if got.SessionName == "" {
+		t.Error("SessionName should not be empty for an identified repository")
 	}
 }

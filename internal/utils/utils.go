@@ -92,6 +92,21 @@ func ExpandPath(path string) (string, error) {
 	return path, nil
 }
 
+// CanonicalPath normalizes a filesystem path for identity comparison:
+// absolute, symlink-resolved when the path exists, and cleaned. Two paths that
+// name the same directory compare equal even when one goes through a symlink
+// (e.g. /tmp vs /private/tmp on macOS). Best effort: a path that cannot be
+// resolved is still cleaned and returned.
+func CanonicalPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
+}
+
 // TildePath replaces the home directory portion of a path with ~.
 // If the path doesn't start with the home directory, it returns the original path.
 func TildePath(path string) string {
