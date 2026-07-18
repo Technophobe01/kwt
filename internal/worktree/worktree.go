@@ -252,17 +252,70 @@ func (m *Manager) repositoryInfo() (*url.RepositoryInfo, error) {
 	return RepositoryInfoFromGit(m.git)
 }
 
-// RepositoryInfoFromGit returns repository identity from origin when possible,
-// falling back to a path-safe local identity for repositories without a usable
-// remote.
-func RepositoryInfoFromGit(g GitInterface) (*url.RepositoryInfo, error) {
+// RepoIdentityGit is the minimal git surface RepositoryInfoFromGit needs: the
+// origin URL and the main-repository path. GitInterface satisfies it, and so
+// does *git.Git, so the single canonical resolver serves every surface that
+// reports repository identity (kwt list, kwt list -g discovery, and project
+// registration) rather than each re-deriving a divergent fallback.
+type RepoIdentityGit interface {
+	GetRepositoryURL() (string, error)
+	GetMainRepositoryPath() (string, error)
+}
+
+// CachedIdentityGit memoizes the RepoIdentityGit surface so one identity
+// resolution pass costs at most one `git remote get-url` and one
+// `git rev-parse` subprocess, however many consumers ask. Discovery, for
+// example, records the remote URL on the entry and then resolves identity
+// through the same URL; without the cache each read is a fresh subprocess.
+type CachedIdentityGit struct {
+	g        RepoIdentityGit
+	urlOnce  bool
+	url      string
+	urlErr   error
+	mainOnce bool
+	main     string
+	mainErr  error
+}
+
+// NewCachedIdentityGit wraps g with per-call memoization. Not safe for
+// concurrent use; create one per resolution pass.
+func NewCachedIdentityGit(g RepoIdentityGit) *CachedIdentityGit {
+	return &CachedIdentityGit{g: g}
+}
+
+func (c *CachedIdentityGit) GetRepositoryURL() (string, error) {
+	if !c.urlOnce {
+		c.urlOnce = true
+		c.url, c.urlErr = c.g.GetRepositoryURL()
+	}
+	return c.url, c.urlErr
+}
+
+func (c *CachedIdentityGit) GetMainRepositoryPath() (string, error) {
+	if !c.mainOnce {
+		c.mainOnce = true
+		c.main, c.mainErr = c.g.GetMainRepositoryPath()
+	}
+	return c.main, c.mainErr
+}
+
+// RepositoryInfoFromGit returns repository identity from origin when the
+// origin passes the remote-derived canonical bar
+// (url.CanonicalRepositoryInfoFromRemote), falling back to a path-safe local
+// identity (a "local/..." full path) otherwise. Raw `git remote get-url`
+// output is ambiguous: git accepts a relative filesystem path with no leading
+// "./" ("cache/team/repo.git"), which must not launder into a
+// shareable-looking identity. This is the single canonical resolver; all
+// identity-reporting surfaces route through it so a repository without a
+// usable (barred or missing) remote gets the same identity everywhere.
+func RepositoryInfoFromGit(g RepoIdentityGit) (*url.RepositoryInfo, error) {
 	repoURL, urlErr := g.GetRepositoryURL()
 	if urlErr == nil {
-		if repoInfo, err := url.ParseRepositoryURL(repoURL); err == nil {
+		if repoInfo, ok := url.CanonicalRepositoryInfoFromRemote(repoURL); ok {
 			return repoInfo, nil
-		} else {
-			urlErr = fmt.Errorf("failed to parse repository URL: %w", err)
 		}
+		urlErr = fmt.Errorf(
+			"origin %q does not qualify as a canonical repository identity", repoURL)
 	} else {
 		urlErr = fmt.Errorf("failed to get repository URL: %w", urlErr)
 	}
@@ -271,14 +324,61 @@ func RepositoryInfoFromGit(g GitInterface) (*url.RepositoryInfo, error) {
 	if pathErr != nil {
 		return nil, fmt.Errorf("%v; failed to get repository path for local fallback: %w", urlErr, pathErr)
 	}
-	repoInfo, pathErr := repositoryInfoFromLocalPath(repoRoot)
+	repoInfo, pathErr := RepositoryInfoFromLocalPath(repoRoot)
 	if pathErr != nil {
 		return nil, fmt.Errorf("%v; failed to build local repository identity: %w", urlErr, pathErr)
 	}
 	return repoInfo, nil
 }
 
-func repositoryInfoFromLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
+// RepositoryInfoWithProjects extends the canonical resolver with the single
+// registered-identity precedence policy: when the repository's main path
+// matches a registered project whose configured Repository is canonical, the
+// REGISTERED identity wins, so a checkout whose origin is a fork still
+// reports the project's canonical identity on every surface (list enrichment,
+// global discovery, session-name derivation) and joins with the
+// registry-backed `projects` surface. For unregistered repositories — or a
+// registered project whose identity is not canonical —
+// RepositoryInfoFromGit's origin-then-local precedence applies unchanged.
+func RepositoryInfoWithProjects(
+	g RepoIdentityGit, projects []models.Project,
+) (*url.RepositoryInfo, error) {
+	if info, ok := registeredProjectIdentity(g, projects); ok {
+		return info, nil
+	}
+	return RepositoryInfoFromGit(g)
+}
+
+// registeredProjectIdentity returns the canonical identity pinned by a
+// registered project whose Path is the repository's main path, if any.
+func registeredProjectIdentity(
+	g RepoIdentityGit, projects []models.Project,
+) (*url.RepositoryInfo, bool) {
+	if len(projects) == 0 {
+		return nil, false
+	}
+	mainPath, err := g.GetMainRepositoryPath()
+	if err != nil {
+		return nil, false
+	}
+	mainPath = utils.CanonicalPath(mainPath)
+	for _, project := range projects {
+		if project.Path == "" || utils.CanonicalPath(project.Path) != mainPath {
+			continue
+		}
+		if info, ok := url.CanonicalRepositoryInfo(project.Repository); ok {
+			return info, true
+		}
+	}
+	return nil, false
+}
+
+
+// RepositoryInfoFromLocalPath builds the path-safe local identity ("local/..."
+// full path) for a repository root that has no usable remote. It is the raw-path
+// entry point to the same canonical local fallback RepositoryInfoFromGit uses,
+// for callers that hold a directory path rather than a git surface.
+func RepositoryInfoFromLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
 	repoRoot = strings.TrimSpace(repoRoot)
 	if repoRoot == "" {
 		return nil, fmt.Errorf("empty repository path")

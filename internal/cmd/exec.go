@@ -213,7 +213,7 @@ func getLocalWorktreePathForExec(cfg *models.Config, pattern string) (string, er
 }
 
 func getGlobalWorktreePathForExec(cfg *models.Config, pattern string) (string, error) {
-	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir)
+	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir, cfg.Projects)
 	if err != nil {
 		return "", err
 	}

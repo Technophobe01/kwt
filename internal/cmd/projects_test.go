@@ -1,0 +1,318 @@
+package cmd
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/worktree"
+	"go.kenn.io/kwt/pkg/models"
+)
+
+func withProjectsConfig(t *testing.T, projects []models.Project) {
+	t.Helper()
+	origLoad := loadProjectsConfig
+	t.Cleanup(func() { loadProjectsConfig = origLoad })
+	loadProjectsConfig = func() (*models.Config, error) {
+		return &models.Config{Projects: projects}, nil
+	}
+}
+
+func runProjectsForTest(t *testing.T, jsonOut bool) string {
+	t.Helper()
+	prev := projectsJSON
+	projectsJSON = jsonOut
+	t.Cleanup(func() { projectsJSON = prev })
+
+	buf := &bytes.Buffer{}
+	projectsCmd.SetOut(buf)
+	if err := runProjects(projectsCmd, nil); err != nil {
+		t.Fatalf("runProjects error = %v", err)
+	}
+	return buf.String()
+}
+
+// projectsCmd overrides the root PersistentPreRunE (which merges the caller's
+// cwd .kwt.toml): projects is a global registry surface, and a repository
+// config in the caller's cwd must not be able to prompt for trust or fail the
+// documented --json output.
+func TestProjectsCommandSkipsCwdConfigMerge(t *testing.T) {
+	require.NotNil(t, projectsCmd.PersistentPreRunE,
+		"projects must define its own PersistentPreRunE to bypass root's cwd merge")
+	require.NoError(t, projectsCmd.PersistentPreRunE(projectsCmd, nil),
+		"projects's PersistentPreRunE must be a no-op that never errors")
+}
+
+func TestRunProjectsJSONEmitsRegistry(t *testing.T) {
+	withProjectsConfig(t, []models.Project{
+		{
+			Repository:  "github.com/wesm/kwt",
+			Name:        "kwt",
+			Path:        "/home/wesm/code/kwt",
+			LastTouched: "2026-07-16T00:00:00Z",
+		},
+	})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal JSON output: %v (out=%q)", err, out)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(got))
+	}
+	if got[0].Repository != "github.com/wesm/kwt" || got[0].Name != "kwt" ||
+		got[0].Path != "/home/wesm/code/kwt" || got[0].LastTouched != "2026-07-16T00:00:00Z" {
+		t.Errorf("unexpected project: %+v", got[0])
+	}
+}
+
+// TestRunProjectsJSONCanonicalizesLegacyAbsolutePathIdentity pins the fix for
+// registry entries created before the canonical "local/..." form existed:
+// they retain an absolute-path Repository, which projects --json must not
+// emit verbatim (list --json emits the canonical local/... form for the same
+// no-remote repository, so a raw path would break joins between the two
+// surfaces). Canonicalization happens at emission time only; the registry
+// itself is not mutated.
+func TestRunProjectsJSONCanonicalizesLegacyAbsolutePathIdentity(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	canonical, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+
+	legacy := []models.Project{{
+		Repository:  repoPath,
+		Name:        "service-api",
+		Path:        repoPath,
+		LastTouched: "2026-07-16T00:00:00Z",
+	}}
+	withProjectsConfig(t, legacy)
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, canonical.FullPath, got[0].Repository,
+		"emitted repository must match the canonical local/... resolver output")
+	assert.Equal(t, repoPath, legacy[0].Repository,
+		"emission-time canonicalization must not mutate the registry entry")
+}
+
+// TestRunProjectsResolvesLegacyPathEntryThroughCurrentOrigin pins that a
+// legacy path-registered entry whose repository later gained a remote emits
+// the origin-derived slug, not the local/... path fallback: kwt list --json
+// resolves the same repository through its origin, so emitting the path
+// fallback here would break joins between the two surfaces.
+func TestRunProjectsResolvesLegacyPathEntryThroughCurrentOrigin(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "git@github.com:org/legacy.git")
+
+	listSide, err := worktree.RepositoryInfoFromGit(git.New(repoPath))
+	require.NoError(t, err)
+	require.Equal(t, "github.com/org/legacy", listSide.FullPath)
+
+	withProjectsConfig(t, []models.Project{{
+		Repository: repoPath,
+		Name:       "legacy",
+		Path:       repoPath,
+	}})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, listSide.FullPath, got[0].Repository,
+		"legacy path entry must join with the list --json identity for the same repository")
+}
+
+// TestRunProjectsRelativeDotlessRemoteJoinsListOnLocalIdentity pins the
+// provenance gate on the projects re-resolution path: a legacy noncanonical
+// entry whose repository's origin is a relative dotless filesystem remote
+// ("cache/team/repo.git" — git accepts it with no leading "./") must emit the
+// canonical local/... fallback, not a shareable-looking "cache/team/repo"
+// slug, and must join with the identity kwt list --json derives for the same
+// repository through the shared resolver.
+func TestRunProjectsRelativeDotlessRemoteJoinsListOnLocalIdentity(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "cache/team/repo.git")
+
+	local, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+	listSide, err := worktree.RepositoryInfoFromGit(git.New(repoPath))
+	require.NoError(t, err)
+	require.Equal(t, local.FullPath, listSide.FullPath,
+		"the shared resolver must reject a relative dotless remote and fall back to local identity")
+
+	withProjectsConfig(t, []models.Project{{
+		Repository: repoPath,
+		Name:       "repo",
+		Path:       repoPath,
+	}})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, listSide.FullPath, got[0].Repository,
+		"projects --json must join with list --json on the local fallback identity")
+	assert.NotEqual(t, "cache/team/repo", got[0].Repository)
+}
+
+// TestRunProjectsConfiguredIdentityIsAuthoritative pins the configured-bar
+// policy: a stored identity that passes the canonical bar is emitted as-is,
+// even when the repository's current origin would fail the remote bar. kwt
+// does not second-guess deliberate registry values against remote provenance.
+func TestRunProjectsConfiguredIdentityIsAuthoritative(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "cache/team/repo.git")
+
+	withProjectsConfig(t, []models.Project{{
+		Repository: "cache/team/repo",
+		Name:       "repo",
+		Path:       repoPath,
+	}})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "cache/team/repo", got[0].Repository)
+}
+
+// TestRunProjectsJSONLeavesCanonicalSlugUntouched confirms an
+// already-canonical host/owner/name slug (the common case) is emitted
+// exactly as registered.
+func TestRunProjectsJSONLeavesCanonicalSlugUntouched(t *testing.T) {
+	withProjectsConfig(t, []models.Project{{
+		Repository: "github.com/wesm/kwt",
+		Name:       "kwt",
+		Path:       "/home/wesm/code/kwt",
+	}})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "github.com/wesm/kwt", got[0].Repository)
+}
+
+// TestRunProjectsNormalizesRemoteURLIdentities pins that every publishable
+// repository value goes through the canonical resolver: remote URLs are
+// emitted as the same host/owner/name slug kwt list --json reports, so the
+// two surfaces stay joinable regardless of the URL form in the registry.
+func TestRunProjectsNormalizesRemoteURLIdentities(t *testing.T) {
+	tests := []struct {
+		name       string
+		repository string
+		want       string
+	}{
+		{name: "https URL", repository: "https://github.com/wesm/kwt.git", want: "github.com/wesm/kwt"},
+		{name: "scp-style git@ URL", repository: "git@github.com:wesm/kwt.git", want: "github.com/wesm/kwt"},
+		{name: "git scheme URL", repository: "git://github.com/wesm/kwt.git", want: "github.com/wesm/kwt"},
+		{
+			name:       "credential-bearing https URL",
+			repository: "https://wesm:ghp_secret123@github.com/wesm/kwt.git",
+			want:       "github.com/wesm/kwt",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withProjectsConfig(t, []models.Project{{
+				Repository: tt.repository,
+				Name:       "kwt",
+				Path:       "/home/wesm/code/kwt",
+			}})
+
+			out := runProjectsForTest(t, true)
+
+			var got []models.Project
+			require.NoError(t, json.Unmarshal([]byte(out), &got))
+			require.Len(t, got, 1)
+			assert.Equal(t, tt.want, got[0].Repository)
+		})
+	}
+}
+
+// TestRunProjectsNeverEmitsRegistryCredentials pins that a credential-bearing
+// registry value never reaches either output surface: URL userinfo is
+// stripped by canonical normalization, and a value the resolver rejects
+// (scp-style user:token) is replaced by the path-derived local identity
+// rather than emitted raw.
+func TestRunProjectsNeverEmitsRegistryCredentials(t *testing.T) {
+	const token = "ghp_secret123"
+	repoPath := newTUITestRepo(t)
+	local, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		repository string
+		want       string
+	}{
+		{
+			name:       "https userinfo stripped",
+			repository: "https://wesm:" + token + "@github.com/wesm/kwt.git",
+			want:       "github.com/wesm/kwt",
+		},
+		{
+			name:       "scp-style user:token falls back to local path identity",
+			repository: "wesm:" + token + "@github.com:wesm/kwt.git",
+			want:       local.FullPath,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := models.Project{Repository: tt.repository, Name: "kwt", Path: repoPath}
+			withProjectsConfig(t, []models.Project{project})
+
+			for _, jsonOut := range []bool{true, false} {
+				out := runProjectsForTest(t, jsonOut)
+				assert.NotContains(t, out, token,
+					"credential must not appear in output (json=%v)", jsonOut)
+				assert.Contains(t, out, tt.want, "expected canonical identity (json=%v)", jsonOut)
+			}
+		})
+	}
+}
+
+// TestRunProjectsFallsBackToStoredLocalIdentityWithoutPath confirms a
+// registry entry that already carries the canonical local/... fallback keeps
+// it when there is no path to re-derive it from, and that a non-canonical
+// value with no usable path is dropped rather than emitted raw.
+func TestRunProjectsFallsBackToStoredLocalIdentityWithoutPath(t *testing.T) {
+	withProjectsConfig(t, []models.Project{
+		{Repository: "local/home/wesm/code/kwt", Name: "kwt"},
+		{Repository: "wesm:ghp_secret123@github.com:wesm/kwt.git", Name: "leaky"},
+	})
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 2)
+	assert.Equal(t, "local/home/wesm/code/kwt", got[0].Repository)
+	assert.Equal(t, "", got[1].Repository)
+	assert.NotContains(t, out, "ghp_secret123")
+}
+
+func TestRunProjectsJSONEmptyIsArray(t *testing.T) {
+	withProjectsConfig(t, nil)
+
+	out := runProjectsForTest(t, true)
+
+	var got []models.Project
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal JSON output: %v (out=%q)", err, out)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty array, got %d entries", len(got))
+	}
+}

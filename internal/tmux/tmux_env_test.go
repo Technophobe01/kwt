@@ -1,0 +1,163 @@
+package tmux
+
+import (
+	"context"
+	"testing"
+)
+
+// TestNewCmdSanitizesEnvironment pins the exec seam every TmuxCommand method
+// funnels through (newCmd): the *exec.Cmd it builds carries a sanitized copy
+// of the process environment, not the raw os.Environ(), so a tmux server
+// spawned by kwt does not inherit launcher-state variables into its global
+// environment table. It sets a canonical-strip variable via t.Setenv (which
+// os.Environ() picks up) and confirms newCmd's Env omits it while keeping an
+// unrelated variable. It uses TERM_PROGRAM rather than EDITOR/VISUAL, which
+// are the one deliberate exception to exec-time stripping (serverStartExclusions
+// in bootstrap.go; see TestNewCmdPreservesEditorAndVisual).
+func TestNewCmdSanitizesEnvironment(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommand("tmux")
+	cmd := tc.newCmd(context.Background(), []string{"has-session", "-t", "x"})
+
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "TERM_PROGRAM") {
+			t.Errorf("newCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
+		}
+	}
+	found := false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("newCmd().Env dropped unrelated var KWT_TEST_UNRELATED_VAR: %v", cmd.Env)
+	}
+}
+
+// TestNewCmdBackgroundContextSanitizes confirms newCmd sanitizes the
+// environment for the context-free call sites (runCommand, runCommandOutput),
+// which pass context.Background(). It uses VSCODE_INJECTION
+// (a prefix match) rather than EDITOR/VISUAL, which are the one deliberate
+// exception to exec-time stripping (serverStartExclusions in bootstrap.go;
+// see TestNewCmdPreservesEditorAndVisual).
+func TestNewCmdBackgroundContextSanitizes(t *testing.T) {
+	t.Setenv("VSCODE_INJECTION", "1")
+
+	tc := NewTmuxCommand("tmux")
+	cmd := tc.newCmd(context.Background(), []string{"has-session", "-t", "x"})
+
+	if cmd == nil {
+		t.Fatal("newCmd(...) returned nil cmd")
+	}
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "VSCODE_INJECTION") {
+			t.Errorf("newCmd(...).Env leaked VSCODE_INJECTION: %v", cmd.Env)
+		}
+	}
+}
+
+// TestNewCmdPreservesEditorAndVisual pins the split-policy fix at the exec
+// seam: EDITOR/VISUAL must survive into the environment kwt execs tmux with
+// (serverStartExclusions in bootstrap.go), because tmux itself reads them at
+// server start to pick its default key mode. The pane-facing goal — shells
+// inside kwt sessions do not inherit them — is covered separately by the
+// session-scoped remove-markers (see BuildSessionBootstrapCommands), not by
+// this exec-time sanitizer.
+func TestNewCmdPreservesEditorAndVisual(t *testing.T) {
+	t.Setenv("EDITOR", "vim")
+	t.Setenv("VISUAL", "code")
+
+	tc := NewTmuxCommand("tmux")
+	cmd := tc.newCmd(context.Background(), []string{"has-session", "-t", "x"})
+
+	foundEditor, foundVisual := false, false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "EDITOR") {
+			foundEditor = true
+		}
+		if hasEnvName(entry, "VISUAL") {
+			foundVisual = true
+		}
+	}
+	if !foundEditor {
+		t.Errorf("newCmd().Env dropped EDITOR: %v", cmd.Env)
+	}
+	if !foundVisual {
+		t.Errorf("newCmd().Env dropped VISUAL: %v", cmd.Env)
+	}
+}
+
+// TestNewAttachCmdStripsEditorAndVisual pins the attach-side exec seam: the
+// environment kwt execs attach-class tmux commands with must carry NO
+// launcher-state variables at all — including EDITOR/VISUAL, which the
+// server-start sanitizer deliberately keeps. tmux's update-environment
+// session option, when a user configures it to include EDITOR or VISUAL,
+// copies the attaching CLIENT's value into the session environment table on
+// attach-session, overriding the remove-marker the bootstrap installed. A
+// fully stripped client environment leaves nothing to import.
+func TestNewAttachCmdStripsEditorAndVisual(t *testing.T) {
+	t.Setenv("EDITOR", "vim")
+	t.Setenv("VISUAL", "code")
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommand("tmux")
+	cmd := tc.newAttachCmd(context.Background(), []string{"attach-session", "-t", "x"})
+
+	foundUnrelated := false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "EDITOR") {
+			t.Errorf("newAttachCmd().Env leaked EDITOR: %v", cmd.Env)
+		}
+		if hasEnvName(entry, "VISUAL") {
+			t.Errorf("newAttachCmd().Env leaked VISUAL: %v", cmd.Env)
+		}
+		if hasEnvName(entry, "TERM_PROGRAM") {
+			t.Errorf("newAttachCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
+		}
+		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
+			foundUnrelated = true
+		}
+	}
+	if !foundUnrelated {
+		t.Errorf("newAttachCmd().Env dropped unrelated var: %v", cmd.Env)
+	}
+}
+
+// TestAttachPathsUseFullStripSanitizer pins the two attach-class code paths
+// (AttachSession, SwitchClient) to the full-strip exec seam: the commands
+// they build must carry no EDITOR/VISUAL, unlike server-start commands.
+// This is the seam-level substitute for a real attach round-trip, which
+// would require a tty.
+func TestAttachPathsUseFullStripSanitizer(t *testing.T) {
+	t.Setenv("EDITOR", "vim")
+	t.Setenv("VISUAL", "code")
+
+	tc := NewTmuxCommand("tmux")
+	cmds := map[string][]string{
+		"attach-session": tc.attachSessionCmd("x").Args,
+		"switch-client":  tc.switchClientCmd("x").Args,
+	}
+	envs := map[string][]string{
+		"attach-session": tc.attachSessionCmd("x").Env,
+		"switch-client":  tc.switchClientCmd("x").Env,
+	}
+	for name, args := range cmds {
+		wantArgs := []string{"tmux", name, "-t", "x"}
+		if len(args) != len(wantArgs) || args[1] != name || args[2] != "-t" || args[3] != "x" {
+			t.Errorf("%s cmd args = %v, want %v", name, args, wantArgs)
+		}
+		for _, entry := range envs[name] {
+			if hasEnvName(entry, "EDITOR") || hasEnvName(entry, "VISUAL") {
+				t.Errorf("%s cmd env leaked EDITOR/VISUAL: %v", name, envs[name])
+			}
+		}
+	}
+}
+
+func hasEnvName(entry, name string) bool {
+	return len(entry) > len(name) && entry[:len(name)] == name && entry[len(name)] == '='
+}

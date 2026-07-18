@@ -213,18 +213,13 @@ func collectWorktreeStatuses(ctx context.Context, cfg *models.Config, printer *u
 
 	g, err := git.NewFromCwd()
 	if err != nil || statusGlobal {
-		globalEntries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir)
+		globalEntries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir, cfg.Projects)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover worktrees: %w", err)
 		}
-		// Convert []*GlobalWorktreeEntry to []*models.Worktree
 		for _, entry := range globalEntries {
-			worktrees = append(worktrees, &models.Worktree{
-				Path:       entry.Path,
-				Branch:     entry.Branch,
-				CommitHash: entry.CommitHash,
-				IsMain:     entry.IsMain,
-			})
+			model := entry.Model()
+			worktrees = append(worktrees, &model)
 		}
 	} else {
 		wm := worktree.New(g, cfg)
@@ -232,7 +227,10 @@ func collectWorktreeStatuses(ctx context.Context, cfg *models.Config, printer *u
 		if err != nil {
 			return nil, fmt.Errorf("failed to list worktrees: %w", err)
 		}
-		// Convert []models.Worktree to []*models.Worktree
+		// Local worktrees all belong to the repository containing cwd. Enrich
+		// them before collection so registered identity precedence and the
+		// canonical local fallback match the global status surface.
+		enrichWorktreeIdentity(g, cfg.Projects, localWorktrees)
 		for i := range localWorktrees {
 			worktrees = append(worktrees, &localWorktrees[i])
 		}

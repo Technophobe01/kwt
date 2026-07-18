@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -21,10 +24,15 @@ type GlobalWorktreeEntry struct {
 	Path           string
 	CommitHash     string
 	IsMain         bool
+	CreatedAt      time.Time // Worktree directory modification time
 }
 
-// DiscoverGlobalWorktrees finds all worktrees in the configured base directory.
-func DiscoverGlobalWorktrees(baseDir string) ([]*GlobalWorktreeEntry, error) {
+// DiscoverGlobalWorktrees finds all worktrees in the configured base
+// directory. projects carries the registered projects so repository identity
+// follows the single registered-identity precedence (a registered canonical
+// identity wins over a fork origin; see worktree.RepositoryInfoWithProjects);
+// pass nil when no registry is available.
+func DiscoverGlobalWorktrees(baseDir string, projects []models.Project) ([]*GlobalWorktreeEntry, error) {
 	if baseDir == "" {
 		return nil, fmt.Errorf("base directory not configured")
 	}
@@ -65,7 +73,7 @@ func DiscoverGlobalWorktrees(baseDir string) ([]*GlobalWorktreeEntry, error) {
 
 		if gitInfo.IsDir() {
 			// Main worktree (.git is a directory)
-			entry, err := extractWorktreeInfo(path)
+			entry, err := extractWorktreeInfo(path, projects)
 			if err != nil {
 				return filepath.SkipDir // Skip broken repos but don't walk into them
 			}
@@ -91,7 +99,7 @@ func DiscoverGlobalWorktrees(baseDir string) ([]*GlobalWorktreeEntry, error) {
 			return nil
 		}
 
-		entry, err := extractWorktreeInfo(path)
+		entry, err := extractWorktreeInfo(path, projects)
 		if err != nil {
 			return nil
 		}
@@ -107,9 +115,10 @@ func DiscoverGlobalWorktrees(baseDir string) ([]*GlobalWorktreeEntry, error) {
 }
 
 // extractWorktreeInfo extracts worktree information from a worktree directory.
-func extractWorktreeInfo(worktreePath string) (*GlobalWorktreeEntry, error) {
-	// Create a git instance for this worktree
-	g := git.New(worktreePath)
+func extractWorktreeInfo(worktreePath string, projects []models.Project) (*GlobalWorktreeEntry, error) {
+	// The cached wrapper keeps the entry's recorded remote URL and the
+	// resolver's own reads to one subprocess per call kind.
+	g := worktree.NewCachedIdentityGit(git.New(worktreePath))
 
 	// Get current branch
 	branch, err := getCurrentBranch(worktreePath)
@@ -124,12 +133,20 @@ func extractWorktreeInfo(worktreePath string) (*GlobalWorktreeEntry, error) {
 	}
 
 	repoURL := ""
-	repoInfo := repositoryInfoFromWorktreePath(g, worktreePath)
 	if gotURL, err := g.GetRepositoryURL(); err == nil {
 		repoURL = gotURL
-		if parsedInfo, parseErr := url.ParseRepositoryURL(gotURL); parseErr == nil {
-			repoInfo = parsedInfo
-		}
+	}
+	// Route through the single canonical resolver (with registered-identity
+	// precedence) so a no-remote repository gets the same "local/..."
+	// identity here as kwt list and project registration report, and a
+	// registered project's canonical identity wins over a fork origin,
+	// keeping the JSON surfaces joinable. The resolver returns nil info on
+	// error; a worktree without resolvable identity still lists.
+	repoInfo, _ := worktree.RepositoryInfoWithProjects(g, projects)
+
+	var createdAt time.Time
+	if info, statErr := os.Stat(worktreePath); statErr == nil {
+		createdAt = info.ModTime()
 	}
 
 	return &GlobalWorktreeEntry{
@@ -138,33 +155,8 @@ func extractWorktreeInfo(worktreePath string) (*GlobalWorktreeEntry, error) {
 		Branch:         branch,
 		Path:           worktreePath,
 		CommitHash:     commitHash,
+		CreatedAt:      createdAt,
 	}, nil
-}
-
-func repositoryInfoFromWorktreePath(g *git.Git, worktreePath string) *url.RepositoryInfo {
-	rootPath := worktreePath
-	if repoRoot, err := g.GetMainRepositoryPath(); err == nil {
-		rootPath = repoRoot
-	}
-	rootPath = strings.TrimSpace(rootPath)
-	if rootPath == "" {
-		return nil
-	}
-	cleanPath := rootPath
-	if absPath, err := filepath.Abs(cleanPath); err == nil {
-		cleanPath = absPath
-	}
-	if resolvedPath, err := filepath.EvalSymlinks(cleanPath); err == nil {
-		cleanPath = resolvedPath
-	}
-	name := filepath.Base(cleanPath)
-	if name == "" || name == "." || name == string(filepath.Separator) {
-		name = filepath.ToSlash(cleanPath)
-	}
-	return &url.RepositoryInfo{
-		Repository: name,
-		FullPath:   filepath.ToSlash(cleanPath),
-	}
 }
 
 // getCurrentBranch gets the current branch name for a worktree.
@@ -207,6 +199,25 @@ func getCurrentCommitHash(worktreePath string) (string, error) {
 func isSubmoduleGitDir(gitDir string) bool {
 	normalized := filepath.ToSlash(gitDir)
 	return strings.Contains(normalized, "/modules/")
+}
+
+// Model converts a discovered entry into a manifest Worktree, carrying the
+// repository slug, session name, and creation time alongside the core
+// worktree fields. Both identity fields stay empty when the repository could
+// not be identified.
+func (e *GlobalWorktreeEntry) Model() models.Worktree {
+	m := models.Worktree{
+		Path:       e.Path,
+		Branch:     e.Branch,
+		CommitHash: e.CommitHash,
+		IsMain:     e.IsMain,
+		CreatedAt:  e.CreatedAt,
+	}
+	if e.RepositoryInfo != nil {
+		m.Repository = e.RepositoryInfo.FullPath
+		m.SessionName = tmux.WorkspaceSessionName(e.RepositoryInfo, e.Branch, e.Path)
+	}
+	return m
 }
 
 // ConvertToWorktreeModels converts GlobalWorktreeEntry to models.Worktree.

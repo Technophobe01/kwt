@@ -31,22 +31,11 @@ func DefaultHostID(hostname func() (string, error)) (string, error) {
 	return NormalizeHostID(name)
 }
 
-// CanonicalRepositoryIdentity reports whether raw can serve as a fleet
-// project identity and returns its normalized form. This is the same bar
-// manifest publishing applies to configured project repositories, so callers
-// that display or match identities agree with what reaches the hub.
-func CanonicalRepositoryIdentity(raw string) (string, bool) {
-	return normalizeFleetRepositoryIdentity(raw)
-}
-
 // NormalizeRepositoryIdentity converts a Git remote URL into a stable project identity.
 func NormalizeRepositoryIdentity(raw string) (string, error) {
-	info, err := repositoryurl.ParseRepositoryURL(raw)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(info.FullPath) == "" {
+	identity, ok := repositoryurl.CanonicalRepositoryIdentity(raw)
+	if !ok {
 		return "", fmt.Errorf("repository identity is required")
 	}
-	return info.FullPath, nil
+	return identity, nil
 }

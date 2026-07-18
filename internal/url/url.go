@@ -22,7 +22,10 @@ type RepositoryInfo struct {
 // ParseRepositoryURL parses a git repository URL and extracts host, owner, and repository name.
 func ParseRepositoryURL(repoURL string) (*RepositoryInfo, error) {
 	// Handle different URL formats
-	repoURL = normalizeURL(repoURL)
+	repoURL, err := normalizeURL(repoURL)
+	if err != nil {
+		return nil, err
+	}
 
 	parsedURL, err := url.Parse(repoURL)
 	if err != nil {
@@ -33,32 +36,38 @@ func ParseRepositoryURL(repoURL string) (*RepositoryInfo, error) {
 	if host == "" {
 		return nil, fmt.Errorf("no host found in URL: %s", repoURL)
 	}
+	if strings.HasSuffix(host, ":") {
+		// An empty port means the pre-normalization input smuggled a scheme
+		// or rooted colon path into the authority (e.g. "file:/tmp/repo" or
+		// "host:/path"), which must not become a repository identity.
+		return nil, fmt.Errorf("invalid host %q in URL %s: empty port", host, repoURL)
+	}
 	if err := validateRepositoryPathComponent("host", host); err != nil {
 		return nil, err
 	}
 
-	// Extract path components
-	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	if len(pathParts) < 2 {
-		return nil, fmt.Errorf("invalid repository path: %s", parsedURL.Path)
-	}
+	return repositoryInfoFromParts(host, strings.Split(strings.Trim(parsedURL.Path, "/"), "/"))
+}
 
-	pathParts[len(pathParts)-1] = strings.TrimSuffix(pathParts[len(pathParts)-1], ".git")
-	for _, part := range pathParts {
+// repositoryInfoFromParts assembles a RepositoryInfo from a validated
+// authority and slash-split path components, trimming the ".git" suffix from
+// the final component. It is the single component pipeline behind both URL
+// parsing and canonical authority-slug parsing.
+func repositoryInfoFromParts(authority string, parts []string) (*RepositoryInfo, error) {
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid repository path: %s", strings.Join(parts, "/"))
+	}
+	parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	for _, part := range parts {
 		if err := validateRepositoryPathComponent("repository path component", part); err != nil {
 			return nil, err
 		}
 	}
-	owner := pathParts[0]
-	repository := pathParts[len(pathParts)-1]
-	fullPathParts := append([]string{host}, pathParts...)
-	fullPath := path.Join(fullPathParts...)
-
 	return &RepositoryInfo{
-		Host:       host,
-		Owner:      owner,
-		Repository: repository,
-		FullPath:   fullPath,
+		Host:       authority,
+		Owner:      parts[0],
+		Repository: parts[len(parts)-1],
+		FullPath:   authority + "/" + strings.Join(parts, "/"),
 	}, nil
 }
 
@@ -70,12 +79,6 @@ func validateRepositoryPathComponent(label, component string) error {
 		return fmt.Errorf("invalid %s %q", label, component)
 	case strings.ContainsAny(component, `/\`):
 		return fmt.Errorf("invalid %s %q: contains path separator", label, component)
-	case strings.Contains(component, "@"):
-		// Userinfo of well-formed URLs is separated by url.Parse before this
-		// point; an "@" here means normalization mangled a credential-bearing
-		// remote (e.g. scp-style user:token@host:path). Reject rather than
-		// risk embedding a secret in a repository identity.
-		return fmt.Errorf("invalid %s: contains userinfo separator", label)
 	default:
 		return nil
 	}
@@ -85,30 +88,77 @@ func validateRepositoryPathComponent(label, component string) error {
 func GenerateWorktreePath(baseDir string, repoInfo *RepositoryInfo, branch string) string {
 	// Sanitize branch name for filesystem
 	safeBranch := sanitizeBranchName(branch)
-	return filepath.Join(baseDir, repoInfo.FullPath, safeBranch)
+	filesystemInfo := RepositoryInfoForFilesystem(repoInfo)
+	return filepath.Join(baseDir, filesystemInfo.FullPath, safeBranch)
 }
 
-// normalizeURL converts various git URL formats to a standard HTTP(S) format for parsing.
-func normalizeURL(repoURL string) string {
-	// Convert SSH format to HTTPS format for easier parsing
-	if strings.HasPrefix(repoURL, "git@") {
-		// git@github.com:user/repo.git -> https://github.com/user/repo.git
-		if host, path, found := strings.Cut(repoURL, ":"); found {
-			host = strings.TrimPrefix(host, "git@")
-			repoURL = fmt.Sprintf("https://%s/%s", host, path)
+// RepositoryInfoForFilesystem returns a copy whose authority is safe to use
+// as a path component on every supported platform. Canonical identities keep
+// ports and bracketed IPv6 verbatim; percent-encoding the authority only at
+// the filesystem boundary preserves that identity while avoiding Windows'
+// reserved path characters and collisions with literal escape sequences.
+func RepositoryInfoForFilesystem(repoInfo *RepositoryInfo) *RepositoryInfo {
+	if repoInfo == nil {
+		return nil
+	}
+
+	filesystemInfo := *repoInfo
+	filesystemInfo.Host = encodeFilesystemComponent(repoInfo.Host)
+	authority, remainder, ok := strings.Cut(repoInfo.FullPath, "/")
+	if ok {
+		filesystemInfo.FullPath = encodeFilesystemComponent(authority) + "/" + remainder
+	} else {
+		filesystemInfo.FullPath = encodeFilesystemComponent(repoInfo.FullPath)
+	}
+	return &filesystemInfo
+}
+
+func encodeFilesystemComponent(component string) string {
+	const hex = "0123456789ABCDEF"
+	var encoded strings.Builder
+	for i := 0; i < len(component); i++ {
+		char := component[i]
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			strings.ContainsRune("-._~", rune(char)) {
+			encoded.WriteByte(char)
+			continue
 		}
-	} else if strings.HasPrefix(repoURL, "ssh://git@") {
-		// ssh://git@github.com:user/repo.git -> https://github.com/user/repo.git
-		repoURL = strings.TrimPrefix(repoURL, "ssh://")
-		if host, path, found := strings.Cut(repoURL, ":"); found {
-			host = strings.TrimPrefix(host, "git@")
-			repoURL = fmt.Sprintf("https://%s/%s", host, path)
+		encoded.WriteByte('%')
+		encoded.WriteByte(hex[char>>4])
+		encoded.WriteByte(hex[char&0x0f])
+	}
+	return encoded.String()
+}
+
+// normalizeURL converts supported git remote formats to a standard HTTP(S)
+// format for parsing. Explicit URI schemes are handled before SCP-style
+// syntax: the network git schemes (https, http, ssh, git, git+ssh) are
+// accepted, and any other scheme (file:, etc.) is rejected so non-network
+// remotes fall through to the callers' local-path fallback handling instead
+// of minting bogus host/owner identities.
+func normalizeURL(repoURL string) (string, error) {
+	if isRemoteHelperURL(repoURL) {
+		return "", fmt.Errorf(
+			"unsupported remote-helper syntax in repository URL %s (git reads <transport>:: as a helper invocation, not a host)",
+			repoURL)
+	}
+	if strings.Contains(repoURL, "://") {
+		return normalizeExplicitNetworkURL(repoURL)
+	}
+	if strings.HasPrefix(strings.ToLower(repoURL), "file:") {
+		return "", fmt.Errorf("unsupported scheme %q in repository URL %s", "file", repoURL)
+	}
+
+	if host, remotePath, user, ok := splitSCPLikeURL(repoURL); ok {
+		if strings.Contains(user, ":") {
+			return "", fmt.Errorf("invalid SCP-style userinfo in repository URL %s", repoURL)
 		}
-	} else if isSCPLikeURL(repoURL) {
-		// SCP-like format without git@ prefix (e.g., SSH config alias)
-		// workgit:myorg/myrepo.git -> https://workgit/myorg/myrepo.git
-		host, path, _ := strings.Cut(repoURL, ":")
-		repoURL = fmt.Sprintf("https://%s/%s", host, path)
+		if looksLikeCredentialBearingSCPPath(remotePath) {
+			return "", fmt.Errorf("invalid SCP-style userinfo in repository URL %s", repoURL)
+		}
+		return fmt.Sprintf("https://%s/%s", host, strings.TrimLeft(remotePath, "/")), nil
 	}
 
 	// Ensure https:// prefix
@@ -116,45 +166,121 @@ func normalizeURL(repoURL string) string {
 		repoURL = "https://" + repoURL
 	}
 
-	return repoURL
+	return repoURL, nil
 }
 
-// isSCPLikeURL checks if a URL string uses SCP-like syntax (host:path)
-// without a git@ prefix. This handles SSH config aliases like "workgit:org/repo.git".
-//
-// Limitation: "host:123/path" where the first path segment is all digits is treated
-// as a port number (host:port/path), not SCP-like. This means SSH aliases with
-// numeric-only first path segments are not detected. This is an acceptable tradeoff
-// since such paths are extremely rare in practice.
-func isSCPLikeURL(rawURL string) bool {
-	if strings.Contains(rawURL, "://") {
-		return false
+// normalizeExplicitNetworkURL parses scheme-bearing remotes with net/url so
+// userinfo, numeric ports, and bracketed IPv6 authorities remain distinct
+// from path colons. Only explicit URLs may carry a port; scheme-less
+// colon-before-slash values are Git's SCP syntax and take the other path.
+func normalizeExplicitNetworkURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse repository URL: %w", err)
+	}
+	if !isNetworkGitURLScheme(parsed.Scheme) {
+		return "", fmt.Errorf(
+			"unsupported scheme %q in repository URL %s (supported: https, http, ssh, git, git+ssh)",
+			parsed.Scheme, raw)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("no host found in URL: %s", raw)
 	}
 
-	if strings.HasPrefix(rawURL, "git@") {
+	lowered := strings.ToLower(parsed.Scheme)
+	if lowered == "http" || lowered == "https" {
+		return raw, nil
+	}
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			return "", fmt.Errorf("invalid userinfo in repository URL %s", raw)
+		}
+		parsed.User = nil
+	}
+	parsed.Scheme = "https"
+	return parsed.String(), nil
+}
+
+// isRemoteHelperURL reports whether repoURL uses git's remote-helper syntax
+// <transport>::<address> (gitremote-helpers(7)): URL-scheme characters from
+// the start of the string followed by "::", matching git's own
+// is_urlschemechar check in transport.c. Git dispatches these to a helper
+// command and the address is an arbitrary command line (for example a
+// git-remote-ext invocation embedding credentials or key paths), never
+// SCP host:path syntax, so it must not be parsed into a repository identity.
+// Bracketed IPv6 forms never match: their "::" is preceded by non-scheme
+// characters ("[", ":"). A leading "::" (empty transport) also matches and
+// fails closed, as git reads it as a helper invocation too.
+func isRemoteHelperURL(repoURL string) bool {
+	prefix, _, found := strings.Cut(repoURL, "::")
+	if !found {
 		return false
 	}
-
-	// Exclude bracketed IPv6 addresses (e.g., "[::1]:8080/user/repo")
-	if strings.HasPrefix(rawURL, "[") {
-		return false
-	}
-
-	_, after, found := strings.Cut(rawURL, ":")
-	if !found || after == "" {
-		return false
-	}
-
-	// Check if the segment before the first '/' is all digits (a port number).
-	portOrPath, _, _ := strings.Cut(after, "/")
-
-	for _, c := range portOrPath {
-		if c < '0' || c > '9' {
-			return true
+	for i := 0; i < len(prefix); i++ {
+		if !isURLSchemeChar(i == 0, prefix[i]) {
+			return false
 		}
 	}
+	return true
+}
 
-	return false
+func isURLSchemeChar(first bool, c byte) bool {
+	isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	if first || isAlpha {
+		return isAlpha
+	}
+	return (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+}
+
+// splitSCPLikeURL separates [user@]host:path while ignoring colons inside a
+// bracketed IPv6 host. ok is false when the delimiter is absent, after the
+// first slash, or has an empty host/path.
+func splitSCPLikeURL(raw string) (host, remotePath, user string, ok bool) {
+	if raw == "" || strings.Contains(raw, "://") {
+		return "", "", "", false
+	}
+
+	inBrackets := false
+	delimiter := -1
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '[':
+			inBrackets = true
+		case ']':
+			inBrackets = false
+		case ':':
+			if !inBrackets {
+				delimiter = i
+				i = len(raw)
+			}
+		case '/':
+			i = len(raw)
+		}
+	}
+	if delimiter < 0 {
+		return "", "", "", false
+	}
+	authority := raw[:delimiter]
+	host = authority
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		user = authority[:at]
+		host = authority[at+1:]
+	}
+	remotePath = raw[delimiter+1:]
+	if host == "" || remotePath == "" {
+		return "", "", "", false
+	}
+	return host, remotePath, user, true
+}
+
+// looksLikeCredentialBearingSCPPath preserves the existing no-credentials
+// contract for ambiguous user:token@host:path input. Git reads the first
+// colon as the SCP delimiter, but publishing the resulting path would expose
+// a token-shaped value. A plain @ in a path component remains valid.
+func looksLikeCredentialBearingSCPPath(remotePath string) bool {
+	firstComponent, _, _ := strings.Cut(remotePath, "/")
+	at := strings.IndexByte(firstComponent, '@')
+	return at >= 0 && strings.Contains(firstComponent[at+1:], ":")
 }
 
 // sanitizeBranchName converts branch names to filesystem-safe names.

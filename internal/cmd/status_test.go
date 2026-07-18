@@ -1,11 +1,84 @@
 package cmd
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/ui"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestCollectWorktreeStatusesGlobalPreservesRegisteredRepository(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	require.NoError(t, cmdStatusTestGit(repoDir, "init", "-b", "main"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "remote", "add", "origin", "https://github.com/fork/repo.git"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.name", "Test User"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.email", "test@example.com"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "commit", "--allow-empty", "-m", "initial"))
+
+	resetStatusTestFlags(t)
+	statusGlobal = true
+	statusNoFetch = true
+	statuses, err := collectWorktreeStatuses(context.Background(), &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir},
+		Projects: []models.Project{{
+			Path:       repoDir,
+			Repository: "github.com/upstream/repo",
+		}},
+	}, ui.New(&models.UIConfig{}))
+
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, "github.com/upstream/repo", statuses[0].Repository)
+}
+
+func TestCollectWorktreeStatusesLocalUsesCanonicalLocalRepository(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	require.NoError(t, cmdStatusTestGit(repoDir, "init", "-b", "main"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.name", "Test User"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.email", "test@example.com"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "commit", "--allow-empty", "-m", "initial"))
+	changeDir(t, repoDir)
+
+	want, err := worktree.RepositoryInfoFromLocalPath(repoDir)
+	require.NoError(t, err)
+	resetStatusTestFlags(t)
+	statusNoFetch = true
+	statuses, err := collectWorktreeStatuses(context.Background(), &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir},
+	}, ui.New(&models.UIConfig{}))
+
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, want.FullPath, statuses[0].Repository)
+}
+
+func resetStatusTestFlags(t *testing.T) {
+	t.Helper()
+	origGlobal, origNoFetch, origStaleDays := statusGlobal, statusNoFetch, statusStaleDays
+	t.Cleanup(func() {
+		statusGlobal, statusNoFetch, statusStaleDays = origGlobal, origNoFetch, origStaleDays
+	})
+	statusGlobal = false
+	statusNoFetch = false
+	statusStaleDays = 14
+}
+
+func cmdStatusTestGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.Run()
+}
 
 func TestCalculateSummary(t *testing.T) {
 	tests := []struct {

@@ -52,7 +52,7 @@ func runOpen(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir)
+		entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir, ctx.Config.Projects)
 		if err != nil {
 			return fmt.Errorf("failed to discover worktrees: %w", err)
 		}

@@ -12,6 +12,7 @@ import (
 
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -111,21 +112,19 @@ func isSameOrChildPath(path, parent string) bool {
 }
 
 func cleanPathForContainment(path string) string {
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return filepath.Clean(path)
+	return utils.CanonicalPath(path)
 }
 
 func (c *StatusCollector) collectOne(ctx context.Context, worktree *models.Worktree) (*models.WorktreeStatus, error) {
 	g := git.New(worktree.Path)
+	repository := strings.TrimSpace(worktree.Repository)
+	if repository == "" {
+		repository = c.repositoryIdentity(g, worktree.Path)
+	}
 	status := &models.WorktreeStatus{
 		Path:       worktree.Path,
 		Branch:     worktree.Branch,
-		Repository: c.repositoryIdentity(g, worktree.Path),
+		Repository: repository,
 		Status:     models.WorktreeStatusClean,
 	}
 
@@ -158,7 +157,10 @@ func (c *StatusCollector) collectOne(ctx context.Context, worktree *models.Workt
 func (c *StatusCollector) repositoryIdentity(g *git.Git, path string) string {
 	repoURL, err := g.GetRepositoryURL()
 	if err == nil {
-		if info, parseErr := url.ParseRepositoryURL(repoURL); parseErr == nil && info.FullPath != "" {
+		// The remote-derived bar keeps a relative dotless filesystem remote
+		// ("cache/team/repo.git") from surfacing as a shareable identity,
+		// matching the bar kwt list and kwt projects apply.
+		if info, ok := url.CanonicalRepositoryInfoFromRemote(repoURL); ok {
 			return repositoryFullPathIdentity(info)
 		}
 	}

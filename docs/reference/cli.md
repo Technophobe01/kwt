@@ -10,6 +10,7 @@ stable command surface.
 | `kwt open`       | Fuzzy-pick and attach to a workspace.                  |
 | `kwt list`       | List worktrees.                                        |
 | `kwt status`     | Show Git status, sync state, and activity.             |
+| `kwt projects`   | List registered project repositories.                  |
 | `kwt get`        | Print a matching worktree path.                        |
 | `kwt cd`         | Open a shell in a matching worktree.                   |
 | `kwt exec`       | Run a command in a matching worktree.                  |
@@ -38,6 +39,133 @@ kwt config set --local layouts.default stack
 When `kwt add -b` creates a branch, it fetches `origin` and starts from its
 default branch. If that remote base is unavailable, it falls back to local
 `main`, then `master`, then the branch checked out in the primary worktree.
+
+## `kwt list`
+
+`--json` emits an array of objects with `path`, `branch`, `commit_hash`, `is_main`,
+`created_at` (worktree directory mtime), `repository` (the `host/owner/name`
+slug, or a `local/<path>` fallback for a repository without a usable remote —
+see below), and `session_name` (the tmux workspace session name kwt attaches to). To
+converge on the same session, prefer an attach-only command — `tmux
+attach-session -t <session_name>` (or `switch-client -t` from inside tmux) — so
+you never create the session bare. See [Attaching from other
+tools](#attaching-from-other-tools) before using `new-session`.
+`created_at` is populated in both local and `-g` mode.
+
+## `kwt projects`
+
+`--json` emits an array of the registered project repositories (`{repository,
+name, path, last_touched}`), so external automation can discover main-repo
+paths that live outside the configured worktree base directory without
+parsing the config file. `repository` uses the same `host/owner/name` slug as
+`kwt list --json`'s `repository` field, so the two surfaces can be joined.
+
+### Repository identity fallback
+
+A repository's `repository` slug is derived from its origin remote
+(`host/owner/name`). A repository with no usable remote instead gets a
+deterministic path-based fallback of the form `local/<absolute-path>` (path
+separators normalized to `/`). Every surface that reports repository identity —
+`kwt list --json`, `kwt list -g --json` discovery, and `kwt projects --json` —
+resolves it through the same code, so the fallback is identical across all
+three and the surfaces remain joinable even for local-only repositories.
+
+## Workspace session bootstrap
+
+Every workspace session kwt creates (`add`, `open`, and the TUI) applies the
+same bootstrap so panes are indistinguishable regardless of which client
+attaches. kwt sets `default-command` to the empty string, which tells tmux to
+start its configured `default-shell` natively instead of passing a command
+string through `$SHELL -c`. This supports valid non-POSIX shells such as fish
+and tcsh and avoids running startup hooks in an extra non-login shell. For the
+first pane, kwt queries the session's resolved `default-shell` and executes it
+directly with `-l` after applying the session environment bootstrap. This
+login-shell behavior is the parity mechanism across launchers; panes otherwise
+see tmux's own `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`, which tmux sets in every
+pane regardless of what kwt does.
+
+Session creation uses an inert first-pane placeholder to make that environment
+ordering safe. `new-session` starts `sleep 2147483647` as separate argv words,
+so no user shell or profile runs before the session exists. kwt then installs
+the session remove-markers, resolves `default-shell`, and replaces the
+placeholder with `<resolved-shell> -l`. Only after that respawn does it create
+the remaining panes. Thus every real shell starts after launcher state has been
+masked, and the first pane's startup files run exactly once.
+
+kwt treats a canonical set of variables as launcher state — scoped to the
+terminal, shell, or tool that launched kwt, not to the workspace session tmux
+hosts — and applies it in two places that share a single definition, with one
+explicit, documented exception, so they cannot silently drift apart:
+
+- **Exec-time sanitization.** Every tmux invocation kwt makes execs tmux with
+  these variables removed from its own environment, EXCEPT `EDITOR` and
+  `VISUAL`. If no tmux server is running yet, the invocation that starts one
+  is what seeds that server's GLOBAL environment table; sanitizing at exec
+  time keeps launcher state out of that table in the first place, rather than
+  only masking it later per session. (`PWD`/`OLDPWD`/`SHLVL`/`_` are included
+  even though they aren't terminal-integration variables: worktree
+  directories are passed to tmux via `-c`, and shells re-derive these on
+  their own.) `EDITOR`/`VISUAL` are kept here because tmux itself reads them
+  at server start to choose its default key mode (`status-keys`/`mode-keys`:
+  vi vs. emacs), and a user's `tmux.conf` may consult them too; stripping
+  them from the server's own exec environment would silently flip that
+  behavior for every kwt-started server.
+- **Session remove-markers.** The same variables — including `EDITOR` and
+  `VISUAL`, with no exception — are also removed from each session with a
+  session-scoped remove-marker (`set-environment -r`), which masks the
+  global/server value for that session only without touching other sessions
+  or the server-wide environment. This covers sessions created against an
+  already-running server whose global table predates kwt's exec-time
+  sanitization (e.g. a server another tool started), and it is what keeps
+  `EDITOR`/`VISUAL` out of every pane's shell even though the server process
+  itself now keeps them.
+
+The full list: exact names `__CFBundleIdentifier`, `EDITOR`, `OLDPWD`,
+`PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`, `SHLVL`,
+`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
+prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `NVM_`, `PYENV_`,
+`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. `EDITOR` and
+`VISUAL` are excluded from exec-time sanitization only, per above; every
+other name in this list is treated identically by both mechanisms.
+
+`TERMINFO` is deliberately excluded from the whole list: it is functional
+terminal configuration (a custom terminfo database path), not transient
+launcher-integration state, and is needed for tmux attach rendering and for
+pane applications resolving tmux's own `TERM`.
+
+### Attaching from other tools
+
+kwt applies this bootstrap when it *creates* a session. A session that some
+other tool created — for example with `tmux new-session -A -s <session_name>`,
+which attaches if the session exists but otherwise creates it bare — starts
+without the `default-command` and remove-markers, so its windows would not
+match kwt's until repaired.
+
+Two rules keep external tools consistent with kwt:
+
+- **When the session already exists, attach only:** use `tmux attach-session -t
+  <session_name>` (or `switch-client -t` from inside tmux). Attach-only commands
+  never create a bare session, so there is nothing to repair.
+- **If your tool creates the session itself, apply the equivalent bootstrap:**
+  set `default-command` to `""` and add a session-scoped remove-marker
+  (`set-environment -r <name>`) for each launcher variable listed above
+  (including `EDITOR`/`VISUAL` — the exec-time exception above applies only to
+  how the tmux server process itself was started, not to the session
+  remove-markers). To keep the first pane clean as well, create it with an
+  inert direct-argv placeholder, install the markers, resolve the session's
+  `default-shell`, and respawn that pane with the resolved shell and `-l`.
+
+kwt is also self-healing here: the next time it attaches to a session it finds
+already running, it re-applies the safe bootstrap subset (`default-command`
+plus the remove-markers — never construction or pane commands), so a session
+another tool created bare converges on consistent behavior for windows opened
+after that attach.
+
+The repair path deliberately does not rewrite panes in an externally created
+session that is already running; it only makes future windows consistent. In a
+session kwt creates itself, the inert-placeholder/respawn sequence also covers
+the first pane, including when the tmux server was already running with
+launcher variables in its global environment table.
 
 ## Exit behavior
 

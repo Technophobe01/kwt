@@ -173,7 +173,7 @@ func resolveWorktreePath(worktreePattern string, cfg *models.Config) (string, er
 	}
 
 	// Try global worktree discovery
-	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir)
+	entries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir, cfg.Projects)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover worktrees: %w", err)
 	}

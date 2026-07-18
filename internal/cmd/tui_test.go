@@ -24,6 +24,7 @@ import (
 	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -1174,6 +1175,77 @@ func TestApplyProjectIdentityFallbackKeepsOriginForLocalPathLikeIdentity(t *test
 		"identities that never reach the hub must not displace the origin identity that does")
 }
 
+// TestRepositoryInfoFromProjectMatchesCanonicalResolverForLocalIdentity pins
+// the fix for a canonical "local/..." project identity being re-parsed as a
+// URL (host="local", owner=first path segment) instead of reconstructed
+// through the canonical local-path resolver: the two produced different
+// WorkspaceSessionName values for the same worktree, so the TUI missed
+// CLI-created sessions and created duplicates.
+func TestRepositoryInfoFromProjectMatchesCanonicalResolverForLocalIdentity(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	canonical, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+
+	project := models.Project{
+		Repository: canonical.FullPath,
+		Name:       canonical.Repository,
+		Path:       repoPath,
+	}
+
+	info := repositoryInfoFromProject(project)
+
+	require.NotNil(t, info)
+	assert.Equal(t,
+		tmux.WorkspaceSessionName(canonical, "main", repoPath),
+		tmux.WorkspaceSessionName(info, "main", repoPath),
+		"a local/... project identity must resolve to the same session name the canonical resolver produces")
+}
+
+func TestRepositoryInfoFromProjectMatchesCanonicalResolverForLegacyAbsoluteIdentity(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	canonical, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+
+	info := repositoryInfoFromProject(models.Project{
+		Repository: repoPath,
+		Name:       canonical.Repository,
+		Path:       repoPath,
+	})
+
+	require.NotNil(t, info)
+	assert.Equal(t, canonical.FullPath, info.FullPath)
+	assert.Equal(t,
+		tmux.WorkspaceSessionName(canonical, "main", repoPath),
+		tmux.WorkspaceSessionName(info, "main", repoPath),
+		"an absolute legacy identity must use the canonical local resolver")
+}
+
+func TestRepositoryInfoFromProjectPreservesCanonicalNetworkAuthority(t *testing.T) {
+	tests := []string{
+		"host.example:2222/org/repo",
+		"[2001:db8::1]:2222/org/repo",
+	}
+	for _, identity := range tests {
+		t.Run(identity, func(t *testing.T) {
+			canonical, ok := url.CanonicalRepositoryInfo(identity)
+			require.True(t, ok)
+
+			info := repositoryInfoFromProject(models.Project{
+				Repository: identity,
+				Name:       "repo",
+				Path:       "/repos/repo",
+			})
+
+			require.NotNil(t, info)
+			assert.Equal(t, canonical.FullPath, info.FullPath)
+			assert.Equal(t,
+				tmux.WorkspaceSessionName(canonical, "main", "/repos/repo"),
+				tmux.WorkspaceSessionName(info, "main", "/repos/repo"),
+				"configured authority identities must produce the canonical session name")
+		})
+	}
+}
+
 func TestTUIBackendLaunchRegistrationUpgradesLocalPathLikeIdentityToOrigin(t *testing.T) {
 	repoPath := newTUITestRepo(t)
 	cfg := &models.Config{
@@ -1210,6 +1282,85 @@ func TestTUIBackendLaunchRegistrationUpgradesLocalPathLikeIdentityToOrigin(t *te
 		"local/... identities never reach the hub and should upgrade to the origin identity")
 }
 
+// TestTUIBackendLaunchRegistrationRejectsRelativeRemoteIdentity pins the
+// provenance gate at the registration site: a relative dotless remote
+// ("cache/team/repo.git" is a machine-local filesystem path git happily
+// serves) must not be persisted as project.Repository, because stored
+// registry identities ride the relaxed configured bar on every later
+// manifest build. The local-path fallback is persisted instead.
+func TestTUIBackendLaunchRegistrationRejectsRelativeRemoteIdentity(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	relativeInfo, err := url.ParseRepositoryURL("cache/team/repo.git")
+	require.NoError(t, err)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+	}
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryURL:  "cache/team/repo.git",
+		RepositoryInfo: relativeInfo,
+		Branch:         "main",
+		Path:           repoPath,
+		IsMain:         true,
+	}
+	var registered []models.Project
+	backend := newTUIBackendWithLaunchDir(cfg, repoPath)
+	backend.registerProject = func(project models.Project) error {
+		registered = append(registered, project)
+		return nil
+	}
+
+	backend.registerLaunchProject([]*discovery.GlobalWorktreeEntry{launchEntry})
+
+	localIdentity := repositoryInfoFromRootPath(repoPath)
+	require.NotNil(t, localIdentity)
+	require.Len(t, registered, 1)
+	assert.Equal(t, localIdentity.FullPath, registered[0].Repository,
+		"a relative dotless remote must persist as the local fallback, not a shareable identity")
+	require.Len(t, cfg.Projects, 1)
+	assert.Equal(t, localIdentity.FullPath, cfg.Projects[0].Repository)
+}
+
+// TestTUIBackendAutoRegisteredRelativeRemoteNeverReachesManifest characterizes
+// the laundering end-to-end: auto-register a repo whose real origin is a
+// relative dotless remote (via the same discovery the TUI runs), then build a
+// fleet manifest from the resulting registry and require that the bogus
+// "cache/..." identity is never published.
+func TestTUIBackendAutoRegisteredRelativeRemoteNeverReachesManifest(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "cache/team/repo.git")
+
+	launchEntries, err := discoverLaunchRepoWorktrees(repoPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, launchEntries)
+
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "global")},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, repoPath)
+	backend.registerProject = func(models.Project) error { return nil }
+
+	backend.registerLaunchProject(launchEntries)
+	require.Len(t, cfg.Projects, 1)
+
+	builder := fleet.NewManifestBuilder(fleet.ManifestBuilderOptions{
+		Hostname: func() (string, error) { return "host-a", nil },
+		ListProjectWorktrees: func(context.Context, models.Project) ([]models.Worktree, error) {
+			return nil, nil
+		},
+		DiscoverGlobalWorktrees: func(
+			string, []models.Project,
+		) ([]*discovery.GlobalWorktreeEntry, error) {
+			return nil, nil
+		},
+	})
+	manifest, err := builder.Build(context.Background(), cfg)
+	require.NoError(t, err)
+	for _, project := range manifest.Projects {
+		assert.NotEqual(t, "cache/team/repo", project.Identity,
+			"a git-derived relative remote must never launder into a published fleet identity")
+	}
+}
+
 func TestApplyProjectIdentityFallbackKeepsOriginForPathBackedProjects(t *testing.T) {
 	forkInfo, err := url.ParseRepositoryURL("https://github.com/fork/kwt.git")
 	require.NoError(t, err)
@@ -1238,7 +1389,9 @@ func TestHasStableProjectIdentityRejectsAbsolutePathFallbacks(t *testing.T) {
 		want       bool
 	}{
 		{name: "remote full path", repository: "github.com/example/service-api", want: true},
-		{name: "path safe local identity", repository: "local/Users/test/service", want: true},
+		// local/... is a path fallback: it never reaches the hub, so an
+		// origin-derived identity may replace it (see reusableExistingProject).
+		{name: "path safe local identity", repository: "local/Users/test/service", want: false},
 		{name: "relative project identity", repository: "workspace/service", want: true},
 		{name: "unix absolute path", repository: "/Users/test/service", want: false},
 		{name: "unix absolute tmp path", repository: "/var/tmp/service", want: false},
@@ -1847,8 +2000,33 @@ func TestDiscoverLaunchRepoWorktreesListsLocalOnlyRepository(t *testing.T) {
 	assert.True(t, entries[0].IsMain)
 	assert.Empty(t, entries[0].RepositoryURL)
 	require.NotNil(t, entries[0].RepositoryInfo)
-	assert.Equal(t, filepath.ToSlash(cleanComparablePath(repoPath)), entries[0].RepositoryInfo.FullPath)
+	// A no-remote repository resolves through the single canonical resolver to
+	// the "local/..." identity, matching kwt list and kwt list -g discovery.
+	wantInfo, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+	assert.Equal(t, wantInfo.FullPath, entries[0].RepositoryInfo.FullPath)
 	assert.Equal(t, filepath.Base(repoPath), entries[0].RepositoryInfo.Repository)
+}
+
+// TestDiscoverLaunchRepoWorktreesRejectsRelativeDotlessRemote pins the
+// remote-provenance gate on launch discovery: a relative dotless filesystem
+// remote must not surface as a shareable identity. The entry retains the raw
+// URL only as provenance for registry revalidation while carrying the same
+// local/... identity the shared resolver reports.
+func TestDiscoverLaunchRepoWorktreesRejectsRelativeDotlessRemote(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "cache/team/repo.git")
+
+	entries, err := discoverLaunchRepoWorktrees(repoPath)
+
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "cache/team/repo.git", entries[0].RepositoryURL,
+		"the raw barred remote is retained only for configured-identity revalidation")
+	wantInfo, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+	require.NotNil(t, entries[0].RepositoryInfo)
+	assert.Equal(t, wantInfo.FullPath, entries[0].RepositoryInfo.FullPath)
 }
 
 func newTUITestRepo(t *testing.T) string {

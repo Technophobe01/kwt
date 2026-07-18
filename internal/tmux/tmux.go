@@ -155,12 +155,18 @@ func (t *TmuxCommand) KillSession(sessionName string) error {
 }
 
 func (t *TmuxCommand) AttachSession(sessionName string) error {
-	args := []string{"attach-session", "-t", sessionName}
-	cmd := exec.Command(t.command, args...)
+	cmd := t.attachSessionCmd(sessionName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// attachSessionCmd builds the attach-session invocation through the
+// attach-class exec seam; split out so tests can pin that the attach path
+// uses the full-strip sanitizer without needing a tty to run it.
+func (t *TmuxCommand) attachSessionCmd(sessionName string) *exec.Cmd {
+	return t.newAttachCmd(context.Background(), []string{"attach-session", "-t", sessionName})
 }
 
 func (t *TmuxCommand) HasSession(sessionName string) bool {
@@ -170,13 +176,27 @@ func (t *TmuxCommand) HasSession(sessionName string) bool {
 }
 
 // SwitchClient switches the attached client to the given session (used when
-// already inside tmux, where attach-session would nest).
+// already inside tmux, where attach-session would nest). It is an
+// attach-class command, so it uses the fully stripped attach environment.
 func (t *TmuxCommand) SwitchClient(target string) error {
-	return t.runCommand("switch-client", "-t", target)
+	cmd := t.switchClientCmd(target)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux command failed: %w, stderr: %s", err, stderr.String())
+	}
+	return nil
+}
+
+// switchClientCmd builds the switch-client invocation through the
+// attach-class exec seam; split out so tests can pin the sanitizer choice.
+func (t *TmuxCommand) switchClientCmd(target string) *exec.Cmd {
+	return t.newAttachCmd(context.Background(), []string{"switch-client", "-t", target})
 }
 
 func (t *TmuxCommand) runCommand(args ...string) error {
-	cmd := exec.Command(t.command, args...)
+	cmd := t.newCmd(context.Background(), args)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -188,7 +208,7 @@ func (t *TmuxCommand) runCommand(args ...string) error {
 }
 
 func (t *TmuxCommand) runCommandOutput(args ...string) (string, error) {
-	cmd := exec.Command(t.command, args...)
+	cmd := t.newCmd(context.Background(), args)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -201,7 +221,7 @@ func (t *TmuxCommand) runCommandOutput(args ...string) (string, error) {
 }
 
 func (t *TmuxCommand) RunCommandContext(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd := t.newCmd(ctx, args)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -216,7 +236,7 @@ func (t *TmuxCommand) RunCommandContext(ctx context.Context, args ...string) err
 // returns its stdout — used to capture the pane ID printed by
 // new-session/split-window with -P -F '#{pane_id}'.
 func (t *TmuxCommand) RunCommandOutputContext(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd := t.newCmd(ctx, args)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -224,4 +244,55 @@ func (t *TmuxCommand) RunCommandOutputContext(ctx context.Context, args ...strin
 		return "", fmt.Errorf("tmux command failed: %w, stderr: %s", err, stderr.String())
 	}
 	return stdout.String(), nil
+}
+
+// GlobalEnvironment returns the tmux server's global environment table via
+// show-environment -g, one "NAME=VALUE" (or "-NAME") entry per line. It fails
+// when no server is running; callers treat that as "nothing to inspect" and
+// fall back to the launcher-derived strip set.
+func (t *TmuxCommand) GlobalEnvironment() (string, error) {
+	return t.RunCommandOutputContext(context.Background(), "show-environment", "-g")
+}
+
+// SessionEnvironment returns a session's own environment table via
+// show-environment -t <session>, one "NAME=VALUE" (or "-NAME") entry per
+// line. This is distinct from the server-global table GlobalEnvironment
+// reads: a session can hold launcher-state variables (e.g. an editor's
+// VSCODE_*) directly in its own table, captured when the session was
+// created, without those variables ever having been global. It fails when
+// the session does not exist (e.g. kwt's create path, where the session is
+// not up yet at the point the bootstrap set is derived); callers treat that
+// as "nothing to inspect" and fall back to the other sources.
+func (t *TmuxCommand) SessionEnvironment(session string) (string, error) {
+	return t.RunCommandOutputContext(context.Background(), "show-environment", "-t", session)
+}
+
+// newCmd is the exec seam for every TmuxCommand method except the
+// attach-class commands (see newAttachCmd). It builds the *exec.Cmd for a
+// tmux invocation with Env set to a sanitized copy of the process environment
+// (SanitizedEnviron(os.Environ())) rather than the default inherited
+// environment, so a tmux server this invocation spawns does not capture
+// launcher-specific integration state into its GLOBAL environment table —
+// which would otherwise leak to every pane of every session on that server,
+// not just the one kwt is currently building. SanitizedEnviron keeps
+// EDITOR/VISUAL because commands routed here can START a server, and tmux
+// reads them at server start for its default key mode. Call sites that
+// predate context plumbing pass context.Background().
+func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd.Env = SanitizedEnviron(os.Environ())
+	return cmd
+}
+
+// newAttachCmd is the exec seam for attach-class commands (attach-session,
+// switch-client), which connect a client to an existing server and can never
+// start one. They use AttachSanitizedEnviron — the full launcher-state strip
+// with no EDITOR/VISUAL carve-out — because tmux's update-environment option
+// imports listed variables from the attaching client's environment into the
+// session table, which would override the bootstrap's remove-markers if the
+// client still carried them.
+func (t *TmuxCommand) newAttachCmd(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd.Env = AttachSanitizedEnviron(os.Environ())
+	return cmd
 }
