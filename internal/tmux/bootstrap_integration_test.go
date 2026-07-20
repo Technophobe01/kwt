@@ -38,7 +38,13 @@ func TestStripEnvMasksGlobalEnvForSessionOnly(t *testing.T) {
 	const canary2Name = "STARSHIP_SHELL"
 	const canary2Value = "zsh"
 
-	t.Cleanup(func() { killPrivateTmuxServer(socket) })
+	var socketPath string
+	t.Cleanup(func() {
+		killPrivateTmuxServer(socket)
+		if socketPath != "" {
+			_ = os.Remove(socketPath)
+		}
+	})
 
 	worktreeDir := t.TempDir()
 	// The server inherits this environment at start time, so the canaries
@@ -51,6 +57,11 @@ func TestStripEnvMasksGlobalEnvForSessionOnly(t *testing.T) {
 	if _, err := runTmuxSocket(t, socket, serverEnv, createCmd...); err != nil {
 		t.Fatalf("tmux %v: %v", createCmd, err)
 	}
+	socketPathOut, err := runTmuxSocket(t, socket, nil, "display-message", "-p", "#{socket_path}")
+	if err != nil {
+		t.Fatalf("resolve private tmux socket path: %v", err)
+	}
+	socketPath = strings.TrimSpace(socketPathOut)
 
 	bootCmd := BuildSessionBootstrapCommand(session, []string{canaryName, canary2Name})
 	if _, err := runTmuxSocket(t, socket, nil, bootCmd...); err != nil {
@@ -71,8 +82,14 @@ func TestStripEnvMasksGlobalEnvForSessionOnly(t *testing.T) {
 	}
 
 	killPrivateTmuxServer(socket)
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove private tmux socket %q: %v", socketPath, err)
+	}
 	if out, err := runTmuxSocket(t, socket, nil, "list-sessions"); err == nil {
 		t.Errorf("expected private tmux server %q to be gone after kill-server, got: %s", socket, out)
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Errorf("private tmux socket %q remains after test: %v", socketPath, err)
 	}
 }
 

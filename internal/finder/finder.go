@@ -297,6 +297,12 @@ func (f *Finder) generateWorktreePreview(wt models.Worktree, maxLines int) strin
 		fmt.Sprintf("Commit: %s", truncateHash(wt.CommitHash)),
 		fmt.Sprintf("Created: %s", wt.CreatedAt.Format("2006-01-02 15:04")),
 	}
+	if wt.Repository != "" {
+		preview = append(preview, fmt.Sprintf("Repository: %s", wt.Repository))
+	}
+	if wt.SessionName != "" {
+		preview = append(preview, fmt.Sprintf("Session: %s", wt.SessionName))
+	}
 
 	if wt.IsMain {
 		preview = append(preview, "Type: Main worktree")
