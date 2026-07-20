@@ -402,6 +402,7 @@ func TestConvertToWorktreeModels_BasicConversion(t *testing.T) {
 
 func TestConvertToWorktreeModels_WithRepoName(t *testing.T) {
 	repoInfo, _ := url.ParseRepositoryURL("https://github.com/testuser/testrepo.git")
+	createdAt := time.Date(2026, 7, 17, 12, 30, 0, 0, time.UTC)
 	entries := []*GlobalWorktreeEntry{
 		{
 			RepositoryInfo: repoInfo,
@@ -409,6 +410,7 @@ func TestConvertToWorktreeModels_WithRepoName(t *testing.T) {
 			Path:           "/path/to/feature",
 			CommitHash:     "abc123",
 			IsMain:         false,
+			CreatedAt:      createdAt,
 		},
 	}
 
@@ -421,6 +423,16 @@ func TestConvertToWorktreeModels_WithRepoName(t *testing.T) {
 	expected := "testrepo:feature"
 	if worktrees[0].Branch != expected {
 		t.Errorf("Expected branch '%s', got '%s'", expected, worktrees[0].Branch)
+	}
+	if worktrees[0].Repository != repoInfo.FullPath {
+		t.Errorf("Repository = %q, want %q", worktrees[0].Repository, repoInfo.FullPath)
+	}
+	if !worktrees[0].CreatedAt.Equal(createdAt) {
+		t.Errorf("CreatedAt = %v, want %v", worktrees[0].CreatedAt, createdAt)
+	}
+	wantSession := tmux.WorkspaceSessionName(repoInfo, entries[0].Branch, entries[0].Path)
+	if worktrees[0].SessionName != wantSession {
+		t.Errorf("SessionName = %q, want %q", worktrees[0].SessionName, wantSession)
 	}
 }
 

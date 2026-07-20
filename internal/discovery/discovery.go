@@ -225,17 +225,10 @@ func ConvertToWorktreeModels(entries []*GlobalWorktreeEntry, showRepoName bool) 
 	worktrees := make([]models.Worktree, 0, len(entries))
 
 	for _, entry := range entries {
-		branch := entry.Branch
+		wt := entry.Model()
 		if showRepoName && entry.RepositoryInfo != nil {
 			// Use repository name from parsed URL info
-			branch = fmt.Sprintf("%s:%s", entry.RepositoryInfo.Repository, entry.Branch)
-		}
-
-		wt := models.Worktree{
-			Branch:     branch,
-			Path:       entry.Path,
-			CommitHash: entry.CommitHash,
-			IsMain:     entry.IsMain,
+			wt.Branch = fmt.Sprintf("%s:%s", entry.RepositoryInfo.Repository, entry.Branch)
 		}
 		worktrees = append(worktrees, wt)
 	}

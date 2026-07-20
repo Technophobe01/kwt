@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -2361,24 +2362,57 @@ func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
 	assert.Equal(t, "no worktree selected", err.Error())
 }
 
-// TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow exercises the
-// relaxed guard in attachWorkspace: a workspace-only row (row.Entry == nil)
-// must get past it. There is no seam to stub the tmux runner that
-// attachWorkspace constructs internally, so this test relies on an empty
-// layouts config to force a layout-resolution error before EnsureAndAttach
-// is ever reached; that keeps the test from touching real tmux while still
-// proving the row cleared the guard.
-func TestTUIBackendAttachWorkspacePassesGuardForWorkspaceRow(t *testing.T) {
+// TestTUIBackendAttachWorkspacePassesWorkspaceRowToRunner keeps the command
+// layer on a stubbed runner boundary. In particular, this must never create a
+// detached session on the user's default tmux server merely because a unit
+// test needs to prove a workspace-only row clears the selection guard.
+func TestTUIBackendAttachWorkspacePassesWorkspaceRowToRunner(t *testing.T) {
 	row := dashboard.Row{
 		Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: t.TempDir()},
 	}
 	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	before := defaultTmuxSessions(t)
 
-	err := backend.attachWorkspace(context.Background(), row, "", false, false)
+	var gotSession, gotRoot string
+	var gotLayout models.Layout
+	var gotInsideTmux bool
+	backend.ensureAndAttach = func(
+		ctx context.Context,
+		session, root string,
+		layout models.Layout,
+		insideTmux bool,
+	) error {
+		gotSession, gotRoot = session, root
+		gotLayout, gotInsideTmux = layout, insideTmux
+		return nil
+	}
 
-	require.Error(t, err)
-	assert.NotEqual(t, "no worktree selected", err.Error(),
-		"a workspace row must clear the entry/workspace guard")
+	err := backend.attachWorkspace(context.Background(), row, tmux.BlankLayoutName, false, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, tmux.DirWorkspaceSessionName("notes", row.Workspace.Path), gotSession)
+	assert.Equal(t, row.Workspace.Path, gotRoot)
+	assert.Equal(t, tmux.BlankLayout(), gotLayout)
+	assert.False(t, gotInsideTmux)
+	assert.Equal(t, before, defaultTmuxSessions(t),
+		"the stubbed command-layer test must not add default-server tmux sessions")
+}
+
+func defaultTmuxSessions(t *testing.T) []string {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return nil
+	}
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil // No default server is equivalent to an empty session list.
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	sort.Strings(lines)
+	return lines
 }
 
 // TestTUIBackendResolveLayoutUsesWorkspacePathForDefault covers resolveLayout's

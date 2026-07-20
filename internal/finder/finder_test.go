@@ -360,11 +360,13 @@ func TestGenerateSessionPreview_MaxLines(t *testing.T) {
 
 func TestGenerateWorktreePreview_WithoutGit(t *testing.T) {
 	wt := models.Worktree{
-		Branch:     "feature-branch",
-		Path:       "/home/user/project/feature",
-		CommitHash: "abc1234567890def",
-		CreatedAt:  time.Date(2023, 6, 15, 10, 30, 0, 0, time.UTC),
-		IsMain:     false,
+		Branch:      "feature-branch",
+		Path:        "/home/user/project/feature",
+		CommitHash:  "abc1234567890def",
+		CreatedAt:   time.Date(2023, 6, 15, 10, 30, 0, 0, time.UTC),
+		IsMain:      false,
+		Repository:  "github.com/example/project",
+		SessionName: "kwt-workspace-example",
 	}
 
 	finder := &Finder{git: nil} // No git instance
@@ -375,6 +377,8 @@ func TestGenerateWorktreePreview_WithoutGit(t *testing.T) {
 		"Path: /home/user/project/feature",
 		"Commit: abc12345",
 		"Created: 2023-06-15 10:30",
+		"Repository: github.com/example/project",
+		"Session: kwt-workspace-example",
 		"Type: Additional worktree",
 	}
 

@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/ui"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -136,6 +138,14 @@ func TestEnrichManifestFields(t *testing.T) {
 		// Verify it contains the expected path structure (github.com/example/demo)
 		if worktrees[0].Repository != "github.com/example/demo" {
 			t.Errorf("expected Repository to be 'github.com/example/demo', got %q", worktrees[0].Repository)
+		}
+		info, err := worktree.RepositoryInfoFromGit(g)
+		if err != nil {
+			t.Fatalf("resolve repository info: %v", err)
+		}
+		wantSession := tmux.WorkspaceSessionName(info, worktrees[0].Branch, worktrees[0].Path)
+		if worktrees[0].SessionName != wantSession {
+			t.Errorf("expected SessionName %q, got %q", wantSession, worktrees[0].SessionName)
 		}
 	})
 

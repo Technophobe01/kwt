@@ -41,6 +41,7 @@ type tuiBackend struct {
 	discoverLaunchWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions              func() ([]string, error)
+	ensureAndAttach           func(context.Context, string, string, models.Layout, bool) error
 	registerProject           func(models.Project) error
 	registerWorkspace         func(models.Workspace) (models.Workspace, error)
 	unregisterWorkspace       func(name string) error
@@ -69,6 +70,7 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		discoverLaunchWorktrees:  discoverLaunchRepoWorktrees,
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
+		ensureAndAttach:          tmux.NewWorkspaceRunner(tmuxCmd).EnsureAndAttach,
 		registerProject:          config.RegisterProject,
 		registerWorkspace:        config.RegisterWorkspace,
 		unregisterWorkspace:      config.UnregisterWorkspace,
@@ -1247,7 +1249,7 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 	if err != nil {
 		return err
 	}
-	return tmux.NewWorkspaceRunner(b.tmux).EnsureAndAttach(
+	return b.ensureAndAttach(
 		ctx, sessionName, rowPaneRoot(row), layout, insideTmux,
 	)
 }

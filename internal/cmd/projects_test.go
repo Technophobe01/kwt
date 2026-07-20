@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,34 @@ func TestRunProjectsJSONEmitsRegistry(t *testing.T) {
 		got[0].Path != "/home/wesm/code/kwt" || got[0].LastTouched != "2026-07-16T00:00:00Z" {
 		t.Errorf("unexpected project: %+v", got[0])
 	}
+}
+
+func TestRunProjectsRendersTable(t *testing.T) {
+	withProjectsConfig(t, []models.Project{{
+		Repository:  "github.com/wesm/kwt",
+		Name:        "kwt",
+		Path:        "/home/wesm/code/kwt",
+		LastTouched: "2026-07-16T00:00:00Z",
+	}})
+
+	out := runProjectsForTest(t, false)
+
+	assert.Contains(t, out, "NAME")
+	assert.Contains(t, out, "REPOSITORY")
+	assert.Contains(t, out, "github.com/wesm/kwt")
+	assert.Contains(t, out, "/home/wesm/code/kwt")
+}
+
+func TestRunProjectsReturnsConfigLoadError(t *testing.T) {
+	origLoad := loadProjectsConfig
+	t.Cleanup(func() { loadProjectsConfig = origLoad })
+	loadProjectsConfig = func() (*models.Config, error) {
+		return nil, errors.New("config unavailable")
+	}
+
+	err := runProjects(projectsCmd, nil)
+
+	require.EqualError(t, err, "failed to load config: config unavailable")
 }
 
 // TestRunProjectsJSONCanonicalizesLegacyAbsolutePathIdentity pins the fix for
