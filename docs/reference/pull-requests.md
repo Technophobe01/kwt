@@ -32,6 +32,12 @@ with `GIT_TERMINAL_PROMPT=0`, so missing Git credentials fail instead of
 blocking an embedded or SSH client. Configure a Git credential helper or SSH
 authentication for subsequent pushes.
 
+Import fetches also force the SSH implementation's noninteractive mode
+(OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
+credential prompts. Checkout runs with the same sanitized environment and an
+empty trusted hooks directory, so repository hooks cannot run during import;
+configured content filters may run but cannot inherit kwt-managed tokens.
+
 Import requires Git 2.20 or newer because kwt uses per-worktree Git
 configuration to make plain `git push` target the PR head without changing
 push behavior in the main checkout. kwt checks this requirement before it
@@ -137,7 +143,7 @@ An imported list result adds the canonical workspace record:
     "id": "github.com/acme/widget:pr-17-feature-rendering:a1b2c3d4",
     "repository": "github.com/acme/widget",
     "branch": "pr-17-feature-rendering",
-    "path": "/home/alice/worktrees/github.com/acme/widget/pr-17-feature-rendering",
+    "path": "/home/alice/.kwt/worktrees/github.com/acme/widget/pr-17-feature-rendering",
     "state": "ready",
     "session_name": "kwt-workspace-github-com-acme-widget-pr-17-feature-rendering-a1b2c3d4"
   }
@@ -148,7 +154,7 @@ An imported list result adds the canonical workspace record:
 
 kwt chooses the deterministic local branch name, selects or creates the
 correct source remote, fetches the head, creates the worktree through the
-normal workspace manager (including repository setup hooks), and configures
+normal workspace manager (including trusted repository setup commands), and configures
 plain `git push` to update the PR's original head branch. It reports the exact
 tmux session name a client can attach to; import does not launch or manipulate
 tmux panes.
@@ -159,6 +165,12 @@ directory and never prompt or auto-trust in this automation path. Trusted
 `copy_files` and `setup_commands` continue to apply, but setup processes do
 not inherit `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, or the configured fleet
 token environment variable.
+
+Configured file copies use rooted destination operations and reject symlinks
+in the destination path, preventing contributor-controlled checkout entries
+from redirecting writes outside the new worktree. Relative paths in a trusted
+target `.kwt.toml` are resolved against that target repository, never the
+caller's working directory.
 
 A new import returns:
 
@@ -209,7 +221,7 @@ A new import returns:
       "id": "github.com/acme/widget:pr-17-feature-rendering:a1b2c3d4",
       "repository": "github.com/acme/widget",
       "branch": "pr-17-feature-rendering",
-      "path": "/home/alice/worktrees/github.com/acme/widget/pr-17-feature-rendering",
+      "path": "/home/alice/.kwt/worktrees/github.com/acme/widget/pr-17-feature-rendering",
       "state": "ready",
       "session_name": "kwt-workspace-github-com-acme-widget-pr-17-feature-rendering-a1b2c3d4"
     }
@@ -223,7 +235,7 @@ A new import returns:
     "id": "github.com/acme/widget:pr-17-feature-rendering:a1b2c3d4",
     "repository": "github.com/acme/widget",
     "branch": "pr-17-feature-rendering",
-    "path": "/home/alice/worktrees/github.com/acme/widget/pr-17-feature-rendering",
+    "path": "/home/alice/.kwt/worktrees/github.com/acme/widget/pr-17-feature-rendering",
     "state": "ready",
     "session_name": "kwt-workspace-github-com-acme-widget-pr-17-feature-rendering-a1b2c3d4"
   }

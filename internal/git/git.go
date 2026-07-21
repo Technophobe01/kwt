@@ -46,7 +46,7 @@ func (g *Git) RunWithContext(ctx context.Context, args ...string) (string, error
 // disabled. Credential helpers may still supply credentials, but Git will
 // fail instead of waiting for stdin when none are available.
 func (g *Git) RunNonInteractiveWithContext(ctx context.Context, args ...string) (string, error) {
-	return g.runWithContext(ctx, true, args...)
+	return g.runWithEnvironmentContext(ctx, NonInteractiveEnvironment(os.Environ()), args...)
 }
 
 // run executes a git command.
@@ -69,13 +69,19 @@ func (g *Git) run(args ...string) (string, error) {
 
 // runWithContext executes a git command with context support.
 func (g *Git) runWithContext(ctx context.Context, nonInteractive bool, args ...string) (string, error) {
+	if nonInteractive {
+		return g.runWithEnvironmentContext(ctx, NonInteractiveEnvironment(os.Environ()), args...)
+	}
+	return g.runWithEnvironmentContext(ctx, nil, args...)
+}
+
+func (g *Git) runWithEnvironmentContext(ctx context.Context, environment []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
-	if nonInteractive {
-		cmd.Env = withoutEnvironmentKey(os.Environ(), "GIT_TERMINAL_PROMPT")
-		cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+	if environment != nil {
+		cmd.Env = environment
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -92,11 +98,82 @@ func (g *Git) runWithContext(ctx context.Context, nonInteractive bool, args ...s
 	return stdout.String(), nil
 }
 
+// NonInteractiveEnvironment disables Git, credential-manager, and OpenSSH
+// prompting while preserving the caller's ordinary authentication setup.
+func NonInteractiveEnvironment(environment []string) []string {
+	sshCommand := environmentValue(environment, "GIT_SSH_COMMAND")
+	if strings.TrimSpace(sshCommand) == "" {
+		sshCommand = "ssh"
+	}
+	sshCommand = nonInteractiveSSHCommand(sshCommand, environmentValue(environment, "GIT_SSH_VARIANT"))
+	for _, key := range []string{
+		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
+		"GCM_INTERACTIVE", "GIT_CREDENTIAL_INTERACTIVE", "GIT_SSH_COMMAND",
+	} {
+		environment = withoutEnvironmentKey(environment, key)
+	}
+	return append(environment,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"SSH_ASKPASS_REQUIRE=never",
+		"GCM_INTERACTIVE=Never",
+		"GIT_CREDENTIAL_INTERACTIVE=never",
+		"GIT_SSH_COMMAND="+sshCommand,
+	)
+}
+
+func nonInteractiveSSHCommand(command, variant string) string {
+	variant = strings.ToLower(strings.TrimSpace(variant))
+	if variant == "" || variant == "auto" {
+		variant = detectSSHVariant(command)
+	}
+	switch variant {
+	case "ssh":
+		return command + " -oBatchMode=yes"
+	case "plink", "putty", "tortoiseplink":
+		return command + " -batch"
+	default:
+		return command
+	}
+}
+
+func detectSSHVariant(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	executable := strings.Trim(fields[0], "\"'")
+	executable = strings.ReplaceAll(executable, `\`, "/")
+	if slash := strings.LastIndexByte(executable, '/'); slash >= 0 {
+		executable = executable[slash+1:]
+	}
+	executable = strings.TrimSuffix(strings.ToLower(executable), ".exe")
+	switch executable {
+	case "ssh":
+		return "ssh"
+	case "plink", "putty", "tortoiseplink":
+		return executable
+	default:
+		return ""
+	}
+}
+
+func environmentValue(environment []string, key string) string {
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, key) {
+			return value
+		}
+	}
+	return ""
+}
+
 func withoutEnvironmentKey(environment []string, key string) []string {
-	prefix := key + "="
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
-		if !strings.HasPrefix(entry, prefix) {
+		name, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(name, key) {
 			filtered = append(filtered, entry)
 		}
 	}

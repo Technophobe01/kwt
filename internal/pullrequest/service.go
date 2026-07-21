@@ -71,7 +71,7 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 		prs[i].Source.IsFork = !EqualRepositoryIdentity(prs[i].Source.Repository.Identity, prs[i].Repository.Identity)
 		_, record, ok := findProvenance(records, prs[i])
 		if ok && EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
-			if workspace, live := paths[record.Workspace.Path]; live {
+			if workspace, live := matchingProvenanceWorkspace(paths, record); live {
 				prs[i].Imported = true
 				prs[i].Workspace = &workspace
 			}
@@ -123,7 +123,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 			if !EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
 				return NewError(CodeConflict, "pull request is recorded for a different project", false, nil)
 			}
-			if workspace, live := byPath[record.Workspace.Path]; live {
+			if workspace, live := matchingProvenanceWorkspace(byPath, record); live {
 				if recordKey != pr.ID {
 					delete(records, recordKey)
 					record.PullRequestID = pr.ID
@@ -212,6 +212,14 @@ func findProvenance(records map[string]Provenance, pr PullRequest) (string, Prov
 		return key, record, true
 	}
 	return "", Provenance{}, false
+}
+
+func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance) (Workspace, bool) {
+	workspace, ok := byPath[record.Workspace.Path]
+	if !ok || workspace.Branch != record.Workspace.Branch {
+		return Workspace{}, false
+	}
+	return workspace, true
 }
 
 func repositoryFromProject(project Project) (Repository, error) {

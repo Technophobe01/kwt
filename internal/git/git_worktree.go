@@ -1,11 +1,11 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -17,46 +17,13 @@ func (g *Git) ListWorktrees() ([]models.Worktree, error) {
 		return nil, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
-	var worktrees []models.Worktree
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-
-	for i := 0; i < len(lines); i++ {
-		if after, ok := strings.CutPrefix(lines[i], "worktree "); ok {
-			path := after
-
-			var branch, commitHash string
-			isMain := false
-
-			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "worktree "); j++ {
-				if after, ok := strings.CutPrefix(lines[j], "branch "); ok {
-					branch = after
-					// Remove refs/heads/ prefix if present
-					branch = strings.TrimPrefix(branch, "refs/heads/")
-				} else if after, ok := strings.CutPrefix(lines[j], "HEAD "); ok {
-					commitHash = after
-				} else if strings.HasPrefix(lines[j], "bare") {
-					continue
-				}
-				i = j
-			}
-
-			if branch == "" {
-				branch = g.getCurrentBranch(path)
-			}
-
-			info, err := os.Stat(path)
-			var createdAt time.Time
-			if err == nil {
-				createdAt = info.ModTime()
-			}
-
-			worktrees = append(worktrees, models.Worktree{
-				Path:       path,
-				Branch:     branch,
-				CommitHash: commitHash,
-				IsMain:     isMain,
-				CreatedAt:  createdAt,
-			})
+	worktrees := parseWorktreePorcelain(output)
+	for i := range worktrees {
+		if worktrees[i].Branch == "" {
+			worktrees[i].Branch = g.getCurrentBranch(worktrees[i].Path)
+		}
+		if info, statErr := os.Stat(worktrees[i].Path); statErr == nil {
+			worktrees[i].CreatedAt = info.ModTime()
 		}
 	}
 
@@ -77,6 +44,45 @@ func (g *Git) ListWorktrees() ([]models.Worktree, error) {
 	}
 
 	return worktrees, nil
+}
+
+func parseWorktreePorcelain(output string) []models.Worktree {
+	var worktrees []models.Worktree
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	for i := 0; i < len(lines); i++ {
+		if after, ok := strings.CutPrefix(lines[i], "worktree "); ok {
+			path := after
+
+			var branch, commitHash string
+			var prunable bool
+			isMain := false
+
+			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "worktree "); j++ {
+				if after, ok := strings.CutPrefix(lines[j], "branch "); ok {
+					branch = after
+					// Remove refs/heads/ prefix if present
+					branch = strings.TrimPrefix(branch, "refs/heads/")
+				} else if after, ok := strings.CutPrefix(lines[j], "HEAD "); ok {
+					commitHash = after
+				} else if strings.HasPrefix(lines[j], "bare") {
+					continue
+				} else if strings.HasPrefix(lines[j], "prunable") {
+					prunable = true
+				}
+				i = j
+			}
+
+			worktrees = append(worktrees, models.Worktree{
+				Path:       path,
+				Branch:     branch,
+				CommitHash: commitHash,
+				IsMain:     isMain,
+				Prunable:   prunable,
+			})
+		}
+	}
+	return worktrees
 }
 
 // AddWorktree creates a new worktree.
@@ -149,13 +155,35 @@ func (g *Git) refExists(ref string) bool {
 
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
 func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
+	return g.addWorktreeFromBase(path, branch, baseBranch, nil)
+}
+
+// AddWorktreeFromBaseWithEnvironment creates a worktree with an explicit
+// checkout environment and a trusted empty hooks directory.
+func (g *Git) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error {
+	return g.addWorktreeFromBase(path, branch, baseBranch, environment)
+}
+
+func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment []string) error {
 	args := []string{"worktree", "add", "-b", branch, path}
 
 	if baseBranch != "" {
 		args = append(args, baseBranch)
 	}
 
-	if _, err := g.run(args...); err != nil {
+	if environment == nil {
+		if _, err := g.run(args...); err != nil {
+			return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
+		}
+		return nil
+	}
+	hooksDir, err := os.MkdirTemp("", "kwt-empty-hooks-")
+	if err != nil {
+		return fmt.Errorf("create empty Git hooks directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(hooksDir) }()
+	args = append([]string{"-c", "core.hooksPath=" + hooksDir}, args...)
+	if _, err := g.runWithEnvironmentContext(context.Background(), environment, args...); err != nil {
 		return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 	}
 

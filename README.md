@@ -93,7 +93,7 @@ binary.
 
 ```toml
 [worktree]
-basedir = "~/worktrees"
+basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
 [naming]
@@ -144,7 +144,7 @@ Useful config commands:
 ```bash
 kwt config list
 kwt config get layouts.default
-kwt config set worktree.basedir ~/worktrees
+kwt config set worktree.basedir ~/.kwt/worktrees
 kwt config set --local layouts.default stack
 ```
 

@@ -9,7 +9,7 @@ commands, repository setup rules, and the known project registry.
 
 ```toml
 [worktree]
-basedir = "~/worktrees"
+basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
 [naming]
@@ -38,6 +38,10 @@ name = "stack"
 arrange = "even-vertical"
 panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 ```
+
+The default places newly created worktrees under `~/.kwt/worktrees`. Relative
+paths in a trusted repository-local `.kwt.toml` are resolved from that
+repository's root.
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
 table before tmux starts, so command flags live in one local config file.

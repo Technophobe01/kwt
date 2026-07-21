@@ -169,12 +169,50 @@ func TestNewFromCwd(t *testing.T) {
 func TestRunNonInteractiveWithContextDisablesTerminalPrompts(t *testing.T) {
 	repo := NewTestRepository(t)
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
-	gitOutput(t, repo.Path, "config", "alias.check-prompt", `!test "$GIT_TERMINAL_PROMPT" = 0`)
+	gitOutput(t, repo.Path, "config", "alias.check-prompt", `!test "$GIT_TERMINAL_PROMPT" = 0 && test "$GCM_INTERACTIVE" = Never && test "$SSH_ASKPASS_REQUIRE" = never && case "$GIT_SSH_COMMAND" in *BatchMode=yes*) true;; *) false;; esac`)
 
 	_, err := New(repo.Path).RunNonInteractiveWithContext(context.Background(), "check-prompt")
 
 	if err != nil {
 		t.Fatalf("RunNonInteractiveWithContext() error = %v", err)
+	}
+}
+
+func TestNonInteractiveEnvironmentUsesSSHVariantBatchFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment []string
+		wantCommand string
+	}{
+		{
+			name:        "OpenSSH",
+			environment: []string{"GIT_SSH_COMMAND=ssh -i key"},
+			wantCommand: "ssh -i key -oBatchMode=yes",
+		},
+		{
+			name:        "explicit plink variant",
+			environment: []string{"GIT_SSH_COMMAND=C:\\PuTTY\\plink.exe", "GIT_SSH_VARIANT=plink"},
+			wantCommand: "C:\\PuTTY\\plink.exe -batch",
+		},
+		{
+			name:        "detected plink variant",
+			environment: []string{"GIT_SSH_COMMAND=/usr/local/bin/plink"},
+			wantCommand: "/usr/local/bin/plink -batch",
+		},
+		{
+			name:        "unknown implementation",
+			environment: []string{"GIT_SSH_COMMAND=custom-transport"},
+			wantCommand: "custom-transport",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NonInteractiveEnvironment(tc.environment)
+			if command := environmentValue(got, "GIT_SSH_COMMAND"); command != tc.wantCommand {
+				t.Fatalf("GIT_SSH_COMMAND = %q, want %q", command, tc.wantCommand)
+			}
+		})
 	}
 }
 
@@ -568,7 +606,6 @@ func TestPruneWorktrees(t *testing.T) {
 	if err := os.RemoveAll(worktreePath); err != nil {
 		t.Fatalf("Failed to remove worktree directory: %v", err)
 	}
-
 	// Prune worktrees
 	err := g.PruneWorktrees()
 	if err != nil {
@@ -581,6 +618,14 @@ func TestPruneWorktrees(t *testing.T) {
 		if wt.Path == worktreePath {
 			t.Error("Deleted worktree still exists after prune")
 		}
+	}
+}
+
+func TestParseWorktreePorcelainMarksPrunable(t *testing.T) {
+	worktrees := parseWorktreePorcelain("worktree /tmp/stale\nHEAD abc123\nbranch refs/heads/topic\nprunable gitdir file points to non-existent location\n")
+
+	if len(worktrees) != 1 || !worktrees[0].Prunable {
+		t.Fatalf("parseWorktreePorcelain() = %+v, want one prunable worktree", worktrees)
 	}
 }
 

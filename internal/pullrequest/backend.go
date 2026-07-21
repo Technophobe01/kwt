@@ -37,7 +37,7 @@ func NewGitBackend(g *gitadapter.Git, manager *worktree.Manager, project Project
 	for _, option := range options {
 		option(backend)
 	}
-	backend.setupEnvironment = SafeSetupEnvironment(os.Environ(), backend.fleetTokenEnv)
+	backend.setupEnvironment = gitadapter.NonInteractiveEnvironment(SafeSetupEnvironment(os.Environ(), backend.fleetTokenEnv))
 	return backend
 }
 
@@ -98,6 +98,10 @@ func (b *GitBackend) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	}
 	result := make([]Workspace, 0, len(worktrees))
 	for _, candidate := range worktrees {
+		pathInfo, statErr := os.Stat(candidate.Path)
+		if candidate.Prunable || statErr != nil || !pathInfo.IsDir() {
+			continue
+		}
 		result = append(result, Workspace{
 			ID:         b.project.Identity + ":" + candidate.Branch + ":" + template.ShortHash(candidate.Path),
 			Repository: b.project.Identity, Branch: candidate.Branch, Path: candidate.Path,

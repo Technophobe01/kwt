@@ -165,6 +165,58 @@ func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
 	assert.Equal(t, "|||visible", string(contents))
 }
 
+func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("filtered.txt filter=kwt-capture\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "filtered.txt"), []byte("content\n"), 0o644))
+	runGit(t, repo, "add", ".gitattributes", "filtered.txt")
+	runGit(t, repo, "commit", "-m", "add filtered content")
+
+	filterScript := filepath.Join(t.TempDir(), "filter.sh")
+	require.NoError(t, os.WriteFile(filterScript, []byte("#!/bin/sh\nif test -n \"$KWT_GITHUB_TOKEN$KWT_FLEET_TOKEN$CUSTOM_FLEET_TOKEN\"; then exit 42; fi\nprintf 'filtered:'\ncat\n"), 0o755))
+	filterCommand := "sh '" + strings.ReplaceAll(filepath.ToSlash(filterScript), "'", "'\\''") + "'"
+	runGit(t, repo, "config", "filter.kwt-capture.smudge", filterCommand)
+	hookPath := filepath.Join(repo, ".git", "hooks", "post-checkout")
+	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 73\n"), 0o755))
+
+	t.Setenv("KWT_GITHUB_TOKEN", "github-secret")
+	t.Setenv("KWT_FLEET_TOKEN", "fleet-secret")
+	t.Setenv("CUSTOM_FLEET_TOKEN", "custom-secret")
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Fleet:    models.FleetConfig{TokenEnv: "CUSTOM_FLEET_TOKEN"},
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: repo}},
+	}
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/10", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject(), WithFleetTokenEnvironment(cfg.Fleet.TokenEnv))
+
+	workspace, err := backend.Create(context.Background(), "pr-10-safe-checkout", "refs/kwt/pull-requests/acme/widget/10")
+
+	require.NoError(t, err)
+	contents, err := os.ReadFile(filepath.Join(workspace.Path, "filtered.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "filtered:content\n", string(contents))
+}
+
+func TestGitBackendListWorkspacesOmitsMissingWorktrees(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/11", head)
+	workspace, err := backend.Create(context.Background(), "pr-11-stale", "refs/kwt/pull-requests/acme/widget/11")
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(workspace.Path))
+
+	workspaces, err := backend.ListWorkspaces(context.Background())
+
+	require.NoError(t, err)
+	for _, candidate := range workspaces {
+		assert.NotEqual(t, workspace.Path, candidate.Path)
+	}
+}
+
 func TestGitBackendCreatesDeterministicRemoteWithoutOverwritingCollision(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	runGit(t, repo, "remote", "add", "kwt-pr-octocat", "https://github.com/someone/other.git")

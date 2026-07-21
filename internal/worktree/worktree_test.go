@@ -39,6 +39,9 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 	if m.addError != nil {
 		return m.addError
 	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
@@ -106,11 +109,18 @@ func (m *mockGit) AddWorktreeFromBase(path, branch, baseBranch string) error {
 	if m.addError != nil {
 		return m.addError
 	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return err
+	}
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
 	})
 	return nil
+}
+
+func (m *mockGit) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, _ []string) error {
+	return m.AddWorktreeFromBase(path, branch, baseBranch)
 }
 
 func TestManagerAdd(t *testing.T) {

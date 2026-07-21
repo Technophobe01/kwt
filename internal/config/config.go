@@ -207,7 +207,7 @@ func Init() error {
 	viper.AddConfigPath(configDir)
 
 	viper.SetDefault("cd.launch_shell", true)
-	viper.SetDefault("worktree.basedir", "~/worktrees")
+	viper.SetDefault("worktree.basedir", "~/.kwt/worktrees")
 	viper.SetDefault("worktree.auto_mkdir", true)
 	viper.SetDefault("finder.preview", true)
 	viper.SetDefault("ui.icons", true)
@@ -304,7 +304,7 @@ func writeDefaultConfig(configPath string) (err error) {
 
 func defaultConfigTOML() string {
 	return fmt.Sprintf(`[worktree]
-basedir = "~/worktrees"
+basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
 [cd]
@@ -470,6 +470,9 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 				if parseErr := local.ReadConfig(bytes.NewReader(data)); parseErr != nil {
 					return nil, fmt.Errorf("parse target config %s: %w", absPath, parseErr)
 				}
+				if pathErr := resolveTargetLocalPaths(local, repoRoot); pathErr != nil {
+					return nil, fmt.Errorf("resolve target config paths %s: %w", absPath, pathErr)
+				}
 				for _, key := range local.AllKeys() {
 					switch {
 					case key == "repository_settings":
@@ -493,6 +496,38 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
+	repoRoot = utils.CanonicalPath(repoRoot)
+	if local.IsSet("worktree.basedir") {
+		local.Set("worktree.basedir", resolveTargetRelativePath(repoRoot, local.GetString("worktree.basedir")))
+	}
+
+	var settings []models.RepositorySetting
+	if err := local.UnmarshalKey("repository_settings", &settings); err != nil {
+		return err
+	}
+	for i := range settings {
+		settings[i].Repository = resolveTargetRelativePath(repoRoot, settings[i].Repository)
+		settings[i].BaseDir = resolveTargetRelativePath(repoRoot, settings[i].BaseDir)
+	}
+	if len(settings) > 0 {
+		local.Set("repository_settings", settings)
+	}
+	return nil
+}
+
+func resolveTargetRelativePath(repoRoot, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "~" || strings.HasPrefix(value, "~/") {
+		return value
+	}
+	value = os.ExpandEnv(value)
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Join(repoRoot, value)
 }
 
 // StdinInteractive reports whether stdin is a terminal (exported for callers

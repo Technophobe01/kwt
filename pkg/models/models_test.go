@@ -99,7 +99,7 @@ func TestBranchJSON(t *testing.T) {
 func TestConfigDefaults(t *testing.T) {
 	cfg := Config{
 		Worktree: WorktreeConfig{
-			BaseDir:   "~/worktrees",
+			BaseDir:   "~/.kwt/worktrees",
 			AutoMkdir: true,
 		},
 		Finder: FinderConfig{
@@ -111,8 +111,8 @@ func TestConfigDefaults(t *testing.T) {
 	}
 
 	// Verify default values
-	if cfg.Worktree.BaseDir != "~/worktrees" {
-		t.Errorf("Default BaseDir mismatch: got %s, want ~/worktrees", cfg.Worktree.BaseDir)
+	if cfg.Worktree.BaseDir != "~/.kwt/worktrees" {
+		t.Errorf("Default BaseDir mismatch: got %s, want ~/.kwt/worktrees", cfg.Worktree.BaseDir)
 	}
 	if !cfg.Worktree.AutoMkdir {
 		t.Error("Default AutoMkdir should be true")

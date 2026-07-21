@@ -3,8 +3,11 @@ package worktree
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/filesystem"
 )
 
@@ -108,6 +111,49 @@ func TestCopyFilesWithGlob(t *testing.T) {
 				if _, err := os.Stat(path); err == nil {
 					t.Errorf("expected %s to NOT be copied", rel)
 				}
+			}
+		})
+	}
+}
+
+func TestCopyFilesWithGlobRejectsDestinationSymlinks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		symlinkRel string
+		copyRel    string
+	}{
+		{name: "final component", symlinkRel: "config/token", copyRel: "config/token"},
+		{name: "parent component", symlinkRel: "config", copyRel: "config/token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srcRoot := t.TempDir()
+			dstRoot := t.TempDir()
+			outside := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(srcRoot, "config"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(srcRoot, tc.copyRel), []byte("replacement"), 0o600))
+			if tc.symlinkRel == tc.copyRel {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(dstRoot, tc.symlinkRel)), 0o755))
+				victim := filepath.Join(outside, "victim")
+				require.NoError(t, os.WriteFile(victim, []byte("original"), 0o600))
+				if err := os.Symlink(victim, filepath.Join(dstRoot, tc.symlinkRel)); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			} else {
+				if err := os.Symlink(outside, filepath.Join(dstRoot, tc.symlinkRel)); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+
+			errs := CopyFilesWithGlob(filesystem.NewStandardFileSystem(), srcRoot, dstRoot, []string{tc.copyRel})
+
+			require.NotEmpty(t, errs)
+			assert.Contains(t, strings.ToLower(errs[0].Error()), "symlink")
+			if tc.symlinkRel == tc.copyRel {
+				contents, err := os.ReadFile(filepath.Join(outside, "victim"))
+				require.NoError(t, err)
+				assert.Equal(t, "original", string(contents))
+			} else {
+				assert.NoFileExists(t, filepath.Join(outside, "token"))
 			}
 		})
 	}

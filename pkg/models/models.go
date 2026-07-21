@@ -12,6 +12,7 @@ type Worktree struct {
 	CreatedAt   time.Time `json:"created_at"`   // Worktree directory modification time
 	Repository  string    `json:"repository"`   // Repository slug, e.g. github.com/owner/name
 	SessionName string    `json:"session_name"` // Computed tmux workspace session name
+	Prunable    bool      `json:"-"`            // Git reports this worktree entry as stale/prunable
 }
 
 // Branch represents a Git branch with its metadata.

@@ -286,6 +286,25 @@ func TestListMarksExistingImport(t *testing.T) {
 	assert.Equal(t, &workspace, got[0].Workspace)
 }
 
+func TestListDoesNotMatchProvenanceWhenLiveBranchDiffers(t *testing.T) {
+	pr := testPR(23, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-23", Repository: testProject().Identity, Branch: "different-branch", Path: "/worktrees/23", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	recorded := workspace
+	recorded.Branch = "pr-23-feature-widgets"
+	store.records[pr.ID] = Provenance{PullRequestID: pr.ID, Project: testProject(), Workspace: recorded, HeadSHA: pr.HeadSHA}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	got, err := service.List(context.Background(), testProject(), "open")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.False(t, got[0].Imported)
+	assert.Nil(t, got[0].Workspace)
+}
+
 func TestListRecognizesLegacyCasedProvenance(t *testing.T) {
 	pr := testPR(22, false)
 	backend := newFakeBackend()
@@ -390,6 +409,24 @@ func TestImportIsIdempotent(t *testing.T) {
 	assert.Equal(t, ImportCreated, first.Status)
 	assert.Equal(t, ImportExisting, second.Status)
 	assert.Equal(t, first.Workspace, second.Workspace)
+	assert.Equal(t, 1, backend.createCalls)
+}
+
+func TestImportDoesNotReturnExistingWorkspaceWhenBranchDiffers(t *testing.T) {
+	pr := testPR(44, false)
+	backend := newFakeBackend()
+	live := Workspace{ID: "ws-other", Repository: testProject().Identity, Branch: "other-branch", Path: "/worktrees/44", State: "ready"}
+	backend.workspaces = []Workspace{live}
+	store := newMemoryStore()
+	recorded := live
+	recorded.Branch = "pr-44-feature-widgets"
+	store.records[pr.ID] = Provenance{PullRequestID: pr.ID, Project: testProject(), Workspace: recorded, HeadSHA: pr.HeadSHA}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	result, err := service.Import(context.Background(), testProject(), "44")
+
+	require.NoError(t, err)
+	assert.Equal(t, ImportCreated, result.Status)
 	assert.Equal(t, 1, backend.createCalls)
 }
 

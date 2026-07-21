@@ -19,6 +19,7 @@ type GitInterface interface {
 	ListWorktrees() ([]models.Worktree, error)
 	AddWorktree(path, branch string, createBranch bool) error
 	AddWorktreeFromBase(path, branch, baseBranch string) error
+	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
 	RemoveWorktree(path string, force bool) error
 	DeleteBranch(branch string, force bool) error
 	PruneWorktrees() error
@@ -84,8 +85,14 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		return "", err
 	}
 
-	if err := m.git.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
-		return "", err
+	var addErr error
+	if opts.SetupEnvironment != nil {
+		addErr = m.git.AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch, opts.SetupEnvironment)
+	} else {
+		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
+	}
+	if addErr != nil {
+		return "", addErr
 	}
 
 	if !opts.SkipSetup {
