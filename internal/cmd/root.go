@@ -20,6 +20,7 @@ var (
 
 var (
 	mergeCwdLocal = config.MergeCwdLocal
+	configInitErr error
 
 	stdinIsTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
@@ -42,6 +43,9 @@ a fuzzy finder interface.`,
 	Version: getVersionString(),
 	Args:    cobra.NoArgs,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireConfigInitialization(); err != nil {
+			return err
+		}
 		if cmd == cmd.Root() {
 			return nil
 		}
@@ -75,12 +79,18 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	return cmd.Help()
 }
 
-// initConfig reads in config file and ENV variables if set.
+// initConfig reads in config file and ENV variables if set. Cobra's
+// initializer callback cannot return an error, so command pre-run hooks
+// propagate the stored failure without terminating the process directly.
 func initConfig() {
-	if err := config.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing config: %v\n", err)
-		os.Exit(1)
+	configInitErr = config.Init()
+}
+
+func requireConfigInitialization() error {
+	if configInitErr != nil {
+		return fmt.Errorf("initialize configuration: %w", configInitErr)
 	}
+	return nil
 }
 
 // getVersionString returns a formatted version string using build info

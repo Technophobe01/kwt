@@ -41,7 +41,9 @@ panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 
 The default places newly created worktrees under `~/.kwt/worktrees`. Relative
 paths in a trusted repository-local `.kwt.toml` are resolved from that
-repository's root.
+repository's root. Repository-local path fields cannot reference environment
+variables; environment expansion remains available for paths in the global
+configuration.
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
 table before tmux starts, so command flags live in one local config file.

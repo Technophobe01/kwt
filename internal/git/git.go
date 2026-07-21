@@ -161,12 +161,56 @@ func nonInteractiveSSHCommand(command, variant string) string {
 }
 
 func detectSSHVariant(command string) string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	executable := leadingShellWord(command)
+	if executable == "" {
 		return ""
 	}
-	executable := strings.Trim(fields[0], "\"'")
 	return detectSSHExecutableVariant(executable)
+}
+
+func leadingShellWord(command string) string {
+	command = strings.TrimLeft(command, " \t\r\n")
+	var word strings.Builder
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if quote == 0 {
+			switch ch {
+			case ' ', '\t', '\r', '\n':
+				return word.String()
+			case '\'', '"':
+				quote = ch
+			case '\\':
+				if i+1 < len(command) {
+					next := command[i+1]
+					if next == ' ' || next == '\t' || next == '\r' || next == '\n' || next == '\'' || next == '"' || next == '\\' {
+						i++
+						word.WriteByte(next)
+					} else {
+						word.WriteByte(ch)
+					}
+				}
+			default:
+				word.WriteByte(ch)
+			}
+			continue
+		}
+		if ch == quote {
+			quote = 0
+			continue
+		}
+		if ch == '\\' && quote == '"' && i+1 < len(command) {
+			next := command[i+1]
+			switch next {
+			case '$', '`', '"', '\\', '\n':
+				i++
+				word.WriteByte(next)
+				continue
+			}
+		}
+		word.WriteByte(ch)
+	}
+	return word.String()
 }
 
 func detectSSHExecutableVariant(executable string) string {

@@ -191,6 +191,37 @@ func TestPRCommandsSkipCallerLocalConfig(t *testing.T) {
 	require.NoError(t, prCmd.PersistentPreRunE(prCmd, nil))
 }
 
+func TestPRConfigInitializationFailureUsesJSONContract(t *testing.T) {
+	if os.Getenv("KWT_TEST_PR_CONFIG_INIT_FAILURE") == "1" {
+		rootCmd.SetArgs([]string{"pr", "list", "--project", "widget"})
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stderr)
+		Execute()
+		return
+	}
+
+	kwtHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(kwtHome, "config.toml"), []byte("invalid = [\n"), 0o600))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPRConfigInitializationFailureUsesJSONContract$")
+	cmd.Env = append(os.Environ(),
+		"KWT_TEST_PR_CONFIG_INIT_FAILURE=1",
+		"KWT_HOME="+kwtHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 9, exitErr.ExitCode())
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, pullrequest.CodeWorkspaceCreation, envelope.Error.Code)
+	assert.Contains(t, stderr.String(), "workspace_creation_failed")
+}
+
 func TestRunPRListWritesStructuredOutput(t *testing.T) {
 	service := &fakePRService{prs: []pullrequest.PullRequest{{
 		ID: "github:github.com/acme/widget#17", Number: 17, Title: "Improve widgets",

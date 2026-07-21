@@ -40,7 +40,17 @@ var prCmd = &cobra.Command{
 	Args:  prNoArgs,
 	// Pull-request commands select an explicit globally registered project.
 	// A caller's cwd-local config must never alter a remote/SSH automation call.
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireConfigInitialization(); err != nil {
+			return writePRError(cmd, pullrequest.NewError(
+				pullrequest.CodeWorkspaceCreation,
+				"failed to initialize configuration",
+				false,
+				err,
+			))
+		}
+		return nil
+	},
 }
 
 var prListCmd = &cobra.Command{
@@ -346,6 +356,8 @@ func (e *prCommandError) ExitCode() int { return prExitCode(e.err.Code) }
 
 func writePRError(cmd *cobra.Command, err error) error {
 	typed := pullrequest.AsError(err, pullrequest.CodeWorkspaceCreation, "pull-request operation failed")
+	cmd.Root().SilenceUsage = true
+	cmd.Root().SilenceErrors = true
 	_ = writePRJSON(cmd, pullrequest.ErrorEnvelope{Error: typed})
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "kwt pr: %s: %s\n", typed.Code, typed.Message)
 	return &prCommandError{err: typed}

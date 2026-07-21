@@ -189,7 +189,8 @@ Configured file copies use rooted destination operations and reject symlinks
 in the destination path, preventing contributor-controlled checkout entries
 from redirecting writes outside the new worktree. Relative paths in a trusted
 target `.kwt.toml` are resolved against that target repository, never the
-caller's working directory.
+caller's working directory, and target-local path fields cannot expand
+environment variables into workspace paths.
 
 A new import returns:
 

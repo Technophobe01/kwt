@@ -1661,6 +1661,42 @@ func TestLoadForTargetResolvesRelativePathsAgainstSelectedRepository(t *testing.
 	assert.Equal(t, filepath.Join(resolvedTarget, "repo-worktrees"), cfg.RepositorySettings[0].BaseDir)
 }
 
+func TestLoadForTargetRejectsEnvironmentReferencesInRepositoryLocalPaths(t *testing.T) {
+	secret := "credential-must-not-appear-in-a-workspace-path"
+	for _, tc := range []struct {
+		name  string
+		local string
+	}{
+		{name: "worktree base directory", local: "[worktree]\nbasedir = '$KWT_GITHUB_TOKEN'\n"},
+		{name: "repository selector", local: "[[repository_settings]]\nrepository = '$KWT_GITHUB_TOKEN'\nsetup_commands = ['echo trusted']\n"},
+		{name: "repository base directory", local: "[[repository_settings]]\nrepository = '.'\nbasedir = '${KWT_GITHUB_TOKEN}'\nsetup_commands = ['echo trusted']\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kwtHome := t.TempDir()
+			t.Setenv("KWT_HOME", kwtHome)
+			t.Setenv("KWT_GITHUB_TOKEN", secret)
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			require.NoError(t, Init())
+
+			target := t.TempDir()
+			localPath := filepath.Join(target, ".kwt.toml")
+			local := []byte(tc.local)
+			require.NoError(t, os.WriteFile(localPath, local, 0o600))
+			absPath, err := normalizeConfigPath(localPath)
+			require.NoError(t, err)
+			store := &TrustStore{path: defaultTrustStorePath()}
+			require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+			_, err = LoadForTarget(target, false)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "environment variable")
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
 func TestLoadForTargetMergesEquivalentGlobalAndLocalRepositoryPaths(t *testing.T) {
 	kwtHome := t.TempDir()
 	home := t.TempDir()

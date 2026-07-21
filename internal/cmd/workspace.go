@@ -27,9 +27,10 @@ var workspaceCmd = &cobra.Command{
 	Use:   "workspace",
 	Short: "Manage directory workspaces not bound to a git worktree",
 	// Isolation: workspace commands manage machine-level state in the global
-	// config and must not merge the caller's cwd .kwt.toml. Overriding the
-	// root PersistentPreRunE with a no-op keeps the global config pristine.
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	// config and must not merge the caller's cwd .kwt.toml. Skipping the root
+	// cwd merge keeps the global config pristine while still
+	// propagating global config initialization failures.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return requireConfigInitialization() },
 }
 
 var workspaceAddCmd = &cobra.Command{

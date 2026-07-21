@@ -545,7 +545,11 @@ func normalizeTargetConfigPath(path string) (string, error) {
 func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 	repoRoot = utils.CanonicalPath(repoRoot)
 	if local.IsSet("worktree.basedir") {
-		local.Set("worktree.basedir", resolveTargetRelativePath(repoRoot, local.GetString("worktree.basedir")))
+		resolved, err := resolveTargetRelativePath(repoRoot, local.GetString("worktree.basedir"))
+		if err != nil {
+			return fmt.Errorf("resolve target worktree base directory: %w", err)
+		}
+		local.Set("worktree.basedir", resolved)
 	}
 
 	var settings []models.RepositorySetting
@@ -553,8 +557,16 @@ func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 		return err
 	}
 	for i := range settings {
-		settings[i].Repository = resolveTargetRelativePath(repoRoot, settings[i].Repository)
-		settings[i].BaseDir = resolveTargetRelativePath(repoRoot, settings[i].BaseDir)
+		resolvedRepository, err := resolveTargetRelativePath(repoRoot, settings[i].Repository)
+		if err != nil {
+			return fmt.Errorf("resolve target repository setting %d repository: %w", i, err)
+		}
+		resolvedBaseDir, err := resolveTargetRelativePath(repoRoot, settings[i].BaseDir)
+		if err != nil {
+			return fmt.Errorf("resolve target repository setting %d base directory: %w", i, err)
+		}
+		settings[i].Repository = resolvedRepository
+		settings[i].BaseDir = resolvedBaseDir
 	}
 	if len(settings) > 0 {
 		local.Set("repository_settings", settings)
@@ -562,16 +574,27 @@ func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 	return nil
 }
 
-func resolveTargetRelativePath(repoRoot, value string) string {
+func resolveTargetRelativePath(repoRoot, value string) (string, error) {
 	value = strings.TrimSpace(value)
+	if targetPathHasEnvironmentReference(value) {
+		return "", fmt.Errorf("environment variable references are not allowed in repository-local paths")
+	}
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") {
-		return value
+		return value, nil
 	}
-	value = os.ExpandEnv(value)
 	if filepath.IsAbs(value) {
-		return filepath.Clean(value)
+		return filepath.Clean(value), nil
 	}
-	return filepath.Join(repoRoot, value)
+	return filepath.Join(repoRoot, value), nil
+}
+
+func targetPathHasEnvironmentReference(value string) bool {
+	found := false
+	_ = os.Expand(value, func(string) string {
+		found = true
+		return ""
+	})
+	return found
 }
 
 // StdinInteractive reports whether stdin is a terminal (exported for callers

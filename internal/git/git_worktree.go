@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,11 +178,62 @@ func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment [
 		}
 		return nil
 	}
+	branchExisted := g.refExists("refs/heads/" + branch)
+	_, pathStatErr := os.Lstat(path)
+	pathExisted := !os.IsNotExist(pathStatErr)
 	if _, err := g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, args...); err != nil {
-		return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
+		addErr := fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
+		cleanupErr := g.cleanupFailedWorktreeAdd(path, branch, pathExisted, branchExisted, environment)
+		return errors.Join(addErr, cleanupErr)
 	}
 
 	return nil
+}
+
+func (g *Git) cleanupFailedWorktreeAdd(path, branch string, pathExisted, branchExisted bool, environment []string) error {
+	if !pathExisted {
+		if registered, _ := g.worktreeRegisteredWithEnvironment(path, environment); registered {
+			_ = g.RemoveWorktreeWithEnvironment(path, true, environment)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("clean failed worktree directory: %w", err)
+		}
+		_, _ = g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, "worktree", "prune", "--expire", "now")
+	}
+	if !branchExisted && g.refExists("refs/heads/"+branch) {
+		_ = g.DeleteBranchWithEnvironment(branch, true, environment)
+	}
+
+	var cleanupErrs []error
+	if !pathExisted {
+		if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree path still exists"))
+		}
+		if registered, err := g.worktreeRegisteredWithEnvironment(path, environment); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("verify failed worktree cleanup: %w", err))
+		} else if registered {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree remains registered"))
+		}
+	}
+	if !branchExisted && g.refExists("refs/heads/"+branch) {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree branch remains registered"))
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func (g *Git) worktreeRegisteredWithEnvironment(path string, environment []string) (bool, error) {
+	output, err := g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	wanted := filepath.Clean(path)
+	for _, line := range strings.Split(output, "\n") {
+		listed, ok := strings.CutPrefix(line, "worktree ")
+		if ok && filepath.Clean(listed) == wanted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RemoveWorktree removes a worktree.

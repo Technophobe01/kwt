@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -200,6 +202,21 @@ func TestNonInteractiveEnvironmentUsesSSHVariantBatchFlag(t *testing.T) {
 			wantCommand: "/usr/local/bin/plink -batch",
 		},
 		{
+			name:        "detected Windows plink path",
+			environment: []string{`GIT_SSH_COMMAND=C:\PuTTY\plink.exe`},
+			wantCommand: `C:\PuTTY\plink.exe -batch`,
+		},
+		{
+			name:        "quoted OpenSSH executable path",
+			environment: []string{"GIT_SSH_COMMAND='/opt/Open SSH/ssh' -i key"},
+			wantCommand: "'/opt/Open SSH/ssh' -i key -oBatchMode=yes",
+		},
+		{
+			name:        "quoted plink executable path",
+			environment: []string{`GIT_SSH_COMMAND="C:\Program Files\PuTTY\plink.exe" -ssh`},
+			wantCommand: `"C:\Program Files\PuTTY\plink.exe" -ssh -batch`,
+		},
+		{
 			name:        "OpenSSH from GIT_SSH",
 			environment: []string{"GIT_SSH=/usr/local/bin/ssh"},
 			wantCommand: "'/usr/local/bin/ssh' -oBatchMode=yes",
@@ -229,6 +246,31 @@ func TestNonInteractiveEnvironmentUsesSSHVariantBatchFlag(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAddWorktreeFromBaseWithEnvironmentCleansUpFailedCheckout(t *testing.T) {
+	repo := NewTestRepository(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=reject-checkout\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
+	gitOutput(t, repo.Path, "config", "filter.reject-checkout.clean", "cat")
+	gitOutput(t, repo.Path, "config", "filter.reject-checkout.smudge", "sh -c 'echo checkout-failed >&2; exit 73'")
+	gitOutput(t, repo.Path, "config", "filter.reject-checkout.required", "true")
+	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
+	gitOutput(t, repo.Path, "commit", "-m", "Add checkout failure fixture")
+
+	path := filepath.Join(t.TempDir(), "failed-worktree")
+	branch := "review/failed-checkout"
+	err := New(repo.Path).AddWorktreeFromBaseWithEnvironment(
+		path, branch, "main", NonInteractiveEnvironment(os.Environ()),
+	)
+
+	require.Error(t, err)
+	assert.NoDirExists(t, path)
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repo.Path
+	assert.Error(t, cmd.Run(), "failed checkout must not leave its newly created branch")
+	worktrees := gitOutput(t, repo.Path, "worktree", "list", "--porcelain")
+	assert.NotContains(t, worktrees, path)
 }
 
 func TestListWorktrees(t *testing.T) {
