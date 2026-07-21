@@ -103,6 +103,9 @@ func (g *Git) runWithEnvironmentContext(ctx context.Context, environment []strin
 func NonInteractiveEnvironment(environment []string) []string {
 	sshCommand := environmentValue(environment, "GIT_SSH_COMMAND")
 	if strings.TrimSpace(sshCommand) == "" {
+		sshCommand = environmentValue(environment, "GIT_SSH")
+	}
+	if strings.TrimSpace(sshCommand) == "" {
 		sshCommand = "ssh"
 	}
 	sshCommand = nonInteractiveSSHCommand(sshCommand, environmentValue(environment, "GIT_SSH_VARIANT"))
