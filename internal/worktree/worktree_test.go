@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	configpkg "go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -199,6 +201,35 @@ func TestManagerAdd(t *testing.T) {
 					t.Errorf("Expected 1 worktree, got %d", len(mockG.worktrees))
 				}
 			}
+		})
+	}
+}
+
+func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setting models.RepositorySetting
+	}{
+		{name: "setup command", setting: models.RepositorySetting{SetupCommands: []string{"exit 17"}}},
+		{name: "file copy", setting: models.RepositorySetting{CopyFiles: []string{"["}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoPath := t.TempDir()
+			git := &mockGit{repoPath: repoPath}
+			tc.setting.Repository = repoPath
+			manager := New(git, &models.Config{
+				Worktree:           models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
+				RepositorySettings: []models.RepositorySetting{tc.setting},
+			})
+
+			path, err := manager.AddFromBaseWithOptions(
+				"strict-setup", "HEAD", filepath.Join(t.TempDir(), "worktree"),
+				AddOptions{StrictSetup: true},
+			)
+
+			require.Error(t, err)
+			assert.NotEmpty(t, path, "caller needs the created path for rollback")
+			assert.DirExists(t, path)
 		})
 	}
 }

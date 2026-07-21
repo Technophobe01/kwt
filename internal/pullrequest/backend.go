@@ -2,6 +2,7 @@ package pullrequest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"os"
@@ -70,19 +71,49 @@ func (b *GitBackend) ValidateImport(ctx context.Context) error {
 	if !supportsWorktreeConfig(output) {
 		return NewError(CodeUnsupportedGitVersion, "pull-request import requires Git 2.20 or newer", false, nil)
 	}
-	configOutput, err := b.git.RunWithContext(ctx, "config", "--local", "--null", "--list")
+	configOutput, err := b.runImportGit(ctx, "config", "--includes", "--null", "--list")
 	if err != nil {
-		return NewError(CodeWorkspaceCreation, "failed to inspect local Git configuration", false, err)
+		return NewError(CodeWorkspaceCreation, "failed to inspect effective Git configuration", false, err)
 	}
-	if localGitConfigHasEmbeddedRemoteCredentials(configOutput) {
-		return NewError(CodeAuthentication,
-			"pull-request import requires credential-free Git remote URLs; use a credential helper or SSH agent",
-			false, nil)
+	if gitConfigHasEmbeddedRemoteCredentials(configOutput) {
+		return embeddedRemoteCredentialsError()
+	}
+	remotes, err := b.runImportGit(ctx, "remote")
+	if err != nil {
+		return NewError(CodeWorkspaceCreation, "failed to enumerate effective Git remotes", false, err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(remotes), "\n") {
+		remote := strings.TrimSpace(line)
+		if remote == "" {
+			continue
+		}
+		for _, args := range [][]string{
+			{"remote", "get-url", "--all", remote},
+			{"remote", "get-url", "--all", "--push", remote},
+		} {
+			urls, urlErr := b.runImportGit(ctx, args...)
+			if urlErr != nil {
+				return NewError(CodeWorkspaceCreation, "failed to inspect effective Git remote URLs", false, urlErr)
+			}
+			if remoteURLListHasEmbeddedCredentials(urls) {
+				return embeddedRemoteCredentialsError()
+			}
+		}
 	}
 	return nil
 }
 
-func localGitConfigHasEmbeddedRemoteCredentials(output string) bool {
+func (b *GitBackend) runImportGit(ctx context.Context, args ...string) (string, error) {
+	return b.git.RunWithEnvironmentAndDisabledHooks(ctx, b.setupEnvironment, args...)
+}
+
+func embeddedRemoteCredentialsError() *Error {
+	return NewError(CodeAuthentication,
+		"pull-request import requires credential-free Git remote URLs; use a credential helper or SSH agent",
+		false, nil)
+}
+
+func gitConfigHasEmbeddedRemoteCredentials(output string) bool {
 	for record := range strings.SplitSeq(output, "\x00") {
 		key, value, found := strings.Cut(record, "\n")
 		if !found {
@@ -94,6 +125,15 @@ func localGitConfigHasEmbeddedRemoteCredentials(output string) bool {
 			continue
 		}
 		if remoteURLHasEmbeddedCredentials(strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func remoteURLListHasEmbeddedCredentials(output string) bool {
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		if remoteURLHasEmbeddedCredentials(strings.TrimSpace(line)) {
 			return true
 		}
 	}
@@ -173,7 +213,7 @@ func (b *GitBackend) BranchExists(ctx context.Context, branch string) (bool, err
 }
 
 func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (string, error) {
-	output, err := b.git.RunWithContext(ctx, "remote")
+	output, err := b.runImportGit(ctx, "remote")
 	if err != nil {
 		return "", NewError(CodeWorkspaceCreation, "failed to list Git remotes", false, err)
 	}
@@ -186,18 +226,22 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 			continue
 		}
 		existing[name] = true
-		fetchURL, fetchErr := b.git.RunWithContext(ctx, "remote", "get-url", name)
-		pushURLs, pushErr := b.git.RunWithContext(ctx, "remote", "get-url", "--all", "--push", name)
+		fetchURLs, fetchErr := b.runImportGit(ctx, "remote", "get-url", "--all", name)
+		pushURLs, pushErr := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", name)
 		if fetchErr != nil || pushErr != nil {
 			continue
 		}
-		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(fetchURL))
-		if fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) {
+		if remoteURLListHasEmbeddedCredentials(fetchURLs) || remoteURLListHasEmbeddedCredentials(pushURLs) {
+			continue
+		}
+		fetchURL, singleFetch := singleRemoteURL(fetchURLs)
+		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(fetchURL)
+		if singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) {
 			if pushURL, single := singleRemoteURL(pushURLs); single && isSSHRemoteURL(pushURL) {
 				projectUsesSSH = true
 			}
 		}
-		if fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
+		if singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
 			matchingRemote == "" && singleRemoteURLMatches(pushURLs, repository.Identity) &&
 			!b.remoteHasCustomPushRefspec(ctx, name) {
 			matchingRemote = name
@@ -218,10 +262,44 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 	for suffix := 2; existing[name]; suffix++ {
 		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
-	if _, err := b.git.RunWithContext(ctx, "remote", "add", name, remoteURL); err != nil {
+	if _, err := b.runImportGit(ctx, "remote", "add", name, remoteURL); err != nil {
 		return "", NewError(CodeWorkspaceCreation, "failed to add pull-request Git remote", false, err)
 	}
+	if validateErr := b.validateEffectiveRemote(ctx, name, repository.Identity); validateErr != nil {
+		_, removeErr := b.runImportGit(context.WithoutCancel(ctx), "remote", "remove", name)
+		if removeErr != nil {
+			return "", NewError(CodeWorkspaceCreation,
+				"new pull-request Git remote was unsafe and could not be removed", false,
+				errors.Join(validateErr, removeErr))
+		}
+		return "", validateErr
+	}
 	return name, nil
+}
+
+func (b *GitBackend) validateEffectiveRemote(ctx context.Context, remote, repositoryIdentity string) error {
+	for _, tc := range []struct {
+		label string
+		args  []string
+	}{
+		{label: "fetch", args: []string{"remote", "get-url", "--all", remote}},
+		{label: "push", args: []string{"remote", "get-url", "--all", "--push", remote}},
+	} {
+		output, err := b.runImportGit(ctx, tc.args...)
+		if err != nil {
+			return NewError(CodeWorkspaceCreation,
+				"failed to validate the new pull-request Git remote", false, err)
+		}
+		if remoteURLListHasEmbeddedCredentials(output) {
+			return embeddedRemoteCredentialsError()
+		}
+		if !singleRemoteURLMatches(output, repositoryIdentity) {
+			return NewError(CodeWorkspaceCreation,
+				fmt.Sprintf("new pull-request Git remote has an unsafe effective %s destination", tc.label),
+				false, nil)
+		}
+	}
+	return nil
 }
 
 func isSSHRemoteURL(remoteURL string) bool {
@@ -263,7 +341,7 @@ func singleRemoteURL(output string) (string, bool) {
 }
 
 func (b *GitBackend) remoteHasCustomPushRefspec(ctx context.Context, remote string) bool {
-	output, err := b.git.RunWithContext(ctx, "config", "--null", "--list")
+	output, err := b.runImportGit(ctx, "config", "--includes", "--null", "--list")
 	if err != nil {
 		return true
 	}
@@ -328,25 +406,31 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 	if err := ctx.Err(); err != nil {
 		return Workspace{}, err
 	}
-	path, err := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{SetupEnvironment: b.setupEnvironment})
-	if err != nil {
-		message := strings.ToLower(err.Error())
+	path, createErr := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{
+		StrictSetup: true, SetupEnvironment: b.setupEnvironment,
+	})
+	if createErr != nil && path == "" {
+		message := strings.ToLower(createErr.Error())
 		if strings.Contains(message, "already exists") || strings.Contains(message, "already checked out") ||
 			strings.Contains(message, "not an empty directory") || strings.Contains(message, "already registered worktree") {
 			return Workspace{}, NewError(CodeNamingConflict,
-				"the generated pull-request branch or workspace path is already in use", false, err)
+				"the generated pull-request branch or workspace path is already in use", false, createErr)
 		}
-		return Workspace{}, err
+		return Workspace{}, createErr
 	}
 	info, ok := urlutil.CanonicalRepositoryInfo(b.project.Identity)
 	if !ok {
 		return Workspace{}, fmt.Errorf("invalid project repository identity %q", b.project.Identity)
 	}
-	return Workspace{
+	workspace := Workspace{
 		ID:         b.project.Identity + ":" + branch + ":" + template.ShortHash(path),
 		Repository: b.project.Identity, Branch: branch, Path: path, State: "ready",
 		SessionName: tmux.WorkspaceSessionName(info, branch, path),
-	}, nil
+	}
+	if createErr != nil {
+		return workspace, createErr
+	}
+	return workspace, nil
 }
 
 func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, remote, sourceBranch string) error {

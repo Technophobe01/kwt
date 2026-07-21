@@ -28,9 +28,10 @@ var (
 	prState   string
 	prJSON    bool
 
-	loadPRConfig       = config.Load
-	loadPRTargetConfig = config.LoadForTarget
-	newPRService       = defaultNewPRService
+	loadPRConfig          = config.Load
+	loadPRTargetConfig    = config.LoadForTarget
+	newPRService          = defaultNewPRService
+	validatePRProjectRoot = defaultValidatePRProjectRoot
 )
 
 var prCmd = &cobra.Command{
@@ -125,6 +126,10 @@ func preparePRProject() (pullrequest.Project, error) {
 }
 
 func preparePRService(ctx context.Context, project pullrequest.Project) (prService, error) {
+	project, err := validatePRProjectRoot(project)
+	if err != nil {
+		return nil, err
+	}
 	cfg, err := loadPRTargetConfig(project.Path, false)
 	if err != nil {
 		return nil, pullrequest.NewError(
@@ -214,9 +219,57 @@ func validatePRProject(project pullrequest.Project) (pullrequest.Project, error)
 			fmt.Sprintf("project %q is not a supported github.com repository", project.Identity), false, nil)
 	}
 	project.Identity = pullrequest.NormalizeRepositoryIdentity(info.FullPath)
+	if strings.TrimSpace(project.Path) == "" {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project has no repository path", false, nil)
+	}
 	if strings.TrimSpace(project.Name) == "" {
 		project.Name = info.Repository
 	}
+	return project, nil
+}
+
+func defaultValidatePRProjectRoot(project pullrequest.Project) (pullrequest.Project, error) {
+	path := strings.TrimSpace(project.Path)
+	if path == "" {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project has no repository path", false, nil)
+	}
+	if !filepath.IsAbs(path) {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project path must be absolute", false, nil)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project path is invalid", false, err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project path is unavailable", false, err)
+	}
+	info, err := os.Stat(canonicalPath)
+	if err != nil || !info.IsDir() {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project path is not a directory", false, err)
+	}
+	mainPath, err := gitadapter.New(canonicalPath).GetMainRepositoryPath()
+	if err != nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project path is not a Git repository", false, err)
+	}
+	canonicalMain, err := filepath.EvalSymlinks(mainPath)
+	if err != nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "selected project main repository is unavailable", false, err)
+	}
+	if filepath.Clean(canonicalPath) != filepath.Clean(canonicalMain) {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch,
+			"selected project path is not the main repository root", false, nil)
+	}
+	project.Path = canonicalPath
 	return project, nil
 }
 

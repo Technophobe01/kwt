@@ -126,6 +126,37 @@ func TestGitBackendDoesNotReuseRemoteWithCustomPushRefspec(t *testing.T) {
 	assert.Equal(t, "kwt-pr-octocat", remote)
 }
 
+func TestGitBackendDoesNotReuseCredentialBearingEffectiveRemote(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "personal", "https://oauth2:secret@github.com/octocat/widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+}
+
+func TestGitBackendRemovesNewRemoteWhenEffectiveURLsAreRewritten(t *testing.T) {
+	for _, rewrite := range []string{"insteadOf", "pushInsteadOf"} {
+		t.Run(rewrite, func(t *testing.T) {
+			repo, backend := newBackendRepo(t)
+			runGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widget.git")
+			runGit(t, repo, "config", "url.https://github.com/attacker/."+rewrite, "https://github.com/octocat/")
+
+			_, err := backend.EnsureRemote(context.Background(), Repository{
+				Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+				Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+			})
+
+			assertErrorCode(t, err, CodeWorkspaceCreation)
+			assert.NotContains(t, strings.Fields(runGit(t, repo, "remote")), "kwt-pr-octocat")
+		})
+	}
+}
+
 func TestGitBackendFetchClassifiesHTTPAuthenticationFailures(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -208,6 +239,34 @@ func TestGitBackendValidateImportRejectsCredentialBearingRemoteURLs(t *testing.T
 	}
 }
 
+func TestGitBackendValidateImportRejectsCredentialsFromIncludedConfig(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	includePath := filepath.Join(t.TempDir(), "included.gitconfig")
+	credentialURL := "https://oauth2:included-secret@github.com/acme/widget.git"
+	require.NoError(t, os.WriteFile(includePath, []byte("[remote \"included\"]\n\turl = "+credentialURL+"\n"), 0o600))
+	runGit(t, repo, "config", "include.path", includePath)
+
+	err := backend.ValidateImport(context.Background())
+
+	assertErrorCode(t, err, CodeAuthentication)
+	assert.NotContains(t, err.Error(), "included-secret")
+}
+
+func TestGitBackendValidateImportRejectsCredentialsFromURLRewrite(t *testing.T) {
+	for _, rewrite := range []string{"insteadOf", "pushInsteadOf"} {
+		t.Run(rewrite, func(t *testing.T) {
+			repo, backend := newBackendRepo(t)
+			runGit(t, repo, "remote", "add", "origin", "https://alias/acme/widget.git")
+			runGit(t, repo, "config", "url.https://oauth2:rewrite-secret@github.com/."+rewrite, "https://alias/")
+
+			err := backend.ValidateImport(context.Background())
+
+			assertErrorCode(t, err, CodeAuthentication)
+			assert.NotContains(t, err.Error(), "rewrite-secret")
+		})
+	}
+}
+
 func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
 	for _, tc := range []struct {
 		remoteURL string
@@ -282,6 +341,35 @@ func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join(workspace.Path, "setup-env.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "|||visible", string(contents))
+}
+
+func TestPRImportCreatePropagatesStrictSetupFailure(t *testing.T) {
+	repo := t.TempDir()
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "initial")
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: resolvedRepo, SetupCommands: []string{"exit 17"},
+		}},
+	}
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/10", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
+
+	workspace, err := backend.Create(context.Background(), "pr-10-setup-fails", "refs/kwt/pull-requests/acme/widget/10")
+	if workspace.Path != "" {
+		t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	}
+
+	require.Error(t, err)
+	assert.NotEmpty(t, workspace.Path, "service needs the created workspace for rollback")
 }
 
 func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {

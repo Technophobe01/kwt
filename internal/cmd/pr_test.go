@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -41,18 +44,21 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldLoad := loadPRConfig
 	oldTargetLoad := loadPRTargetConfig
 	oldNew := newPRService
+	oldValidateRoot := validatePRProjectRoot
 	oldProject := prProject
 	oldState := prState
 	t.Cleanup(func() {
 		loadPRConfig = oldLoad
 		loadPRTargetConfig = oldTargetLoad
 		newPRService = oldNew
+		validatePRProjectRoot = oldValidateRoot
 		prProject = oldProject
 		prState = oldState
 	})
 	loadPRConfig = func() (*models.Config, error) { return cfg, nil }
 	loadPRTargetConfig = func(string, bool) (*models.Config, error) { return cfg, nil }
 	newPRService = func(context.Context, *models.Config, pullrequest.Project) (prService, error) { return service, nil }
+	validatePRProjectRoot = func(project pullrequest.Project) (pullrequest.Project, error) { return project, nil }
 	prProject = "widget"
 	prState = "open"
 }
@@ -135,6 +141,34 @@ func TestPreparePRServiceLoadsSelectedTargetConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/repos/widget", loadedPath)
 	assert.Same(t, target, received)
+}
+
+func TestPreparePRServiceRejectsPathOutsideMainRepositoryRootBeforeLoadingConfig(t *testing.T) {
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-b", "main", repo)
+	require.NoError(t, cmd.Run())
+	subdir := filepath.Join(repo, "nested")
+	require.NoError(t, os.Mkdir(subdir, 0o755))
+
+	oldValidateRoot := validatePRProjectRoot
+	oldTargetLoad := loadPRTargetConfig
+	t.Cleanup(func() {
+		validatePRProjectRoot = oldValidateRoot
+		loadPRTargetConfig = oldTargetLoad
+	})
+	validatePRProjectRoot = defaultValidatePRProjectRoot
+	loaded := false
+	loadPRTargetConfig = func(string, bool) (*models.Config, error) {
+		loaded = true
+		return testPRConfig(), nil
+	}
+
+	_, err := preparePRService(context.Background(), pullrequest.Project{
+		Identity: "github.com/acme/widget", Name: "widget", Path: subdir,
+	})
+
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
+	assert.False(t, loaded)
 }
 
 func prTestCommand() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
@@ -282,6 +316,22 @@ func TestValidatePRProjectNormalizesGitHubIdentityCase(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "github.com/acme/widget", project.Identity)
+}
+
+func TestValidatePRProjectRejectsEmptyPath(t *testing.T) {
+	_, err := validatePRProject(pullrequest.Project{
+		Identity: "github.com/acme/widget", Name: "widget",
+	})
+
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
+}
+
+func TestDefaultValidatePRProjectRootRejectsCallerRelativePath(t *testing.T) {
+	_, err := defaultValidatePRProjectRoot(pullrequest.Project{
+		Identity: "github.com/acme/widget", Name: "widget", Path: ".",
+	})
+
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
 }
 
 func TestResolvePRProjectRejectsMismatchAndUnsupportedProvider(t *testing.T) {

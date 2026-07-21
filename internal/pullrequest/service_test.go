@@ -83,22 +83,26 @@ func (f *fakeProvider) Get(_ context.Context, _ Repository, number int) (PullReq
 }
 
 type fakeWorkspaceBackend struct {
-	mu              sync.Mutex
-	workspaces      []Workspace
-	remotes         map[string]string
-	fetchedRemote   string
-	fetchedRef      string
-	fetchedSHA      string
-	createdBranch   string
-	createCalls     int
-	createErr       error
-	configureErr    error
-	configureCancel context.CancelFunc
-	rollbackErr     error
-	rollbackCtxErr  error
-	ensureRemoteErr error
-	validateErr     error
-	validateCalls   int
+	mu               sync.Mutex
+	workspaces       []Workspace
+	remotes          map[string]string
+	fetchedRemote    string
+	fetchedRef       string
+	fetchedSHA       string
+	createdBranch    string
+	createCalls      int
+	createErr        error
+	createAfterErr   error
+	configureErr     error
+	configureCalls   int
+	configuredRemote string
+	configuredBranch string
+	configureCancel  context.CancelFunc
+	rollbackErr      error
+	rollbackCtxErr   error
+	ensureRemoteErr  error
+	validateErr      error
+	validateCalls    int
 }
 
 func (f *fakeWorkspaceBackend) ValidateImport(context.Context) error {
@@ -178,10 +182,16 @@ func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Work
 		SessionName: "kwt-workspace-github-com-acme-widget-" + branch,
 	}
 	f.workspaces = append(f.workspaces, workspace)
+	if f.createAfterErr != nil {
+		return workspace, f.createAfterErr
+	}
 	return workspace, nil
 }
 
 func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, remote, sourceBranch string) error {
+	f.configureCalls++
+	f.configuredRemote = remote
+	f.configuredBranch = sourceBranch
 	if f.configureCancel != nil {
 		f.configureCancel()
 	}
@@ -288,7 +298,10 @@ func TestListMarksExistingImport(t *testing.T) {
 	workspace := Workspace{ID: "ws-21", Repository: testProject().Identity, Branch: "pr-21-feature-widgets", Path: "/worktrees/21", State: "ready", SessionName: "session-21"}
 	backend.workspaces = []Workspace{workspace}
 	store := newMemoryStore()
-	store.records[pr.ID] = Provenance{PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA}
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA,
+		SourceRepo: pr.Source.Repository.Identity, SourceBranch: pr.Source.Name,
+	}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
 
 	got, err := service.List(context.Background(), testProject(), "open")
@@ -348,6 +361,7 @@ func TestListRecognizesLegacyCasedProvenance(t *testing.T) {
 	store.records[legacyID] = Provenance{
 		PullRequestID: legacyID, Provider: "github", Repository: "github.com/Acme/Widget", Number: 22,
 		Project: Project{Identity: "github.com/Acme/Widget", Path: testProject().Path}, Workspace: workspace,
+		SourceRepo: "github.com/Acme/Widget", SourceBranch: pr.Source.Name,
 	}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
 
@@ -482,6 +496,45 @@ func TestImportRejectsExistingWorkspaceAfterSourceBranchRename(t *testing.T) {
 	assert.Zero(t, backend.createCalls)
 }
 
+func TestImportRejectsExistingWorkspaceWithMissingSourceProvenance(t *testing.T) {
+	pr := testPR(46, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-46", Repository: testProject().Identity, Branch: "pr-46-feature-widgets", Path: "/worktrees/46", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA,
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	_, err := service.Import(context.Background(), testProject(), "46")
+
+	assertErrorCode(t, err, CodeConflict)
+	assert.ErrorContains(t, err, "source provenance")
+	assert.Zero(t, backend.configureCalls)
+}
+
+func TestImportRepairsPushRoutingBeforeReturningExisting(t *testing.T) {
+	pr := testPR(47, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-47", Repository: testProject().Identity, Branch: "pr-47-feature-widgets", Path: "/worktrees/47", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA,
+		SourceRepo: pr.Source.Repository.Identity, SourceBranch: pr.Source.Name,
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	result, err := service.Import(context.Background(), testProject(), "47")
+
+	require.NoError(t, err)
+	assert.Equal(t, ImportExisting, result.Status)
+	assert.Equal(t, 1, backend.configureCalls)
+	assert.Equal(t, "origin", backend.configuredRemote)
+	assert.Equal(t, pr.Source.Name, backend.configuredBranch)
+}
+
 func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
 	pr := testPR(43, false)
 	backend := newFakeBackend()
@@ -492,6 +545,7 @@ func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
 	store.records[legacyID] = Provenance{
 		PullRequestID: legacyID, Provider: "github", Repository: "github.com/Acme/Widget", Number: 43,
 		Project: Project{Identity: "github.com/Acme/Widget", Path: testProject().Path}, Workspace: workspace,
+		SourceRepo: "github.com/Acme/Widget", SourceBranch: pr.Source.Name,
 	}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
 
@@ -646,6 +700,19 @@ func TestImportRollsBackWhenProvenanceCannotBeCommitted(t *testing.T) {
 	_, err := service.Import(context.Background(), testProject(), "57")
 
 	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.Empty(t, backend.workspaces)
+}
+
+func TestImportRollsBackWhenStrictWorkspaceSetupFails(t *testing.T) {
+	pr := testPR(61, false)
+	backend := newFakeBackend()
+	backend.createAfterErr = errors.New("setup failed")
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	_, err := service.Import(context.Background(), testProject(), "61")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.ErrorContains(t, err, "setup failed")
 	assert.Empty(t, backend.workspaces)
 }
 

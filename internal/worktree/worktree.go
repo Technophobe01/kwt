@@ -40,6 +40,7 @@ type Manager struct {
 // AddOptions controls optional behavior for creating a worktree.
 type AddOptions struct {
 	SkipSetup        bool
+	StrictSetup      bool
 	SetupEnvironment []string
 }
 
@@ -68,7 +69,13 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 	}
 
 	if !opts.SkipSetup {
-		m.runPostWorktreeSetup(branch, path)
+		if opts.StrictSetup {
+			if setupErr := m.runPostWorktreeSetupStrict(branch, path, opts.SetupEnvironment); setupErr != nil {
+				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
+			}
+		} else {
+			m.runPostWorktreeSetup(branch, path)
+		}
 	}
 	return path, nil
 }
@@ -98,7 +105,13 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 	}
 
 	if !opts.SkipSetup {
-		m.runPostWorktreeSetupWithEnvironment(branch, path, opts.SetupEnvironment)
+		if opts.StrictSetup {
+			if setupErr := m.runPostWorktreeSetupStrict(branch, path, opts.SetupEnvironment); setupErr != nil {
+				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
+			}
+		} else {
+			m.runPostWorktreeSetupWithEnvironment(branch, path, opts.SetupEnvironment)
+		}
 	}
 	return path, nil
 }

@@ -127,9 +127,22 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 				return NewError(CodeConflict, "pull request is recorded for a different project", false, nil)
 			}
 			if workspace, live := matchingProvenanceWorkspace(byPath, record); live {
+				if !provenanceSourceComplete(record) {
+					return NewError(CodeConflict,
+						"existing import has incomplete source provenance", false, nil)
+				}
 				if !provenanceSourceMatches(record, pr) {
 					return NewError(CodeConflict,
 						"pull-request source repository or branch changed after import", false, nil)
+				}
+				remote, remoteErr := s.backend.EnsureRemote(ctx, pr.Source.Repository)
+				if remoteErr != nil {
+					return AsError(remoteErr, CodeWorkspaceCreation,
+						"failed to validate the existing import's Git remote")
+				}
+				if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Name); configErr != nil {
+					return NewError(CodeWorkspaceCreation,
+						"failed to repair the existing import's push configuration", false, configErr)
 				}
 				if recordKey != pr.ID {
 					delete(records, recordKey)
@@ -174,6 +187,10 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 
 		workspace, createErr := s.backend.Create(ctx, branch, fetchRef)
 		if createErr != nil {
+			if workspace.Path != "" {
+				created = &workspace
+				cleanupReason = "workspace created but setup failed"
+			}
 			return AsError(createErr, CodeWorkspaceCreation, "failed to create pull-request workspace")
 		}
 		created = &workspace
@@ -233,11 +250,15 @@ func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance)
 }
 
 func provenanceSourceMatches(record Provenance, pr PullRequest) bool {
-	if strings.TrimSpace(record.SourceRepo) != "" &&
+	if !provenanceSourceComplete(record) ||
 		!EqualRepositoryIdentity(record.SourceRepo, pr.Source.Repository.Identity) {
 		return false
 	}
-	return strings.TrimSpace(record.SourceBranch) == "" || record.SourceBranch == pr.Source.Name
+	return record.SourceBranch == pr.Source.Name
+}
+
+func provenanceSourceComplete(record Provenance) bool {
+	return strings.TrimSpace(record.SourceRepo) != "" && strings.TrimSpace(record.SourceBranch) != ""
 }
 
 func repositoryFromProject(project Project) (Repository, error) {
