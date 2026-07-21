@@ -21,7 +21,9 @@ type GitInterface interface {
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
 	RemoveWorktree(path string, force bool) error
+	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
 	DeleteBranch(branch string, force bool) error
+	DeleteBranchWithEnvironment(branch string, force bool, environment []string) error
 	PruneWorktrees() error
 	GetRepositoryName() (string, error)
 	GetRecentCommits(path string, limit int) ([]models.CommitInfo, error)
@@ -108,16 +110,38 @@ func (m *Manager) Remove(path string, force bool) error {
 
 // RemoveWithBranch deletes a worktree and optionally its branch.
 func (m *Manager) RemoveWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool) error {
+	return m.removeWithBranch(path, branch, forceWorktree, deleteBranch, forceBranch, nil)
+}
+
+// RemoveWithBranchWithEnvironment deletes a worktree and branch using an
+// explicit environment with repository hooks disabled.
+func (m *Manager) RemoveWithBranchWithEnvironment(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
+	return m.removeWithBranch(path, branch, forceWorktree, deleteBranch, forceBranch, environment)
+}
+
+func (m *Manager) removeWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
 	// First remove the worktree
-	if err := m.git.RemoveWorktree(path, forceWorktree); err != nil {
-		return err
+	var removeErr error
+	if environment == nil {
+		removeErr = m.git.RemoveWorktree(path, forceWorktree)
+	} else {
+		removeErr = m.git.RemoveWorktreeWithEnvironment(path, forceWorktree, environment)
+	}
+	if removeErr != nil {
+		return removeErr
 	}
 
 	// Then delete the branch if requested
 	if deleteBranch && branch != "" {
-		if err := m.git.DeleteBranch(branch, forceBranch); err != nil {
+		var deleteErr error
+		if environment == nil {
+			deleteErr = m.git.DeleteBranch(branch, forceBranch)
+		} else {
+			deleteErr = m.git.DeleteBranchWithEnvironment(branch, forceBranch, environment)
+		}
+		if deleteErr != nil {
 			// Return error but worktree is already removed
-			return fmt.Errorf("worktree removed but failed to delete branch: %w", err)
+			return fmt.Errorf("worktree removed but failed to delete branch: %w", deleteErr)
 		}
 	}
 

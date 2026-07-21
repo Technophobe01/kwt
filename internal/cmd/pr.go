@@ -176,10 +176,26 @@ func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project,
 
 	for _, candidate := range cfg.Projects {
 		identity := publishableProjectRepository(candidate)
-		if pullrequest.EqualRepositoryIdentity(selector, identity) || strings.EqualFold(selector, candidate.Name) || samePRPath(selector, candidate.Path) {
+		if pullrequest.EqualRepositoryIdentity(selector, identity) || samePRPath(selector, candidate.Path) {
 			candidate.Repository = identity
 			return prProjectFromModel(candidate)
 		}
+	}
+	var nameMatches []models.Project
+	for _, candidate := range cfg.Projects {
+		if strings.EqualFold(selector, candidate.Name) {
+			nameMatches = append(nameMatches, candidate)
+		}
+	}
+	if len(nameMatches) == 1 {
+		candidate := nameMatches[0]
+		candidate.Repository = publishableProjectRepository(candidate)
+		return prProjectFromModel(candidate)
+	}
+	if len(nameMatches) > 1 {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch,
+			fmt.Sprintf("project name %q is ambiguous; select by repository identity or path", selector), false, nil)
 	}
 	return pullrequest.Project{}, pullrequest.NewError(
 		pullrequest.CodeRepositoryMismatch, fmt.Sprintf("no kwt-managed project matches %q", selector), false, nil)

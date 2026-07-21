@@ -63,6 +63,10 @@ func (m *mockGit) RemoveWorktree(path string, force bool) error {
 	return nil
 }
 
+func (m *mockGit) RemoveWorktreeWithEnvironment(path string, force bool, _ []string) error {
+	return m.RemoveWorktree(path, force)
+}
+
 func (m *mockGit) PruneWorktrees() error {
 	return m.pruneError
 }
@@ -93,6 +97,10 @@ func (m *mockGit) DeleteBranch(branch string, force bool) error {
 		return m.deleteBranchError
 	}
 	return nil
+}
+
+func (m *mockGit) DeleteBranchWithEnvironment(branch string, force bool, _ []string) error {
+	return m.DeleteBranch(branch, force)
 }
 
 func (m *mockGit) GetMainRepositoryPath() (string, error) {

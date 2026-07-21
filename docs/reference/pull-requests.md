@@ -16,8 +16,10 @@ kwt pr import github:github.com/acme/widget#17 \
 
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its main-repository path. It may be omitted when
-the command runs inside the desired repository. `--state` accepts `open`,
-`closed`, or `all` and defaults to `open`.
+the command runs inside the desired repository. If a display name identifies
+multiple projects, kwt returns `repository_mismatch`; callers must use the
+repository identity or path. `--state` accepts `open`, `closed`, or `all` and
+defaults to `open`.
 
 ## Authentication
 
@@ -34,8 +36,9 @@ authentication for subsequent pushes.
 
 Import fetches also force the SSH implementation's noninteractive mode
 (OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
-credential prompts. Checkout runs with the same sanitized environment and an
-empty trusted hooks directory, so repository hooks cannot run during import;
+credential prompts. Every ref-mutating import operation—including fetch,
+checkout, and rollback—runs with the same sanitized environment and an empty
+trusted hooks directory, so repository hooks cannot run during import;
 configured content filters may run but cannot inherit kwt-managed tokens.
 
 Import requires Git 2.20 or newer because kwt uses per-worktree Git
@@ -152,12 +155,14 @@ An imported list result adds the canonical workspace record:
 
 ## Import contract
 
-kwt chooses the deterministic local branch name, selects or creates the
-correct source remote, fetches the head, creates the worktree through the
-normal workspace manager (including trusted repository setup commands), and configures
-plain `git push` to update the PR's original head branch. It reports the exact
-tmux session name a client can attach to; import does not launch or manipulate
-tmux panes.
+kwt chooses the deterministic local branch name, selects or creates a clean
+source remote, fetches the head, creates the worktree through the normal
+workspace manager (including trusted repository setup commands), and
+configures plain `git push` to update exactly the PR's original head branch.
+It will not reuse a remote with another push URL or a custom push refspec, and
+worktree-local `pushRemote` configuration takes precedence over global push
+defaults. Import reports the exact tmux session name a client can attach to;
+it does not launch or manipulate tmux panes.
 
 Cross-project imports load the selected project's already trusted `.kwt.toml`
 in isolation. They never load configuration from the caller's working

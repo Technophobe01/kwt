@@ -257,6 +257,24 @@ func TestResolvePRProjectSupportsStableIdentityNameAndPath(t *testing.T) {
 	}
 }
 
+func TestResolvePRProjectRejectsAmbiguousProjectName(t *testing.T) {
+	cfg := &models.Config{Projects: []models.Project{
+		{Repository: "github.com/acme/widget", Name: "widget", Path: "/repos/acme-widget"},
+		{Repository: "github.com/octocat/widget", Name: "Widget", Path: "/repos/octocat-widget"},
+	}}
+
+	_, err := resolvePRProject(cfg, "widget")
+
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
+	assert.Contains(t, err.Error(), "ambiguous")
+
+	for _, selector := range []string{"github.com/octocat/widget", "/repos/octocat-widget"} {
+		project, selectErr := resolvePRProject(cfg, selector)
+		require.NoError(t, selectErr)
+		assert.Equal(t, "github.com/octocat/widget", project.Identity)
+	}
+}
+
 func TestValidatePRProjectNormalizesGitHubIdentityCase(t *testing.T) {
 	project, err := validatePRProject(pullrequest.Project{
 		Identity: "GitHub.com/Acme/Widget", Name: "widget", Path: "/repos/widget",

@@ -49,6 +49,19 @@ func (g *Git) RunNonInteractiveWithContext(ctx context.Context, args ...string) 
 	return g.runWithEnvironmentContext(ctx, NonInteractiveEnvironment(os.Environ()), args...)
 }
 
+// RunWithEnvironmentAndDisabledHooks executes Git with an explicit
+// environment and a private empty hooks directory. Import paths use this for
+// ref mutations so repository hooks cannot observe kwt-owned credentials.
+func (g *Git) RunWithEnvironmentAndDisabledHooks(ctx context.Context, environment []string, args ...string) (string, error) {
+	hooksDir, err := os.MkdirTemp("", "kwt-empty-hooks-")
+	if err != nil {
+		return "", fmt.Errorf("create empty Git hooks directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(hooksDir) }()
+	args = append([]string{"-c", "core.hooksPath=" + hooksDir}, args...)
+	return g.runWithEnvironmentContext(ctx, environment, args...)
+}
+
 // run executes a git command.
 func (g *Git) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)

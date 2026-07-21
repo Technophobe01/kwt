@@ -138,13 +138,13 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		}
 		existing[name] = true
 		fetchURL, fetchErr := b.git.RunWithContext(ctx, "remote", "get-url", name)
-		pushURL, pushErr := b.git.RunWithContext(ctx, "remote", "get-url", "--push", name)
+		pushURLs, pushErr := b.git.RunWithContext(ctx, "remote", "get-url", "--all", "--push", name)
 		if fetchErr != nil || pushErr != nil {
 			continue
 		}
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(fetchURL))
-		pushIdentity, pushOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(pushURL))
-		if fetchOK && pushOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) && EqualRepositoryIdentity(pushIdentity, repository.Identity) {
+		if fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
+			allRemoteURLsMatch(pushURLs, repository.Identity) && !b.remoteHasCustomPushRefspec(ctx, name) {
 			return name, nil
 		}
 	}
@@ -162,9 +162,40 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 	return name, nil
 }
 
+func allRemoteURLsMatch(output, repositoryIdentity string) bool {
+	found := false
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		found = true
+		identity, ok := urlutil.CanonicalRepositoryIdentityFromRemote(line)
+		if !ok || !EqualRepositoryIdentity(identity, repositoryIdentity) {
+			return false
+		}
+	}
+	return found
+}
+
+func (b *GitBackend) remoteHasCustomPushRefspec(ctx context.Context, remote string) bool {
+	output, err := b.git.RunWithContext(ctx, "config", "--null", "--list")
+	if err != nil {
+		return true
+	}
+	want := "remote." + remote + ".push"
+	for record := range strings.SplitSeq(output, "\x00") {
+		key, _, _ := strings.Cut(record, "\n")
+		if strings.EqualFold(key, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *GitBackend) Fetch(ctx context.Context, remote, sourceRef, destinationRef string) (string, error) {
 	refspec := "+" + sourceRef + ":" + destinationRef
-	if _, err := b.git.RunNonInteractiveWithContext(ctx, "fetch", "--no-tags", remote, refspec); err != nil {
+	if _, err := b.git.RunWithEnvironmentAndDisabledHooks(ctx, b.setupEnvironment, "fetch", "--no-tags", remote, refspec); err != nil {
 		message := strings.ToLower(err.Error())
 		switch {
 		case isGitAuthenticationFailure(message):
@@ -238,8 +269,12 @@ func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, rem
 	commands := [][]string{
 		{"config", "extensions.worktreeConfig", "true"},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".remote", remote},
+		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".pushRemote", remote},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".merge", "refs/heads/" + sourceBranch},
+		{"-C", workspace.Path, "config", "--worktree", "remote." + remote + ".push", "HEAD:refs/heads/" + sourceBranch},
+		{"-C", workspace.Path, "config", "--worktree", "remote." + remote + ".mirror", "false"},
 		{"-C", workspace.Path, "config", "--worktree", "push.default", "upstream"},
+		{"-C", workspace.Path, "config", "--worktree", "push.followTags", "false"},
 	}
 	for _, args := range commands {
 		if _, err := b.git.RunWithContext(ctx, args...); err != nil {
@@ -253,7 +288,7 @@ func (b *GitBackend) Rollback(ctx context.Context, workspace Workspace) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return b.manager.RemoveWithBranch(workspace.Path, workspace.Branch, true, true, true)
+	return b.manager.RemoveWithBranchWithEnvironment(workspace.Path, workspace.Branch, true, true, true, b.setupEnvironment)
 }
 
 func sanitizeRemoteComponent(value string) string {

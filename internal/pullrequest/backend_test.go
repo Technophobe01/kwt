@@ -30,7 +30,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func newBackendRepo(t *testing.T) (string, *GitBackend) {
+func newBackendRepo(t *testing.T, options ...GitBackendOption) (string, *GitBackend) {
 	t.Helper()
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")
@@ -42,8 +42,16 @@ func newBackendRepo(t *testing.T) (string, *GitBackend) {
 		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
 		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: repo}},
 	}
-	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject(), options...)
 	return repo, backend
+}
+
+func installReferenceTransactionLeakHook(t *testing.T, repo, leakPath string) {
+	t.Helper()
+	quotedLeakPath := "'" + strings.ReplaceAll(filepath.ToSlash(leakPath), "'", "'\\''") + "'"
+	script := "#!/bin/sh\nprintf '%s|%s|%s' \"$KWT_GITHUB_TOKEN\" \"$KWT_FLEET_TOKEN\" \"$CUSTOM_FLEET_TOKEN\" > " + quotedLeakPath + "\n"
+	hookPath := filepath.Join(repo, ".git", "hooks", "reference-transaction")
+	require.NoError(t, os.WriteFile(hookPath, []byte(script), 0o755))
 }
 
 func TestGitBackendSelectsMatchingRemoteAmongMultipleRemotes(t *testing.T) {
@@ -74,6 +82,35 @@ func TestGitBackendMatchesGitHubRemoteCaseInsensitively(t *testing.T) {
 	assert.Equal(t, "origin", remote)
 }
 
+func TestGitBackendDoesNotReuseRemoteWithAdditionalPushURL(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "personal", "https://github.com/octocat/widget.git")
+	runGit(t, repo, "remote", "set-url", "--add", "--push", "personal", "https://github.com/octocat/widget.git")
+	runGit(t, repo, "remote", "set-url", "--add", "--push", "personal", "https://github.com/attacker/widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+}
+
+func TestGitBackendDoesNotReuseRemoteWithCustomPushRefspec(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "personal", "https://github.com/octocat/widget.git")
+	runGit(t, repo, "config", "remote.personal.push", "HEAD:refs/heads/not-the-pr")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+}
+
 func TestGitBackendFetchClassifiesHTTPAuthenticationFailures(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -89,6 +126,30 @@ func TestGitBackendFetchClassifiesHTTPAuthenticationFailures(t *testing.T) {
 			assertErrorCode(t, err, CodeAuthentication)
 		})
 	}
+}
+
+func TestGitBackendFetchDisablesHooksAndSanitizesEnvironment(t *testing.T) {
+	t.Setenv("KWT_GITHUB_TOKEN", "github-secret")
+	t.Setenv("KWT_FLEET_TOKEN", "fleet-secret")
+	t.Setenv("CUSTOM_FLEET_TOKEN", "custom-secret")
+	repo, backend := newBackendRepo(t, WithFleetTokenEnvironment("CUSTOM_FLEET_TOKEN"))
+	bare := filepath.Join(t.TempDir(), "fork.git")
+	runGit(t, repo, "init", "--bare", bare)
+	runGit(t, repo, "push", bare, "HEAD:refs/heads/topic")
+	runGit(t, repo, "remote", "add", "fork", bare)
+	leakPath := filepath.Join(t.TempDir(), "fetch-hook-env")
+	installReferenceTransactionLeakHook(t, repo, leakPath)
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/hook-probe", head)
+	if _, statErr := os.Stat(leakPath); os.IsNotExist(statErr) {
+		t.Skip("installed Git does not support reference-transaction hooks")
+	}
+	require.NoError(t, os.Remove(leakPath))
+
+	_, err := backend.Fetch(context.Background(), "fork", "refs/heads/topic", "refs/kwt/test")
+
+	require.NoError(t, err)
+	assert.NoFileExists(t, leakPath)
 }
 
 func TestParseGitVersionRequiresWorktreeConfigSupport(t *testing.T) {
@@ -273,18 +334,29 @@ func TestGitBackendCreateClassifiesDuplicateBranchOrWorkspaceName(t *testing.T) 
 func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	bare := filepath.Join(t.TempDir(), "fork.git")
+	wrong := filepath.Join(t.TempDir(), "wrong.git")
 	runGit(t, repo, "init", "--bare", bare)
+	runGit(t, repo, "init", "--bare", wrong)
 	runGit(t, repo, "remote", "add", "fork", bare)
+	runGit(t, repo, "remote", "add", "wrong", wrong)
+	runGit(t, repo, "config", "remote.pushDefault", "wrong")
 	head := runGit(t, repo, "rev-parse", "HEAD")
 	runGit(t, repo, "push", "fork", fmt.Sprintf("%s:refs/heads/feature/widgets", head))
+	runGit(t, repo, "config", "remote.fork.mirror", "true")
+	runGit(t, repo, "config", "push.followTags", "true")
 	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/8", head)
 	workspace, err := backend.Create(context.Background(), "pr-8-feature-widgets", "refs/kwt/pull-requests/acme/widget/8")
 	require.NoError(t, err)
+	runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.pushRemote", "wrong")
 
 	require.NoError(t, backend.ConfigurePush(context.Background(), workspace, "fork", "feature/widgets"))
 
 	assert.Equal(t, "fork", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.remote"))
+	assert.Equal(t, "fork", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.pushRemote"))
 	assert.Equal(t, "refs/heads/feature/widgets", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.merge"))
+	assert.Equal(t, "HEAD:refs/heads/feature/widgets", runGit(t, workspace.Path, "config", "--worktree", "remote.fork.push"))
+	assert.Equal(t, "false", runGit(t, workspace.Path, "config", "--worktree", "remote.fork.mirror"))
+	assert.Equal(t, "false", runGit(t, workspace.Path, "config", "--worktree", "push.followTags"))
 	assert.Equal(t, "upstream", runGit(t, workspace.Path, "config", "--worktree", "push.default"))
 	for _, key := range []string{"branch.pr-8-feature-widgets.remote", "branch.pr-8-feature-widgets.merge"} {
 		cmd := exec.Command("git", "config", "--get", key)
@@ -292,9 +364,32 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 		output, configErr := cmd.CombinedOutput()
 		assert.Error(t, configErr, "%s unexpectedly visible in main checkout: %s", key, output)
 	}
+	assert.Equal(t, "wrong", runGit(t, repo, "config", "branch.pr-8-feature-widgets.pushRemote"))
+	cmd := exec.Command("git", "config", "--get", "remote.fork.push")
+	cmd.Dir = repo
+	output, configErr := cmd.CombinedOutput()
+	assert.Error(t, configErr, "remote.fork.push unexpectedly visible in main checkout: %s", output)
 	require.NoError(t, os.WriteFile(filepath.Join(workspace.Path, "change.txt"), []byte("change\n"), 0644))
 	runGit(t, workspace.Path, "add", "change.txt")
 	runGit(t, workspace.Path, "commit", "-m", "change")
-	output := runGit(t, workspace.Path, "push", "--dry-run")
-	assert.Contains(t, output, "pr-8-feature-widgets -> feature/widgets")
+	pushOutput := runGit(t, workspace.Path, "push", "--dry-run")
+	assert.Contains(t, pushOutput, "HEAD -> feature/widgets")
+}
+
+func TestGitBackendRollbackDisablesReferenceTransactionHooks(t *testing.T) {
+	t.Setenv("KWT_GITHUB_TOKEN", "github-secret")
+	t.Setenv("KWT_FLEET_TOKEN", "fleet-secret")
+	t.Setenv("CUSTOM_FLEET_TOKEN", "custom-secret")
+	repo, backend := newBackendRepo(t, WithFleetTokenEnvironment("CUSTOM_FLEET_TOKEN"))
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/81", head)
+	workspace, err := backend.Create(context.Background(), "pr-81-rollback", "refs/kwt/pull-requests/acme/widget/81")
+	require.NoError(t, err)
+	leakPath := filepath.Join(t.TempDir(), "rollback-hook-env")
+	installReferenceTransactionLeakHook(t, repo, leakPath)
+
+	err = backend.Rollback(context.Background(), workspace)
+
+	require.NoError(t, err)
+	assert.NoFileExists(t, leakPath)
 }

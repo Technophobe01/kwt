@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -1657,6 +1658,37 @@ func TestLoadForTargetResolvesRelativePathsAgainstSelectedRepository(t *testing.
 	require.Len(t, cfg.RepositorySettings, 1)
 	assert.Equal(t, resolvedTarget, cfg.RepositorySettings[0].Repository)
 	assert.Equal(t, filepath.Join(resolvedTarget, "repo-worktrees"), cfg.RepositorySettings[0].BaseDir)
+}
+
+func TestLoadForTargetMergesEquivalentGlobalAndLocalRepositoryPaths(t *testing.T) {
+	kwtHome := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := filepath.Join(home, "src", "widget")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	viper.Set("repository_settings", []models.RepositorySetting{{
+		Repository: "~/src/widget", SetupCommands: []string{"echo global"},
+	}})
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[[repository_settings]]\nrepository = '.'\nsetup_commands = ['echo local']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, utils.CanonicalPath(target), cfg.RepositorySettings[0].Repository)
+	assert.Equal(t, []string{"echo local"}, cfg.RepositorySettings[0].SetupCommands)
 }
 
 func TestLoadForTargetSkipsUntrustedConfigurationNoninteractively(t *testing.T) {

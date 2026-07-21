@@ -170,28 +170,45 @@ func mergeRepositorySettingsInto(targetViper, localViper *viper.Viper) {
 
 	localMap := make(map[string]models.RepositorySetting, len(localSettings))
 	for _, ls := range localSettings {
-		localMap[ls.Repository] = ls
+		localMap[repositorySettingMergeKey(ls.Repository)] = ls
 	}
 
 	merged := make([]models.RepositorySetting, 0, len(globalSettings)+len(localSettings))
 	overridden := make(map[string]bool, len(localSettings))
 
 	for _, gs := range globalSettings {
-		if ls, exists := localMap[gs.Repository]; exists {
-			merged = append(merged, ls)
-			overridden[gs.Repository] = true
+		key := repositorySettingMergeKey(gs.Repository)
+		if ls, exists := localMap[key]; exists {
+			if !overridden[key] {
+				merged = append(merged, ls)
+				overridden[key] = true
+			}
 		} else {
 			merged = append(merged, gs)
 		}
 	}
 
 	for _, ls := range localSettings {
-		if !overridden[ls.Repository] {
+		key := repositorySettingMergeKey(ls.Repository)
+		if !overridden[key] {
 			merged = append(merged, ls)
+			overridden[key] = true
 		}
 	}
 
 	targetViper.Set("repository_settings", merged)
+}
+
+func repositorySettingMergeKey(repository string) string {
+	repository = strings.TrimSpace(repository)
+	if repository == "" || strings.ContainsAny(repository, "*?[") {
+		return repository
+	}
+	expanded, err := utils.ExpandPath(repository)
+	if err != nil {
+		return filepath.Clean(repository)
+	}
+	return utils.CanonicalPath(expanded)
 }
 
 // Init initializes the configuration system, creating default config if needed.

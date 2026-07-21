@@ -177,13 +177,7 @@ func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment [
 		}
 		return nil
 	}
-	hooksDir, err := os.MkdirTemp("", "kwt-empty-hooks-")
-	if err != nil {
-		return fmt.Errorf("create empty Git hooks directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(hooksDir) }()
-	args = append([]string{"-c", "core.hooksPath=" + hooksDir}, args...)
-	if _, err := g.runWithEnvironmentContext(context.Background(), environment, args...); err != nil {
+	if _, err := g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, args...); err != nil {
 		return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 	}
 
@@ -192,13 +186,29 @@ func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment [
 
 // RemoveWorktree removes a worktree.
 func (g *Git) RemoveWorktree(path string, force bool) error {
+	return g.removeWorktree(path, force, nil)
+}
+
+// RemoveWorktreeWithEnvironment removes a worktree with an explicit
+// environment and repository hooks disabled.
+func (g *Git) RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error {
+	return g.removeWorktree(path, force, environment)
+}
+
+func (g *Git) removeWorktree(path string, force bool, environment []string) error {
 	args := []string{"worktree", "remove"}
 	if force {
 		args = append(args, "--force")
 	}
 	args = append(args, path)
 
-	if _, err := g.run(args...); err != nil {
+	var err error
+	if environment == nil {
+		_, err = g.run(args...)
+	} else {
+		_, err = g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, args...)
+	}
+	if err != nil {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 
