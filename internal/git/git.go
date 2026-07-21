@@ -39,7 +39,14 @@ func (g *Git) RunCommand(args ...string) (string, error) {
 
 // RunWithContext executes a git command with context support for cancellation and timeout.
 func (g *Git) RunWithContext(ctx context.Context, args ...string) (string, error) {
-	return g.runWithContext(ctx, args...)
+	return g.runWithContext(ctx, false, args...)
+}
+
+// RunNonInteractiveWithContext executes Git with terminal credential prompts
+// disabled. Credential helpers may still supply credentials, but Git will
+// fail instead of waiting for stdin when none are available.
+func (g *Git) RunNonInteractiveWithContext(ctx context.Context, args ...string) (string, error) {
+	return g.runWithContext(ctx, true, args...)
 }
 
 // run executes a git command.
@@ -61,10 +68,14 @@ func (g *Git) run(args ...string) (string, error) {
 }
 
 // runWithContext executes a git command with context support.
-func (g *Git) runWithContext(ctx context.Context, args ...string) (string, error) {
+func (g *Git) runWithContext(ctx context.Context, nonInteractive bool, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
+	}
+	if nonInteractive {
+		cmd.Env = withoutEnvironmentKey(os.Environ(), "GIT_TERMINAL_PROMPT")
+		cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -79,4 +90,15 @@ func (g *Git) runWithContext(ctx context.Context, args ...string) (string, error
 	}
 
 	return stdout.String(), nil
+}
+
+func withoutEnvironmentKey(environment []string, key string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }

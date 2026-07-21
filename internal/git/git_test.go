@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,6 +163,18 @@ func TestNewFromCwd(t *testing.T) {
 
 	if resolvedWorkDir != resolvedRepoPath {
 		t.Errorf("NewFromCwd() workDir = %s, want %s", resolvedWorkDir, resolvedRepoPath)
+	}
+}
+
+func TestRunNonInteractiveWithContextDisablesTerminalPrompts(t *testing.T) {
+	repo := NewTestRepository(t)
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	gitOutput(t, repo.Path, "config", "alias.check-prompt", `!test "$GIT_TERMINAL_PROMPT" = 0`)
+
+	_, err := New(repo.Path).RunNonInteractiveWithContext(context.Background(), "check-prompt")
+
+	if err != nil {
+		t.Fatalf("RunNonInteractiveWithContext() error = %v", err)
 	}
 }
 

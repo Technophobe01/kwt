@@ -249,7 +249,7 @@ func (m *Manager) generateWorktreePath(branch string) (string, error) {
 }
 
 func (m *Manager) repositoryInfo() (*url.RepositoryInfo, error) {
-	return RepositoryInfoFromGit(m.git)
+	return RepositoryInfoWithProjects(m.git, m.config.Projects)
 }
 
 // RepoIdentityGit is the minimal git surface RepositoryInfoFromGit needs: the
@@ -372,7 +372,6 @@ func registeredProjectIdentity(
 	}
 	return nil, false
 }
-
 
 // RepositoryInfoFromLocalPath builds the path-safe local identity ("local/..."
 // full path) for a repository root that has no usable remote. It is the raw-path

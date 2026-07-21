@@ -1,0 +1,269 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"go.kenn.io/kwt/internal/config"
+	gitadapter "go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/pullrequest"
+	urlutil "go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
+	"go.kenn.io/kwt/internal/worktree"
+	"go.kenn.io/kwt/pkg/models"
+)
+
+type prService interface {
+	List(context.Context, pullrequest.Project, string) ([]pullrequest.PullRequest, error)
+	Import(context.Context, pullrequest.Project, string) (pullrequest.ImportResult, error)
+}
+
+var (
+	prProject string
+	prState   string
+	prJSON    bool
+
+	loadPRConfig = config.Load
+	newPRService = defaultNewPRService
+)
+
+var prCmd = &cobra.Command{
+	Use:   "pr",
+	Short: "Discover and import pull requests as kwt workspaces",
+	Args:  cobra.NoArgs,
+	// Pull-request commands select an explicit globally registered project.
+	// A caller's cwd-local config must never alter a remote/SSH automation call.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+}
+
+var prListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List importable pull requests as JSON",
+	Args:  cobra.NoArgs,
+	RunE:  runPRList,
+}
+
+var prImportCmd = &cobra.Command{
+	Use:   "import <pull-request>",
+	Short: "Import a pull request as a configured kwt workspace",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPRImport,
+}
+
+func init() {
+	rootCmd.AddCommand(prCmd)
+	prCmd.AddCommand(prListCmd, prImportCmd)
+	prCmd.PersistentFlags().StringVar(&prProject, "project", "", "registered project identity, name, or path (defaults to current repository)")
+	prCmd.PersistentFlags().BoolVar(&prJSON, "json", true, "emit the stable JSON automation contract")
+	prListCmd.Flags().StringVar(&prState, "state", "open", "pull-request state: open, closed, or all")
+}
+
+func runPRList(cmd *cobra.Command, _ []string) error {
+	if prState != "open" && prState != "closed" && prState != "all" {
+		return writePRError(cmd, pullrequest.NewError(
+			pullrequest.CodeInvalidSelector, "state must be open, closed, or all", false, nil))
+	}
+	project, service, err := preparePRCommand(cmd.Context())
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	prs, err := service.List(cmd.Context(), project, prState)
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	return writePRJSON(cmd, struct {
+		PullRequests []pullrequest.PullRequest `json:"pull_requests"`
+	}{PullRequests: nonNilPullRequests(prs)})
+}
+
+func runPRImport(cmd *cobra.Command, args []string) error {
+	project, service, err := preparePRCommand(cmd.Context())
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	result, err := service.Import(cmd.Context(), project, args[0])
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	return writePRJSON(cmd, result)
+}
+
+func preparePRCommand(ctx context.Context) (pullrequest.Project, prService, error) {
+	cfg, err := loadPRConfig()
+	if err != nil {
+		return pullrequest.Project{}, nil, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation, "failed to load kwt configuration", false, err)
+	}
+	project, err := resolvePRProject(cfg, prProject)
+	if err != nil {
+		return pullrequest.Project{}, nil, err
+	}
+	service, err := newPRService(ctx, cfg, project)
+	if err != nil {
+		return pullrequest.Project{}, nil, err
+	}
+	return project, service, nil
+}
+
+func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
+	provider, err := pullrequest.NewAuthenticatedGitHubProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	g := gitadapter.New(project.Path)
+	manager := worktree.New(g, cfg)
+	backend := pullrequest.NewGitBackend(g, manager, project)
+	return pullrequest.NewService(provider, backend, pullrequest.NewFileStore(prStorePath())), nil
+}
+
+func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project, error) {
+	if cfg == nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeRepositoryMismatch, "kwt project configuration is unavailable", false, nil)
+	}
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		g, err := gitadapter.NewFromCwd()
+		if err != nil {
+			return pullrequest.Project{}, pullrequest.NewError(
+				pullrequest.CodeRepositoryMismatch, "--project is required outside a Git repository", false, err)
+		}
+		mainPath, err := g.GetMainRepositoryPath()
+		if err != nil {
+			return pullrequest.Project{}, pullrequest.NewError(
+				pullrequest.CodeRepositoryMismatch, "failed to identify the current project", false, err)
+		}
+		for _, candidate := range cfg.Projects {
+			if samePRPath(candidate.Path, mainPath) {
+				return prProjectFromModel(candidate)
+			}
+		}
+		info, err := worktree.RepositoryInfoWithProjects(g, cfg.Projects)
+		if err != nil {
+			return pullrequest.Project{}, pullrequest.NewError(
+				pullrequest.CodeRepositoryMismatch, "current repository has no stable provider identity", false, err)
+		}
+		return validatePRProject(pullrequest.Project{Identity: info.FullPath, Name: info.Repository, Path: mainPath})
+	}
+
+	for _, candidate := range cfg.Projects {
+		identity := publishableProjectRepository(candidate)
+		if selector == identity || strings.EqualFold(selector, candidate.Name) || samePRPath(selector, candidate.Path) {
+			candidate.Repository = identity
+			return prProjectFromModel(candidate)
+		}
+	}
+	return pullrequest.Project{}, pullrequest.NewError(
+		pullrequest.CodeRepositoryMismatch, fmt.Sprintf("no kwt-managed project matches %q", selector), false, nil)
+}
+
+func prProjectFromModel(project models.Project) (pullrequest.Project, error) {
+	identity := publishableProjectRepository(project)
+	return validatePRProject(pullrequest.Project{Identity: identity, Name: project.Name, Path: project.Path})
+}
+
+func validatePRProject(project pullrequest.Project) (pullrequest.Project, error) {
+	info, ok := urlutil.CanonicalRepositoryInfo(project.Identity)
+	if !ok || info.Host != "github.com" {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeUnsupportedProvider,
+			fmt.Sprintf("project %q is not a supported github.com repository", project.Identity), false, nil)
+	}
+	project.Identity = info.FullPath
+	if strings.TrimSpace(project.Name) == "" {
+		project.Name = info.Repository
+	}
+	return project, nil
+}
+
+func samePRPath(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	if resolved, err := filepath.EvalSymlinks(leftAbs); err == nil {
+		leftAbs = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(rightAbs); err == nil {
+		rightAbs = resolved
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func prStorePath() string {
+	if kwtHome := strings.TrimSpace(os.Getenv("KWT_HOME")); kwtHome != "" {
+		if expanded, err := utils.ExpandPath(kwtHome); err == nil {
+			return filepath.Join(expanded, "pull-requests.json")
+		}
+		return filepath.Join(kwtHome, "pull-requests.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".config", "kwt", "pull-requests.json")
+	}
+	return filepath.Join(home, ".config", "kwt", "pull-requests.json")
+}
+
+func nonNilPullRequests(prs []pullrequest.PullRequest) []pullrequest.PullRequest {
+	if prs == nil {
+		return []pullrequest.PullRequest{}
+	}
+	return prs
+}
+
+func writePRJSON(cmd *cobra.Command, value any) error {
+	encoder := json.NewEncoder(cmd.OutOrStdout())
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+type prCommandError struct {
+	err *pullrequest.Error
+}
+
+func (e *prCommandError) Error() string { return e.err.Error() }
+func (e *prCommandError) Unwrap() error { return e.err }
+func (e *prCommandError) ExitCode() int { return prExitCode(e.err.Code) }
+
+func writePRError(cmd *cobra.Command, err error) error {
+	typed := pullrequest.AsError(err, pullrequest.CodeWorkspaceCreation, "pull-request operation failed")
+	_ = writePRJSON(cmd, pullrequest.ErrorEnvelope{Error: typed})
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "kwt pr: %s: %s\n", typed.Code, typed.Message)
+	return &prCommandError{err: typed}
+}
+
+func prExitCode(code pullrequest.ErrorCode) int {
+	switch code {
+	case pullrequest.CodeAuthentication:
+		return 3
+	case pullrequest.CodeRepositoryMismatch, pullrequest.CodeUnsupportedProvider:
+		return 4
+	case pullrequest.CodeInvalidSelector:
+		return 2
+	case pullrequest.CodeNotFound:
+		return 5
+	case pullrequest.CodeInaccessibleHead:
+		return 6
+	case pullrequest.CodeNamingConflict:
+		return 7
+	case pullrequest.CodeNetwork:
+		return 8
+	case pullrequest.CodeWorkspaceCreation:
+		return 9
+	case pullrequest.CodeMalformedResponse:
+		return 10
+	case pullrequest.CodeConflict:
+		return 11
+	default:
+		return 1
+	}
+}

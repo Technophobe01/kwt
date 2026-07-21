@@ -11,6 +11,7 @@ stable command surface.
 | `kwt list`       | List worktrees.                                        |
 | `kwt status`     | Show Git status, sync state, and activity.             |
 | `kwt projects`   | List registered project repositories.                  |
+| `kwt pr`         | Discover and import pull requests through JSON.         |
 | `kwt get`        | Print a matching worktree path.                        |
 | `kwt cd`         | Open a shell in a matching worktree.                   |
 | `kwt exec`       | Run a command in a matching worktree.                  |
@@ -28,6 +29,8 @@ stable command surface.
 kwt add -b fix/parser-race
 kwt open parser
 kwt status
+kwt pr list --project github.com/acme/widget --json
+kwt pr import 17 --project github.com/acme/widget --json
 kwt sync status
 kwt exec fix/parser-race -- go test ./internal/parser
 kwt workspace add ~/notes
@@ -59,6 +62,14 @@ name, path, last_touched}`), so external automation can discover main-repo
 paths that live outside the configured worktree base directory without
 parsing the config file. `repository` uses the same `host/owner/name` slug as
 `kwt list --json`'s `repository` field, so the two surfaces can be joined.
+
+## `kwt pr`
+
+`kwt pr list` and `kwt pr import` are the noninteractive, structured boundary
+for pull-request clients. kwt owns provider calls, ref handling, branch and
+workspace naming, normal worktree creation and setup, push configuration,
+provenance, and tmux session naming. See [Pull-request
+automation](pull-requests.md) for the JSON and exit-status contract.
 
 ### Repository identity fallback
 

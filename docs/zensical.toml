@@ -17,6 +17,7 @@ nav = [
   ] },
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
+    { "Pull-request automation" = "reference/pull-requests.md" },
     { "Configuration" = "reference/configuration.md" },
   ] },
   { "Workflows" = [

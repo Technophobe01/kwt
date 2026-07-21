@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -52,7 +53,12 @@ a fuzzy finder interface.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		exitCode := 1
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			exitCode = coded.ExitCode()
+		}
+		os.Exit(exitCode)
 	}
 }
 

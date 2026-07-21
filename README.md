@@ -41,6 +41,10 @@ kwt open
 kwt list
 kwt status
 
+# Discover and import a GitHub PR without launching tmux
+kwt pr list --project github.com/acme/widget --json
+kwt pr import 17 --project github.com/acme/widget --json
+
 # Use a worktree path in scripts
 cd "$(kwt get feature/new-ui)"
 kwt exec feature/new-ui -- npm test
@@ -218,6 +222,7 @@ spaces.
 | `kwt list`       | List worktrees                            |
 | `kwt status`     | Show git status, sync state, and activity |
 | `kwt projects`   | List registered project repositories      |
+| `kwt pr`         | Discover and import pull requests as JSON |
 | `kwt get`        | Print a matching worktree path            |
 | `kwt cd`         | Open a shell in a matching worktree       |
 | `kwt exec`       | Run a command in a matching worktree      |
