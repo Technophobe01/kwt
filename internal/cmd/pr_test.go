@@ -39,19 +39,102 @@ func (f *fakePRService) Import(_ context.Context, project pullrequest.Project, s
 func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	t.Helper()
 	oldLoad := loadPRConfig
+	oldTargetLoad := loadPRTargetConfig
 	oldNew := newPRService
 	oldProject := prProject
 	oldState := prState
 	t.Cleanup(func() {
 		loadPRConfig = oldLoad
+		loadPRTargetConfig = oldTargetLoad
 		newPRService = oldNew
 		prProject = oldProject
 		prState = oldState
 	})
 	loadPRConfig = func() (*models.Config, error) { return cfg, nil }
+	loadPRTargetConfig = func(string, bool) (*models.Config, error) { return cfg, nil }
 	newPRService = func(context.Context, *models.Config, pullrequest.Project) (prService, error) { return service, nil }
 	prProject = "widget"
 	prState = "open"
+}
+
+func TestRunPRImportValidatesSelectorBeforeAuthentication(t *testing.T) {
+	withPRCommandDeps(t, testPRConfig(), &fakePRService{})
+	called := false
+	newPRService = func(context.Context, *models.Config, pullrequest.Project) (prService, error) {
+		called = true
+		return nil, pullrequest.NewError(pullrequest.CodeAuthentication, "authentication required", false, nil)
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRImport(cmd, []string{"invalid"})
+
+	assertPRCode(t, err, pullrequest.CodeInvalidSelector)
+	assert.False(t, called)
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, pullrequest.CodeInvalidSelector, envelope.Error.Code)
+}
+
+func TestPRArgumentValidationUsesStructuredErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   cobra.PositionalArgs
+		args []string
+	}{
+		{name: "unexpected list argument", fn: prNoArgs, args: []string{"extra"}},
+		{name: "missing import selector", fn: prExactArgs(1), args: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, stdout, stderr := prTestCommand()
+			err := tc.fn(cmd, tc.args)
+			var exitErr *prCommandError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, 2, exitErr.ExitCode())
+			var envelope pullrequest.ErrorEnvelope
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+			assert.Equal(t, pullrequest.CodeInvalidSelector, envelope.Error.Code)
+			assert.Contains(t, stderr.String(), "invalid_pull_request_selector")
+		})
+	}
+}
+
+func TestPRFlagValidationUsesStructuredErrors(t *testing.T) {
+	cmd, stdout, stderr := prTestCommand()
+	err := prCmd.FlagErrorFunc()(cmd, errors.New("unknown flag: --bogus"))
+
+	var exitErr *prCommandError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 2, exitErr.ExitCode())
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, pullrequest.CodeInvalidSelector, envelope.Error.Code)
+	assert.Contains(t, stderr.String(), "invalid_pull_request_selector")
+}
+
+func TestPreparePRServiceLoadsSelectedTargetConfiguration(t *testing.T) {
+	global := testPRConfig()
+	target := testPRConfig()
+	target.Worktree.BaseDir = "/target/worktrees"
+	withPRCommandDeps(t, global, &fakePRService{})
+	var loadedPath string
+	loadPRTargetConfig = func(path string, interactive bool) (*models.Config, error) {
+		loadedPath = path
+		assert.False(t, interactive)
+		return target, nil
+	}
+	var received *models.Config
+	newPRService = func(_ context.Context, cfg *models.Config, _ pullrequest.Project) (prService, error) {
+		received = cfg
+		return &fakePRService{}, nil
+	}
+
+	project, err := preparePRProject()
+	require.NoError(t, err)
+	_, err = preparePRService(context.Background(), project)
+
+	require.NoError(t, err)
+	assert.Equal(t, "/repos/widget", loadedPath)
+	assert.Same(t, target, received)
 }
 
 func prTestCommand() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
@@ -147,6 +230,7 @@ func TestPRFailureCategoriesHaveDistinctExitStatuses(t *testing.T) {
 		pullrequest.CodeWorkspaceCreation,
 		pullrequest.CodeMalformedResponse,
 		pullrequest.CodeConflict,
+		pullrequest.CodeUnsupportedGitVersion,
 	}
 	seen := make(map[int]pullrequest.ErrorCode)
 	for _, code := range codes {
@@ -171,6 +255,15 @@ func TestResolvePRProjectSupportsStableIdentityNameAndPath(t *testing.T) {
 			assert.Equal(t, "/repos/widget", project.Path)
 		})
 	}
+}
+
+func TestValidatePRProjectNormalizesGitHubIdentityCase(t *testing.T) {
+	project, err := validatePRProject(pullrequest.Project{
+		Identity: "GitHub.com/Acme/Widget", Name: "widget", Path: "/repos/widget",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "github.com/acme/widget", project.Identity)
 }
 
 func TestResolvePRProjectRejectsMismatchAndUnsupportedProvider(t *testing.T) {

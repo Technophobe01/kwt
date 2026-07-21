@@ -238,7 +238,7 @@ Run `kwt <command> --help` for flags and examples.
 
 ## Requirements
 
-- Git 2.5+
+- Git 2.20+
 - Go 1.26+ to build from source
 - tmux for workspace launch and `kwt tmux`
 

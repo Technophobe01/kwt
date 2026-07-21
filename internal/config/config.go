@@ -154,9 +154,13 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 // - Same repository: local overrides global
 // - Different repository: both are kept
 func mergeRepositorySettings(localViper *viper.Viper) {
+	mergeRepositorySettingsInto(viper.GetViper(), localViper)
+}
+
+func mergeRepositorySettingsInto(targetViper, localViper *viper.Viper) {
 	var globalSettings, localSettings []models.RepositorySetting
 
-	if err := viper.UnmarshalKey("repository_settings", &globalSettings); err != nil {
+	if err := targetViper.UnmarshalKey("repository_settings", &globalSettings); err != nil {
 		globalSettings = nil
 	}
 
@@ -187,7 +191,7 @@ func mergeRepositorySettings(localViper *viper.Viper) {
 		}
 	}
 
-	viper.Set("repository_settings", merged)
+	targetViper.Set("repository_settings", merged)
 }
 
 // Init initializes the configuration system, creating default config if needed.
@@ -416,6 +420,79 @@ func LoadRepoLayoutDefault(repoRoot string, interactive bool) (string, error) {
 		return "", fmt.Errorf("parse target config %s: %w", absPath, err)
 	}
 	return lv.GetString("layouts.default"), nil
+}
+
+// LoadForTarget returns global configuration merged with the selected
+// repository's trust-gated local configuration. It never consults the
+// caller's working directory and does not prompt when interactive is false.
+func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
+	target := viper.New()
+	if err := target.MergeConfigMap(viper.AllSettings()); err != nil {
+		return nil, fmt.Errorf("copy global config: %w", err)
+	}
+
+	path := filepath.Join(repoRoot, localConfigName+"."+configType)
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat target config %s: %w", path, err)
+		}
+	} else {
+		absPath, normalizeErr := normalizeConfigPath(path)
+		if normalizeErr != nil {
+			fmt.Fprintf(os.Stderr, "kwt: skipping target config: %v\n", normalizeErr)
+		} else {
+			data, readErr := os.ReadFile(absPath)
+			if readErr != nil {
+				return nil, fmt.Errorf("read target config %s: %w", absPath, readErr)
+			}
+			store, storeErr := LoadTrustStore(defaultTrustStorePath())
+			if storeErr != nil {
+				fmt.Fprintf(os.Stderr, "kwt: failed to load trust store (continuing empty): %v\n", storeErr)
+				store = &TrustStore{path: defaultTrustStorePath()}
+			}
+			trusted := store.IsTrusted(absPath, computeSHA256(data))
+			if !trusted && interactive {
+				trusted, storeErr = newStdioPrompter().PromptTrust(absPath, data)
+				if storeErr != nil {
+					fmt.Fprintf(os.Stderr, "kwt: trust prompt failed, skipping target config: %v\n", storeErr)
+					trusted = false
+				} else if trusted {
+					if storeErr = store.Add(absPath, computeSHA256(data)); storeErr != nil {
+						fmt.Fprintf(os.Stderr, "kwt: failed to persist trust decision (continuing): %v\n", storeErr)
+					}
+				}
+			}
+			if !trusted {
+				fmt.Fprintf(os.Stderr, "kwt: skipping untrusted target config %s (non-interactive)\n", absPath)
+			} else {
+				local := viper.New()
+				local.SetConfigType(configType)
+				if parseErr := local.ReadConfig(bytes.NewReader(data)); parseErr != nil {
+					return nil, fmt.Errorf("parse target config %s: %w", absPath, parseErr)
+				}
+				for _, key := range local.AllKeys() {
+					switch {
+					case key == "repository_settings":
+						mergeRepositorySettingsInto(target, local)
+					case key == "projects" || key == "workspaces" || strings.HasPrefix(key, "workspaces."),
+						key == "fleet" || strings.HasPrefix(key, "fleet."):
+						continue
+					default:
+						target.Set(key, local.Get(key))
+					}
+				}
+			}
+		}
+	}
+
+	var cfg models.Config
+	if err := target.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal target config: %w", err)
+	}
+	if err := expandConfigPaths(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 // StdinInteractive reports whether stdin is a terminal (exported for callers

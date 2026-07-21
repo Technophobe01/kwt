@@ -15,6 +15,7 @@ type Provider interface {
 }
 
 type WorkspaceBackend interface {
+	ValidateImport(context.Context) error
 	ListWorkspaces(context.Context) ([]Workspace, error)
 	BranchExists(context.Context, string) (bool, error)
 	EnsureRemote(context.Context, Repository) (string, error)
@@ -44,6 +45,7 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 	if err != nil {
 		return nil, err
 	}
+	project.Identity = repository.Identity
 	prs, err := s.provider.List(ctx, repository, state)
 	if err != nil {
 		return nil, err
@@ -66,8 +68,9 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 		return nil, NewError(CodeWorkspaceCreation, "failed to read pull-request provenance", false, err)
 	}
 	for i := range prs {
-		prs[i].Source.IsFork = prs[i].Source.Repository.Identity != prs[i].Repository.Identity
-		if record, ok := records[prs[i].ID]; ok && record.Project.Identity == project.Identity {
+		prs[i].Source.IsFork = !EqualRepositoryIdentity(prs[i].Source.Repository.Identity, prs[i].Repository.Identity)
+		_, record, ok := findProvenance(records, prs[i])
+		if ok && EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
 			if workspace, live := paths[record.Workspace.Path]; live {
 				prs[i].Imported = true
 				prs[i].Workspace = &workspace
@@ -82,15 +85,19 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	if err != nil {
 		return result, err
 	}
+	project.Identity = repository.Identity
 	number, err := ParseSelector(selector, repository.Identity)
 	if err != nil {
+		return result, err
+	}
+	if err := s.backend.ValidateImport(ctx); err != nil {
 		return result, err
 	}
 	pr, err := s.provider.Get(ctx, repository, number)
 	if err != nil {
 		return result, err
 	}
-	if pr.Repository.Identity != repository.Identity {
+	if !EqualRepositoryIdentity(pr.Repository.Identity, repository.Identity) {
 		return result, NewError(CodeRepositoryMismatch,
 			fmt.Sprintf("pull request belongs to %s, not project %s", pr.Repository.Identity, repository.Identity),
 			false, nil)
@@ -98,7 +105,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	if strings.TrimSpace(pr.Source.Repository.Identity) == "" || strings.TrimSpace(pr.Source.Name) == "" {
 		return result, NewError(CodeInaccessibleHead, "pull-request head repository or branch is unavailable", false, nil)
 	}
-	pr.Source.IsFork = pr.Source.Repository.Identity != pr.Repository.Identity
+	pr.Source.IsFork = !EqualRepositoryIdentity(pr.Source.Repository.Identity, pr.Repository.Identity)
 	branch := importBranchName(pr)
 	var created *Workspace
 
@@ -111,15 +118,28 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		for _, workspace := range workspaces {
 			byPath[workspace.Path] = workspace
 		}
-		if record, ok := records[pr.ID]; ok {
-			if record.Project.Identity != project.Identity {
+		recordKey, record, ok := findProvenance(records, pr)
+		if ok {
+			if !EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
 				return NewError(CodeConflict, "pull request is recorded for a different project", false, nil)
 			}
 			if workspace, live := byPath[record.Workspace.Path]; live {
+				if recordKey != pr.ID {
+					delete(records, recordKey)
+					record.PullRequestID = pr.ID
+					record.Repository = NormalizeRepositoryIdentity(record.Repository)
+					record.SourceRepo = NormalizeRepositoryIdentity(record.SourceRepo)
+					record.Project.Identity = NormalizeRepositoryIdentity(record.Project.Identity)
+					record.Workspace = workspace
+					records[pr.ID] = record
+				}
 				result = ImportResult{Status: ImportExisting, PullRequest: pr, Project: project, Workspace: workspace}
 				result.PullRequest.Imported = true
 				result.PullRequest.Workspace = &result.Workspace
 				return nil
+			}
+			if recordKey != pr.ID {
+				delete(records, recordKey)
 			}
 		}
 
@@ -155,13 +175,13 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 			return NewError(CodeWorkspaceCreation, "workspace created but push configuration failed; rolled it back", false, configErr)
 		}
 
-		record := Provenance{
+		newRecord := Provenance{
 			PullRequestID: pr.ID, Provider: pr.Provider, Repository: pr.Repository.Identity,
 			Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
 			SourceRepo: pr.Source.Repository.Identity, SourceBranch: pr.Source.Name,
 			Project: project, Workspace: workspace,
 		}
-		records[pr.ID] = record
+		records[pr.ID] = newRecord
 		result = ImportResult{Status: ImportCreated, PullRequest: pr, Project: project, Workspace: workspace}
 		result.PullRequest.Imported = true
 		result.PullRequest.Workspace = &result.Workspace
@@ -178,14 +198,31 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	return result, err
 }
 
+func findProvenance(records map[string]Provenance, pr PullRequest) (string, Provenance, bool) {
+	if record, ok := records[pr.ID]; ok {
+		return pr.ID, record, true
+	}
+	for key, record := range records {
+		if record.Number != pr.Number || !EqualRepositoryIdentity(record.Repository, pr.Repository.Identity) {
+			continue
+		}
+		if record.Provider != "" && !strings.EqualFold(record.Provider, pr.Provider) {
+			continue
+		}
+		return key, record, true
+	}
+	return "", Provenance{}, false
+}
+
 func repositoryFromProject(project Project) (Repository, error) {
-	parts := strings.Split(project.Identity, "/")
+	identity := NormalizeRepositoryIdentity(project.Identity)
+	parts := strings.Split(identity, "/")
 	if len(parts) != 3 || parts[0] != "github.com" || parts[1] == "" || parts[2] == "" {
 		return Repository{}, NewError(CodeUnsupportedProvider,
 			fmt.Sprintf("project %q is not a supported GitHub repository identity", project.Identity), false, nil)
 	}
 	return Repository{
-		Provider: "github", Identity: project.Identity, Host: parts[0], Owner: parts[1], Name: parts[2],
+		Provider: "github", Identity: identity, Host: parts[0], Owner: parts[1], Name: parts[2],
 	}, nil
 }
 
@@ -197,16 +234,16 @@ func ParseSelector(selector, repository string) (int, error) {
 	if number, err := strconv.Atoi(selector); err == nil && number > 0 {
 		return number, nil
 	}
-	prefix := "github:" + repository + "#"
-	if strings.HasPrefix(selector, prefix) {
-		if number, err := strconv.Atoi(strings.TrimPrefix(selector, prefix)); err == nil && number > 0 {
+	prefix := "github:" + NormalizeRepositoryIdentity(repository) + "#"
+	if strings.HasPrefix(strings.ToLower(selector), prefix) {
+		if number, err := strconv.Atoi(selector[len(prefix):]); err == nil && number > 0 {
 			return number, nil
 		}
 	}
 	parsed, err := url.Parse(selector)
 	if err == nil && strings.EqualFold(parsed.Host, "github.com") {
 		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) == 4 && parts[2] == "pull" && "github.com/"+parts[0]+"/"+parts[1] == repository {
+		if len(parts) == 4 && strings.EqualFold(parts[2], "pull") && EqualRepositoryIdentity("github.com/"+parts[0]+"/"+parts[1], repository) {
 			if number, convertErr := strconv.Atoi(parts[3]); convertErr == nil && number > 0 {
 				return number, nil
 			}

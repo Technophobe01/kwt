@@ -3,6 +3,8 @@ package pullrequest
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +59,110 @@ func TestGitBackendSelectsMatchingRemoteAmongMultipleRemotes(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "personal", remote)
+}
+
+func TestGitBackendMatchesGitHubRemoteCaseInsensitively(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/Acme/Widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/acme/widget", Host: "github.com",
+		Owner: "acme", Name: "widget", CloneURL: "https://github.com/acme/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "origin", remote)
+}
+
+func TestGitBackendFetchClassifiesHTTPAuthenticationFailures(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			repo, backend := newBackendRepo(t)
+			runGit(t, repo, "remote", "add", "private", server.URL+"/repo.git")
+
+			_, err := backend.Fetch(context.Background(), "private", "refs/heads/topic", "refs/kwt/test")
+
+			assertErrorCode(t, err, CodeAuthentication)
+		})
+	}
+}
+
+func TestParseGitVersionRequiresWorktreeConfigSupport(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		ok     bool
+	}{
+		{output: "git version 2.19.6", ok: false},
+		{output: "git version 2.20.0", ok: true},
+		{output: "git version 2.45.2 (Apple Git-145)", ok: true},
+		{output: "not git", ok: false},
+	} {
+		assert.Equal(t, tc.ok, supportsWorktreeConfig(tc.output), tc.output)
+	}
+}
+
+func TestSafeSetupEnvironmentRemovesConfiguredSecrets(t *testing.T) {
+	environment := []string{"PATH=/bin", "KWT_GITHUB_TOKEN=secret", "KWT_FLEET_TOKEN=fleet", "CUSTOM_TOKEN=custom", "VISIBLE=yes"}
+
+	got := SafeSetupEnvironment(environment, "CUSTOM_TOKEN")
+
+	assert.Equal(t, []string{"PATH=/bin", "VISIBLE=yes"}, got)
+}
+
+func TestSafeSetupEnvironmentPreservesExplicitEmptyEnvironment(t *testing.T) {
+	got := SafeSetupEnvironment([]string{"kwt_github_token=secret", "Kwt_Fleet_Token=fleet", "custom_token=custom"}, "CUSTOM_TOKEN")
+
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
+func TestNewGitBackendSanitizesKWTSecretsByDefault(t *testing.T) {
+	t.Setenv("KWT_GITHUB_TOKEN", "secret")
+	t.Setenv("KWT_FLEET_TOKEN", "fleet")
+	repo, backend := newBackendRepo(t)
+	_ = repo
+
+	assert.NotContains(t, backend.setupEnvironment, "KWT_GITHUB_TOKEN=secret")
+	assert.NotContains(t, backend.setupEnvironment, "KWT_FLEET_TOKEN=fleet")
+	assert.NotNil(t, backend.setupEnvironment)
+}
+
+func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
+	repo := t.TempDir()
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "initial")
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
+		Fleet:    models.FleetConfig{TokenEnv: "CUSTOM_FLEET_SECRET"},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository:    resolvedRepo,
+			SetupCommands: []string{"printf '%s|%s|%s|%s' \"$KWT_GITHUB_TOKEN\" \"$KWT_FLEET_TOKEN\" \"$CUSTOM_FLEET_SECRET\" \"$VISIBLE_VALUE\" > setup-env.txt"},
+		}},
+	}
+	t.Setenv("KWT_GITHUB_TOKEN", "github-secret")
+	t.Setenv("KWT_FLEET_TOKEN", "fleet-secret")
+	t.Setenv("CUSTOM_FLEET_SECRET", "custom-secret")
+	t.Setenv("VISIBLE_VALUE", "visible")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/9", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject(), WithFleetTokenEnvironment(cfg.Fleet.TokenEnv))
+
+	workspace, err := backend.Create(context.Background(), "pr-9-safe-env", "refs/kwt/pull-requests/acme/widget/9")
+
+	require.NoError(t, err)
+	contents, err := os.ReadFile(filepath.Join(workspace.Path, "setup-env.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "|||visible", string(contents))
 }
 
 func TestGitBackendCreatesDeterministicRemoteWithoutOverwritingCollision(t *testing.T) {
@@ -128,6 +234,12 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	assert.Equal(t, "fork", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.remote"))
 	assert.Equal(t, "refs/heads/feature/widgets", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.merge"))
 	assert.Equal(t, "upstream", runGit(t, workspace.Path, "config", "--worktree", "push.default"))
+	for _, key := range []string{"branch.pr-8-feature-widgets.remote", "branch.pr-8-feature-widgets.merge"} {
+		cmd := exec.Command("git", "config", "--get", key)
+		cmd.Dir = repo
+		output, configErr := cmd.CombinedOutput()
+		assert.Error(t, configErr, "%s unexpectedly visible in main checkout: %s", key, output)
+	}
 	require.NoError(t, os.WriteFile(filepath.Join(workspace.Path, "change.txt"), []byte("change\n"), 0644))
 	runGit(t, workspace.Path, "add", "change.txt")
 	runGit(t, workspace.Path, "commit", "-m", "change")

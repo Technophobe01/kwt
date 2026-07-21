@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,9 +59,10 @@ func testPR(number int, fork bool) PullRequest {
 }
 
 type fakeProvider struct {
-	prs     []PullRequest
-	listErr error
-	getErr  error
+	prs      []PullRequest
+	listErr  error
+	getErr   error
+	getCalls atomic.Int64
 }
 
 func (f *fakeProvider) List(context.Context, Repository, string) ([]PullRequest, error) {
@@ -68,6 +70,7 @@ func (f *fakeProvider) List(context.Context, Repository, string) ([]PullRequest,
 }
 
 func (f *fakeProvider) Get(_ context.Context, _ Repository, number int) (PullRequest, error) {
+	f.getCalls.Add(1)
 	if f.getErr != nil {
 		return PullRequest{}, f.getErr
 	}
@@ -91,6 +94,15 @@ type fakeWorkspaceBackend struct {
 	createErr       error
 	configureErr    error
 	ensureRemoteErr error
+	validateErr     error
+	validateCalls   int
+}
+
+func (f *fakeWorkspaceBackend) ValidateImport(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.validateCalls++
+	return f.validateErr
 }
 
 func newFakeBackend() *fakeWorkspaceBackend {
@@ -126,7 +138,7 @@ func (f *fakeWorkspaceBackend) EnsureRemote(_ context.Context, repo Repository) 
 		return "", f.ensureRemoteErr
 	}
 	for name, identity := range f.remotes {
-		if identity == repo.Identity {
+		if EqualRepositoryIdentity(identity, repo.Identity) {
 			return name, nil
 		}
 	}
@@ -274,6 +286,27 @@ func TestListMarksExistingImport(t *testing.T) {
 	assert.Equal(t, &workspace, got[0].Workspace)
 }
 
+func TestListRecognizesLegacyCasedProvenance(t *testing.T) {
+	pr := testPR(22, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-22", Repository: testProject().Identity, Branch: "pr-22-feature-widgets", Path: "/worktrees/22", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	legacyID := "github:github.com/Acme/Widget#22"
+	store.records[legacyID] = Provenance{
+		PullRequestID: legacyID, Provider: "github", Repository: "github.com/Acme/Widget", Number: 22,
+		Project: Project{Identity: "github.com/Acme/Widget", Path: testProject().Path}, Workspace: workspace,
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	got, err := service.List(context.Background(), testProject(), "open")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.True(t, got[0].Imported)
+	assert.Equal(t, &workspace, got[0].Workspace)
+}
+
 func TestImportSameRepositoryUsesMatchingRemoteAndCanonicalName(t *testing.T) {
 	pr := testPR(31, false)
 	backend := newFakeBackend()
@@ -287,6 +320,48 @@ func TestImportSameRepositoryUsesMatchingRemoteAndCanonicalName(t *testing.T) {
 	assert.Equal(t, "refs/heads/feature/widgets", backend.fetchedRef)
 	assert.Equal(t, "pr-31-feature-widgets", result.Workspace.Branch)
 	assert.Equal(t, testProject().Identity, result.Workspace.Repository)
+}
+
+func TestImportRejectsUnsupportedGitBeforeProviderOrMutation(t *testing.T) {
+	backend := newFakeBackend()
+	backend.validateErr = NewError(CodeUnsupportedGitVersion, "Git 2.20 or newer is required", false, nil)
+	provider := &fakeProvider{prs: []PullRequest{testPR(30, false)}}
+	service := newTestService(provider, backend, newMemoryStore())
+
+	_, err := service.Import(context.Background(), testProject(), "30")
+
+	assertErrorCode(t, err, CodeUnsupportedGitVersion)
+	assert.Equal(t, map[string]string{"origin": "github.com/acme/widget"}, backend.remotes)
+	assert.Zero(t, backend.createCalls)
+	assert.Zero(t, provider.getCalls.Load())
+}
+
+func TestGitHubRepositoryIdentityIsCaseInsensitive(t *testing.T) {
+	project := testProject()
+	project.Identity = "github.com/Acme/Widget"
+	pr := testPR(33, false)
+	pr.Repository.Identity = "github.com/ACME/WIDGET"
+	pr.Source.Repository.Identity = "github.com/acme/widget"
+	backend := newFakeBackend()
+	backend.remotes = map[string]string{"origin": "github.com/Acme/Widget"}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	result, err := service.Import(context.Background(), project, "https://github.com/aCmE/wIdGeT/pull/33")
+
+	require.NoError(t, err)
+	assert.False(t, result.PullRequest.Source.IsFork)
+	assert.Equal(t, "origin", backend.fetchedRemote)
+}
+
+func TestParseSelectorAcceptsMixedCaseGitHubIdentity(t *testing.T) {
+	for _, selector := range []string{
+		"github:github.com/ACME/WIDGET#17",
+		"https://github.com/AcMe/WiDgEt/pull/17",
+	} {
+		number, err := ParseSelector(selector, "github.com/acme/widget")
+		require.NoError(t, err)
+		assert.Equal(t, 17, number)
+	}
 }
 
 func TestImportForkCreatesAndUsesForkRemote(t *testing.T) {
@@ -316,6 +391,29 @@ func TestImportIsIdempotent(t *testing.T) {
 	assert.Equal(t, ImportExisting, second.Status)
 	assert.Equal(t, first.Workspace, second.Workspace)
 	assert.Equal(t, 1, backend.createCalls)
+}
+
+func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
+	pr := testPR(43, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-43", Repository: testProject().Identity, Branch: "pr-43-feature-widgets", Path: "/worktrees/43", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	legacyID := "github:github.com/Acme/Widget#43"
+	store.records[legacyID] = Provenance{
+		PullRequestID: legacyID, Provider: "github", Repository: "github.com/Acme/Widget", Number: 43,
+		Project: Project{Identity: "github.com/Acme/Widget", Path: testProject().Path}, Workspace: workspace,
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	result, err := service.Import(context.Background(), testProject(), "43")
+
+	require.NoError(t, err)
+	assert.Equal(t, ImportExisting, result.Status)
+	assert.Zero(t, backend.createCalls)
+	assert.NotContains(t, store.records, legacyID)
+	assert.Contains(t, store.records, pr.ID)
+	assert.Equal(t, pr.ID, store.records[pr.ID].PullRequestID)
 }
 
 func TestConcurrentImportConverges(t *testing.T) {

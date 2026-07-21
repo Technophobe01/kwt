@@ -3,6 +3,9 @@ package pullrequest
 import (
 	"context"
 	"fmt"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -14,13 +17,71 @@ import (
 )
 
 type GitBackend struct {
-	git     *gitadapter.Git
-	manager *worktree.Manager
-	project Project
+	git              *gitadapter.Git
+	manager          *worktree.Manager
+	project          Project
+	fleetTokenEnv    string
+	setupEnvironment []string
 }
 
-func NewGitBackend(g *gitadapter.Git, manager *worktree.Manager, project Project) *GitBackend {
-	return &GitBackend{git: g, manager: manager, project: project}
+type GitBackendOption func(*GitBackend)
+
+func WithFleetTokenEnvironment(name string) GitBackendOption {
+	return func(backend *GitBackend) {
+		backend.fleetTokenEnv = name
+	}
+}
+
+func NewGitBackend(g *gitadapter.Git, manager *worktree.Manager, project Project, options ...GitBackendOption) *GitBackend {
+	backend := &GitBackend{git: g, manager: manager, project: project}
+	for _, option := range options {
+		option(backend)
+	}
+	backend.setupEnvironment = SafeSetupEnvironment(os.Environ(), backend.fleetTokenEnv)
+	return backend
+}
+
+// SafeSetupEnvironment retains the user's ordinary setup environment while
+// removing credentials owned or sourced by kwt.
+func SafeSetupEnvironment(environment []string, fleetTokenEnv string) []string {
+	blocked := map[string]bool{
+		"kwt_github_token": true,
+		"kwt_fleet_token":  true,
+	}
+	if name := strings.TrimSpace(fleetTokenEnv); name != "" {
+		blocked[strings.ToLower(name)] = true
+	}
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if !blocked[strings.ToLower(name)] {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func (b *GitBackend) ValidateImport(ctx context.Context) error {
+	output, err := b.git.RunWithContext(ctx, "version")
+	if err != nil {
+		return NewError(CodeUnsupportedGitVersion, "failed to determine Git version", false, err)
+	}
+	if !supportsWorktreeConfig(output) {
+		return NewError(CodeUnsupportedGitVersion, "pull-request import requires Git 2.20 or newer", false, nil)
+	}
+	return nil
+}
+
+var gitVersionPattern = regexp.MustCompile(`(?i)git version (\d+)\.(\d+)(?:\.(\d+))?`)
+
+func supportsWorktreeConfig(output string) bool {
+	match := gitVersionPattern.FindStringSubmatch(strings.TrimSpace(output))
+	if len(match) == 0 {
+		return false
+	}
+	major, _ := strconv.Atoi(match[1])
+	minor, _ := strconv.Atoi(match[2])
+	return major > 2 || major == 2 && minor >= 20
 }
 
 func (b *GitBackend) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
@@ -79,7 +140,7 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		}
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(fetchURL))
 		pushIdentity, pushOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(pushURL))
-		if fetchOK && pushOK && fetchIdentity == repository.Identity && pushIdentity == repository.Identity {
+		if fetchOK && pushOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) && EqualRepositoryIdentity(pushIdentity, repository.Identity) {
 			return name, nil
 		}
 	}
@@ -102,10 +163,9 @@ func (b *GitBackend) Fetch(ctx context.Context, remote, sourceRef, destinationRe
 	if _, err := b.git.RunNonInteractiveWithContext(ctx, "fetch", "--no-tags", remote, refspec); err != nil {
 		message := strings.ToLower(err.Error())
 		switch {
-		case strings.Contains(message, "authentication failed"), strings.Contains(message, "permission denied"):
+		case isGitAuthenticationFailure(message):
 			return "", NewError(CodeAuthentication, "Git authentication failed while fetching the pull-request head", false, err)
-		case strings.Contains(message, "could not resolve"), strings.Contains(message, "unable to access"),
-			strings.Contains(message, "connection timed out"), strings.Contains(message, "connection refused"):
+		case isGitNetworkFailure(message):
 			return "", NewError(CodeNetwork, "network failure while fetching the pull-request head", true, err)
 		default:
 			return "", NewError(CodeInaccessibleHead, "pull-request head ref is unavailable", false, err)
@@ -118,11 +178,38 @@ func (b *GitBackend) Fetch(ctx context.Context, remote, sourceRef, destinationRe
 	return strings.TrimSpace(sha), nil
 }
 
+func isGitAuthenticationFailure(message string) bool {
+	patterns := []string{
+		"authentication failed", "permission denied", "could not read username", "could not read password",
+		"terminal prompts disabled", "access denied", "returned error: 401", "returned error: 403",
+		"http 401", "http 403",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(message, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGitNetworkFailure(message string) bool {
+	patterns := []string{
+		"could not resolve", "unable to access", "connection timed out", "connection refused",
+		"failed to connect", "network is unreachable", "connection reset",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(message, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Workspace, error) {
 	if err := ctx.Err(); err != nil {
 		return Workspace{}, err
 	}
-	path, err := b.manager.AddFromBase(branch, baseRef, "")
+	path, err := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{SetupEnvironment: b.setupEnvironment})
 	if err != nil {
 		message := strings.ToLower(err.Error())
 		if strings.Contains(message, "already exists") || strings.Contains(message, "already checked out") ||
@@ -146,8 +233,8 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, remote, sourceBranch string) error {
 	commands := [][]string{
 		{"config", "extensions.worktreeConfig", "true"},
-		{"-C", workspace.Path, "config", "branch." + workspace.Branch + ".remote", remote},
-		{"-C", workspace.Path, "config", "branch." + workspace.Branch + ".merge", "refs/heads/" + sourceBranch},
+		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".remote", remote},
+		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".merge", "refs/heads/" + sourceBranch},
 		{"-C", workspace.Path, "config", "--worktree", "push.default", "upstream"},
 	}
 	for _, args := range commands {

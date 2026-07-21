@@ -36,7 +36,8 @@ type Manager struct {
 
 // AddOptions controls optional behavior for creating a worktree.
 type AddOptions struct {
-	SkipSetup bool
+	SkipSetup        bool
+	SetupEnvironment []string
 }
 
 // New creates a new worktree Manager.
@@ -72,6 +73,12 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 // AddFromBase creates a new worktree with a branch from a specific base branch
 // and returns the path of the created worktree.
 func (m *Manager) AddFromBase(branch string, baseBranch string, customPath string) (string, error) {
+	return m.AddFromBaseWithOptions(branch, baseBranch, customPath, AddOptions{})
+}
+
+// AddFromBaseWithOptions creates a worktree from a base ref while applying
+// the same setup path and caller-selected setup environment as ordinary adds.
+func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, customPath string, opts AddOptions) (string, error) {
 	path, err := m.preparePath(customPath, branch)
 	if err != nil {
 		return "", err
@@ -81,7 +88,9 @@ func (m *Manager) AddFromBase(branch string, baseBranch string, customPath strin
 		return "", err
 	}
 
-	m.runPostWorktreeSetup(branch, path)
+	if !opts.SkipSetup {
+		m.runPostWorktreeSetupWithEnvironment(branch, path, opts.SetupEnvironment)
+	}
 	return path, nil
 }
 

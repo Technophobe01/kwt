@@ -28,14 +28,15 @@ var (
 	prState   string
 	prJSON    bool
 
-	loadPRConfig = config.Load
-	newPRService = defaultNewPRService
+	loadPRConfig       = config.Load
+	loadPRTargetConfig = config.LoadForTarget
+	newPRService       = defaultNewPRService
 )
 
 var prCmd = &cobra.Command{
 	Use:   "pr",
 	Short: "Discover and import pull requests as kwt workspaces",
-	Args:  cobra.NoArgs,
+	Args:  prNoArgs,
 	// Pull-request commands select an explicit globally registered project.
 	// A caller's cwd-local config must never alter a remote/SSH automation call.
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
@@ -44,14 +45,14 @@ var prCmd = &cobra.Command{
 var prListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List importable pull requests as JSON",
-	Args:  cobra.NoArgs,
+	Args:  prNoArgs,
 	RunE:  runPRList,
 }
 
 var prImportCmd = &cobra.Command{
 	Use:   "import <pull-request>",
 	Short: "Import a pull request as a configured kwt workspace",
-	Args:  cobra.ExactArgs(1),
+	Args:  prExactArgs(1),
 	RunE:  runPRImport,
 }
 
@@ -61,6 +62,9 @@ func init() {
 	prCmd.PersistentFlags().StringVar(&prProject, "project", "", "registered project identity, name, or path (defaults to current repository)")
 	prCmd.PersistentFlags().BoolVar(&prJSON, "json", true, "emit the stable JSON automation contract")
 	prListCmd.Flags().StringVar(&prState, "state", "open", "pull-request state: open, closed, or all")
+	prCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return writePRError(cmd, pullrequest.NewError(pullrequest.CodeInvalidSelector, err.Error(), false, nil))
+	})
 }
 
 func runPRList(cmd *cobra.Command, _ []string) error {
@@ -68,7 +72,11 @@ func runPRList(cmd *cobra.Command, _ []string) error {
 		return writePRError(cmd, pullrequest.NewError(
 			pullrequest.CodeInvalidSelector, "state must be open, closed, or all", false, nil))
 	}
-	project, service, err := preparePRCommand(cmd.Context())
+	project, err := preparePRProject()
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	service, err := preparePRService(cmd.Context(), project)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -82,7 +90,17 @@ func runPRList(cmd *cobra.Command, _ []string) error {
 }
 
 func runPRImport(cmd *cobra.Command, args []string) error {
-	project, service, err := preparePRCommand(cmd.Context())
+	if len(args) != 1 {
+		return prExactArgs(1)(cmd, args)
+	}
+	project, err := preparePRProject()
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	if _, err := pullrequest.ParseSelector(args[0], project.Identity); err != nil {
+		return writePRError(cmd, err)
+	}
+	service, err := preparePRService(cmd.Context(), project)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -93,21 +111,26 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	return writePRJSON(cmd, result)
 }
 
-func preparePRCommand(ctx context.Context) (pullrequest.Project, prService, error) {
+func preparePRProject() (pullrequest.Project, error) {
 	cfg, err := loadPRConfig()
 	if err != nil {
-		return pullrequest.Project{}, nil, pullrequest.NewError(
+		return pullrequest.Project{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation, "failed to load kwt configuration", false, err)
 	}
 	project, err := resolvePRProject(cfg, prProject)
 	if err != nil {
-		return pullrequest.Project{}, nil, err
+		return pullrequest.Project{}, err
 	}
-	service, err := newPRService(ctx, cfg, project)
+	return project, nil
+}
+
+func preparePRService(ctx context.Context, project pullrequest.Project) (prService, error) {
+	cfg, err := loadPRTargetConfig(project.Path, false)
 	if err != nil {
-		return pullrequest.Project{}, nil, err
+		return nil, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation, "failed to load selected project configuration", false, err)
 	}
-	return project, service, nil
+	return newPRService(ctx, cfg, project)
 }
 
 func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
@@ -117,7 +140,7 @@ func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullre
 	}
 	g := gitadapter.New(project.Path)
 	manager := worktree.New(g, cfg)
-	backend := pullrequest.NewGitBackend(g, manager, project)
+	backend := pullrequest.NewGitBackend(g, manager, project, pullrequest.WithFleetTokenEnvironment(cfg.Fleet.TokenEnv))
 	return pullrequest.NewService(provider, backend, pullrequest.NewFileStore(prStorePath())), nil
 }
 
@@ -153,7 +176,7 @@ func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project,
 
 	for _, candidate := range cfg.Projects {
 		identity := publishableProjectRepository(candidate)
-		if selector == identity || strings.EqualFold(selector, candidate.Name) || samePRPath(selector, candidate.Path) {
+		if pullrequest.EqualRepositoryIdentity(selector, identity) || strings.EqualFold(selector, candidate.Name) || samePRPath(selector, candidate.Path) {
 			candidate.Repository = identity
 			return prProjectFromModel(candidate)
 		}
@@ -169,16 +192,34 @@ func prProjectFromModel(project models.Project) (pullrequest.Project, error) {
 
 func validatePRProject(project pullrequest.Project) (pullrequest.Project, error) {
 	info, ok := urlutil.CanonicalRepositoryInfo(project.Identity)
-	if !ok || info.Host != "github.com" {
+	if !ok || !strings.EqualFold(info.Host, "github.com") {
 		return pullrequest.Project{}, pullrequest.NewError(
 			pullrequest.CodeUnsupportedProvider,
 			fmt.Sprintf("project %q is not a supported github.com repository", project.Identity), false, nil)
 	}
-	project.Identity = info.FullPath
+	project.Identity = pullrequest.NormalizeRepositoryIdentity(info.FullPath)
 	if strings.TrimSpace(project.Name) == "" {
 		project.Name = info.Repository
 	}
 	return project, nil
+}
+
+func prNoArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return writePRError(cmd, pullrequest.NewError(
+		pullrequest.CodeInvalidSelector, "this command does not accept positional arguments", false, nil))
+}
+
+func prExactArgs(count int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == count {
+			return nil
+		}
+		return writePRError(cmd, pullrequest.NewError(
+			pullrequest.CodeInvalidSelector, fmt.Sprintf("expected %d pull-request selector, received %d", count, len(args)), false, nil))
+	}
 }
 
 func samePRPath(left, right string) bool {
@@ -263,6 +304,8 @@ func prExitCode(code pullrequest.ErrorCode) int {
 		return 10
 	case pullrequest.CodeConflict:
 		return 11
+	case pullrequest.CodeUnsupportedGitVersion:
+		return 12
 	default:
 		return 1
 	}

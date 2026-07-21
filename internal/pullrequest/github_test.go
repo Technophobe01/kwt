@@ -84,6 +84,17 @@ func TestGitHubProviderMapsPullRequests(t *testing.T) {
 	assert.Equal(t, "github.com/acme/widget", pr.Repository.Identity)
 }
 
+func TestGitHubProviderNormalizesRepositoryIdentityCase(t *testing.T) {
+	repository, err := mapGitHubRepository(&github.Repository{
+		FullName: github.Ptr("Acme/Widget"), Name: github.Ptr("Widget"),
+		CloneURL: github.Ptr("https://github.com/Acme/Widget.git"),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "github.com/acme/widget", repository.Identity)
+	assert.Equal(t, "Acme", repository.Owner)
+}
+
 func TestGitHubProviderClassifiesFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

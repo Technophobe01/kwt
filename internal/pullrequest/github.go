@@ -146,7 +146,7 @@ func mapGitHubRepository(repository *github.Repository) (Repository, error) {
 	}
 	return Repository{
 		Provider: "github", Host: "github.com", Owner: owner, Name: name,
-		Identity: "github.com/" + owner + "/" + name, CloneURL: repository.GetCloneURL(),
+		Identity: NormalizeRepositoryIdentity("github.com/" + owner + "/" + name), CloneURL: repository.GetCloneURL(),
 	}, nil
 }
 

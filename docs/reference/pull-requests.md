@@ -32,6 +32,11 @@ with `GIT_TERMINAL_PROMPT=0`, so missing Git credentials fail instead of
 blocking an embedded or SSH client. Configure a Git credential helper or SSH
 authentication for subsequent pushes.
 
+Import requires Git 2.20 or newer because kwt uses per-worktree Git
+configuration to make plain `git push` target the PR head without changing
+push behavior in the main checkout. kwt checks this requirement before it
+fetches refs, adds remotes, or creates a worktree.
+
 ## Listing contract
 
 ```json
@@ -148,6 +153,13 @@ plain `git push` to update the PR's original head branch. It reports the exact
 tmux session name a client can attach to; import does not launch or manipulate
 tmux panes.
 
+Cross-project imports load the selected project's already trusted `.kwt.toml`
+in isolation. They never load configuration from the caller's working
+directory and never prompt or auto-trust in this automation path. Trusted
+`copy_files` and `setup_commands` continue to apply, but setup processes do
+not inherit `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, or the configured fleet
+token environment variable.
+
 A new import returns:
 
 ```json
@@ -253,6 +265,7 @@ and return a stable nonzero status. For example:
 | 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, or persistence failed. |
 | 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
 | 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
+| 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |
 
 All diagnostics go to stderr. Consumers should parse stdout and branch on
 `error.code`; they never need to scrape CLI prose.

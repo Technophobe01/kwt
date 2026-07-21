@@ -16,12 +16,20 @@ import (
 // runPostWorktreeSetup runs file copy and setup commands for the new worktree.
 // branch is used as the raw value for {{.Branch}} in templated setup commands.
 func (m *Manager) runPostWorktreeSetup(branch, worktreePath string) {
-	m.runPostWorktreeSetupWithExecutor(context.Background(), command.NewStandardExecutor(), branch, worktreePath)
+	m.runPostWorktreeSetupWithEnvironment(branch, worktreePath, nil)
+}
+
+func (m *Manager) runPostWorktreeSetupWithEnvironment(branch, worktreePath string, environment []string) {
+	m.runPostWorktreeSetupWithExecutorAndEnvironment(context.Background(), command.NewStandardExecutor(), branch, worktreePath, environment)
 }
 
 // runPostWorktreeSetupWithExecutor is the test seam for runPostWorktreeSetup.
 // It returns the SetupResult slice so tests can assert on per-command outcomes.
 func (m *Manager) runPostWorktreeSetupWithExecutor(ctx context.Context, executor Executor, branch, worktreePath string) []SetupResult {
+	return m.runPostWorktreeSetupWithExecutorAndEnvironment(ctx, executor, branch, worktreePath, nil)
+}
+
+func (m *Manager) runPostWorktreeSetupWithExecutorAndEnvironment(ctx context.Context, executor Executor, branch, worktreePath string, environment []string) []SetupResult {
 	if len(m.config.RepositorySettings) == 0 {
 		return nil
 	}
@@ -53,7 +61,7 @@ func (m *Manager) runPostWorktreeSetupWithExecutor(ctx context.Context, executor
 		toRun = append(toRun, rc.Rendered)
 	}
 
-	results := RunSetupCommands(ctx, executor, worktreePath, toRun)
+	results := RunSetupCommandsWithEnvironment(ctx, executor, worktreePath, toRun, environment)
 	for _, r := range results {
 		if r.Output != "" {
 			fmt.Fprintf(os.Stderr, "[kwt] setup command output: %s\n", r.Output)

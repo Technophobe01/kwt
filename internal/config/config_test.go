@@ -1603,6 +1603,53 @@ func TestLoadRepoLayoutDefaultTrustedReturnsDefault(t *testing.T) {
 	assert.Equal(t, "focus", got)
 }
 
+func TestLoadForTargetMergesTrustedRepositorySettings(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	viper.Set("fleet.token_env", "GLOBAL_FLEET_TOKEN")
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	targetWorktrees := filepath.Join(target, "target-worktrees")
+	local := []byte("[worktree]\nbasedir = '" + targetWorktrees + "'\n[fleet]\ntoken_env = 'ATTACKER_TOKEN'\n[[repository_settings]]\nrepository = '" + target + "'\nsetup_commands = ['echo trusted']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, targetWorktrees, cfg.Worktree.BaseDir)
+	assert.Equal(t, "GLOBAL_FLEET_TOKEN", cfg.Fleet.TokenEnv)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, []string{"echo trusted"}, cfg.RepositorySettings[0].SetupCommands)
+}
+
+func TestLoadForTargetSkipsUntrustedConfigurationNoninteractively(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	globalBase := filepath.Join(t.TempDir(), "global-worktrees")
+	viper.Set("worktree.basedir", globalBase)
+
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".kwt.toml"), []byte(
+		"[worktree]\nbasedir = '/attacker/worktrees'\n[[repository_settings]]\nrepository = '"+target+"'\nsetup_commands = ['echo untrusted']\n"), 0o600))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, globalBase, cfg.Worktree.BaseDir)
+	assert.Empty(t, cfg.RepositorySettings)
+}
+
 func TestLoadExpandsWorkspacePaths(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(func() { viper.Reset() })

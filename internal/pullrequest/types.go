@@ -4,22 +4,24 @@ package pullrequest
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 type ErrorCode string
 
 const (
-	CodeAuthentication      ErrorCode = "authentication_failed"
-	CodeRepositoryMismatch  ErrorCode = "repository_mismatch"
-	CodeNotFound            ErrorCode = "pull_request_not_found"
-	CodeInaccessibleHead    ErrorCode = "inaccessible_head"
-	CodeNamingConflict      ErrorCode = "naming_conflict"
-	CodeNetwork             ErrorCode = "network_failure"
-	CodeWorkspaceCreation   ErrorCode = "workspace_creation_failed"
-	CodeMalformedResponse   ErrorCode = "malformed_provider_response"
-	CodeConflict            ErrorCode = "import_conflict"
-	CodeInvalidSelector     ErrorCode = "invalid_pull_request_selector"
-	CodeUnsupportedProvider ErrorCode = "unsupported_provider"
+	CodeAuthentication        ErrorCode = "authentication_failed"
+	CodeRepositoryMismatch    ErrorCode = "repository_mismatch"
+	CodeNotFound              ErrorCode = "pull_request_not_found"
+	CodeInaccessibleHead      ErrorCode = "inaccessible_head"
+	CodeNamingConflict        ErrorCode = "naming_conflict"
+	CodeNetwork               ErrorCode = "network_failure"
+	CodeWorkspaceCreation     ErrorCode = "workspace_creation_failed"
+	CodeMalformedResponse     ErrorCode = "malformed_provider_response"
+	CodeConflict              ErrorCode = "import_conflict"
+	CodeInvalidSelector       ErrorCode = "invalid_pull_request_selector"
+	CodeUnsupportedProvider   ErrorCode = "unsupported_provider"
+	CodeUnsupportedGitVersion ErrorCode = "unsupported_git_version"
 )
 
 // Error is the stable failure contract used by both the service and JSON CLI.
@@ -130,5 +132,20 @@ type ErrorEnvelope struct {
 }
 
 func OpaqueID(repository string, number int) string {
-	return fmt.Sprintf("github:%s#%d", repository, number)
+	return fmt.Sprintf("github:%s#%d", NormalizeRepositoryIdentity(repository), number)
+}
+
+// NormalizeRepositoryIdentity returns the stable provider identity used for
+// comparisons and persistence. GitHub owner and repository names are
+// case-insensitive.
+func NormalizeRepositoryIdentity(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if strings.HasPrefix(strings.ToLower(identity), "github.com/") {
+		return strings.ToLower(identity)
+	}
+	return identity
+}
+
+func EqualRepositoryIdentity(left, right string) bool {
+	return NormalizeRepositoryIdentity(left) == NormalizeRepositoryIdentity(right)
 }
