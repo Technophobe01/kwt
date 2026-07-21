@@ -30,4 +30,47 @@ Threat model for local execution:
 - Repository *contents* remain untrusted for machine-level configuration
   (the `.kwt.toml` rule above), but command resolution through the
   user's PATH is the user's domain, not the repository's.
+
+Threat model for pull-request discovery and import:
+
+- Pull-request metadata, Git refs, fork repositories, and every file in a
+  fetched PR checkout are contributor-controlled and untrusted. API
+  authentication proves the kwt user's access; it does not make a PR trusted.
+  Apply this equally to same-repository and fork PRs.
+- Import is an explicit mutation initiated by the local user. Global config
+  and a target project's previously trust-approved `.kwt.toml` express that
+  user's workspace policy. In particular, configured `copy_files` and
+  `setup_commands` are a persistent opt-in for normal worktree creation,
+  including selected PR worktrees. Do not report the mere fact that a
+  user-authored setup command can invoke code from the checkout as a new
+  arbitrary-code-execution vulnerability. Do flag paths where PR content can
+  define or change the hook without the target-config trust decision, where a
+  hook runs without an explicit import, or where behavior exceeds the
+  documented workspace policy.
+- Trust in the hook definition does not grant PR contents access to kwt-owned
+  secrets. `KWT_GITHUB_TOKEN`, fleet bearer tokens and token-file locations,
+  and credential-bearing remote URLs remain sensitive. Flag persistence,
+  output, transmission, or unnecessary environment inheritance that exposes
+  them to contributor-controlled processes. Ordinary developer credentials
+  and environment outside kwt's own token/config surfaces remain the user's
+  responsibility under the local-execution model above.
+- Cross-project and SSH invocation must resolve configuration from the
+  selected target project, never from the caller's current repository. In
+  noninteractive mode kwt may load only global config and an already trusted
+  target config; it must not prompt, auto-trust, or silently accept a new
+  repository-local policy.
+- A successful import may fetch contributor refs, create a local branch and
+  worktree, add a clean credential-free remote, and configure pushes to the
+  PR's head branch. It must not push during import or redirect a later plain
+  `git push` to the base repository when the PR came from a fork.
+- GitHub owner/repository identity is case-insensitive. Ref names, local paths,
+  opaque IDs, and provenance keys remain exact data and require their own
+  validation; do not transfer GitHub's case-folding rule to arbitrary Git or
+  filesystem values.
+- Keep severity tied to consequence. Credential disclosure, trust bypass,
+  unexpected code execution, ref/path injection, or pushing to the wrong
+  repository are security findings. JSON/exit-status ordering, Git-version
+  compatibility, stale-state handling, and error classification are important
+  correctness or compatibility findings unless they create one of those
+  concrete security consequences.
 """
