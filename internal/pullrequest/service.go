@@ -2,6 +2,7 @@ package pullrequest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -108,6 +109,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	pr.Source.IsFork = !EqualRepositoryIdentity(pr.Source.Repository.Identity, pr.Repository.Identity)
 	branch := importBranchName(pr)
 	var created *Workspace
+	cleanupReason := "workspace created but provenance could not be persisted"
 
 	err = s.store.Update(ctx, func(records map[string]Provenance) error {
 		workspaces, listErr := s.backend.ListWorkspaces(ctx)
@@ -170,9 +172,8 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		}
 		created = &workspace
 		if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Name); configErr != nil {
-			_ = s.backend.Rollback(ctx, workspace)
-			created = nil
-			return NewError(CodeWorkspaceCreation, "workspace created but push configuration failed; rolled it back", false, configErr)
+			cleanupReason = "workspace created but push configuration failed"
+			return NewError(CodeWorkspaceCreation, cleanupReason, false, configErr)
 		}
 
 		newRecord := Provenance{
@@ -189,9 +190,12 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	})
 	if err != nil {
 		if created != nil {
-			_ = s.backend.Rollback(context.WithoutCancel(ctx), *created)
-			return ImportResult{}, NewError(CodeWorkspaceCreation,
-				"workspace created but provenance could not be persisted; rolled it back", false, err)
+			if rollbackErr := s.backend.Rollback(context.WithoutCancel(ctx), *created); rollbackErr != nil {
+				return ImportResult{}, NewError(CodeWorkspaceCreation,
+					fmt.Sprintf("%s and rollback failed; manual cleanup is required at %s", cleanupReason, created.Path),
+					false, errors.Join(err, rollbackErr))
+			}
+			return ImportResult{}, NewError(CodeWorkspaceCreation, cleanupReason+"; rolled it back", false, err)
 		}
 		return ImportResult{}, AsError(err, CodeWorkspaceCreation, "pull-request import failed")
 	}

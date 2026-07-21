@@ -93,6 +93,9 @@ type fakeWorkspaceBackend struct {
 	createCalls     int
 	createErr       error
 	configureErr    error
+	configureCancel context.CancelFunc
+	rollbackErr     error
+	rollbackCtxErr  error
 	ensureRemoteErr error
 	validateErr     error
 	validateCalls   int
@@ -179,6 +182,9 @@ func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Work
 }
 
 func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, remote, sourceBranch string) error {
+	if f.configureCancel != nil {
+		f.configureCancel()
+	}
 	if f.configureErr != nil {
 		return f.configureErr
 	}
@@ -188,9 +194,16 @@ func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, rem
 	return nil
 }
 
-func (f *fakeWorkspaceBackend) Rollback(_ context.Context, workspace Workspace) error {
+func (f *fakeWorkspaceBackend) Rollback(ctx context.Context, workspace Workspace) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.rollbackCtxErr = ctx.Err()
+	if f.rollbackCtxErr != nil {
+		return f.rollbackCtxErr
+	}
+	if f.rollbackErr != nil {
+		return f.rollbackErr
+	}
 	for i := range f.workspaces {
 		if f.workspaces[i].Path == workspace.Path {
 			f.workspaces = append(f.workspaces[:i], f.workspaces[i+1:]...)
@@ -593,6 +606,52 @@ func TestImportRollsBackWhenProvenanceCannotBeCommitted(t *testing.T) {
 
 	assertErrorCode(t, err, CodeWorkspaceCreation)
 	assert.Empty(t, backend.workspaces)
+}
+
+func TestImportRollbackIgnoresCanceledRequestContext(t *testing.T) {
+	pr := testPR(58, false)
+	backend := newFakeBackend()
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.configureCancel = cancel
+	backend.configureErr = errors.New("config failed")
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	_, err := service.Import(ctx, testProject(), "58")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.NoError(t, backend.rollbackCtxErr)
+	assert.Empty(t, backend.workspaces)
+}
+
+func TestImportReportsRollbackFailureAndPreservesWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		number    int
+		configure bool
+	}{
+		{name: "push configuration", number: 59, configure: true},
+		{name: "provenance persistence", number: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := testPR(tc.number, false)
+			backend := newFakeBackend()
+			backend.rollbackErr = errors.New("remove failed")
+			var store Store = newMemoryStore()
+			if tc.configure {
+				backend.configureErr = errors.New("config failed")
+			} else {
+				store = &commitFailStore{memoryStore: newMemoryStore()}
+			}
+			service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+			_, err := service.Import(context.Background(), testProject(), itoa(tc.number))
+
+			assertErrorCode(t, err, CodeWorkspaceCreation)
+			assert.ErrorContains(t, err, "rollback failed")
+			require.Len(t, backend.workspaces, 1)
+			assert.Contains(t, err.Error(), backend.workspaces[0].Path)
+		})
+	}
 }
 
 func assertErrorCode(t *testing.T, err error, want ErrorCode) {

@@ -449,12 +449,12 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 	}
 
 	path := filepath.Join(repoRoot, localConfigName+"."+configType)
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Lstat(path); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("stat target config %s: %w", path, err)
 		}
 	} else {
-		absPath, normalizeErr := normalizeConfigPath(path)
+		absPath, normalizeErr := normalizeTargetConfigPath(path)
 		if normalizeErr != nil {
 			fmt.Fprintf(os.Stderr, "kwt: skipping target config: %v\n", normalizeErr)
 		} else {
@@ -513,6 +513,33 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// normalizeTargetConfigPath returns a canonical lexical path for a target
+// repository's config while rejecting a final-component symlink. Keeping the
+// lexical filename, rather than resolving it to another repository's config,
+// prevents one repository from reusing another repository's trust entry.
+func normalizeTargetConfigPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("abs path %s: %w", path, err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("resolve parent symlinks %s: %w", abs, err)
+	}
+	lexicalPath := filepath.Join(parent, filepath.Base(abs))
+	info, err := os.Lstat(lexicalPath)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", lexicalPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%s is a symlink", lexicalPath)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file (mode %s)", lexicalPath, info.Mode())
+	}
+	return lexicalPath, nil
 }
 
 func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {

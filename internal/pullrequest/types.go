@@ -60,6 +60,7 @@ type Repository struct {
 	Owner    string `json:"owner"`
 	Name     string `json:"name"`
 	CloneURL string `json:"-"`
+	SSHURL   string `json:"-"`
 }
 
 type Project struct {

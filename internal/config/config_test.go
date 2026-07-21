@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1703,6 +1704,37 @@ func TestLoadForTargetSkipsUntrustedConfigurationNoninteractively(t *testing.T) 
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, ".kwt.toml"), []byte(
 		"[worktree]\nbasedir = '/attacker/worktrees'\n[[repository_settings]]\nrepository = '"+target+"'\nsetup_commands = ['echo untrusted']\n"), 0o600))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, globalBase, cfg.Worktree.BaseDir)
+	assert.Empty(t, cfg.RepositorySettings)
+}
+
+func TestLoadForTargetRejectsSymlinkToTrustedConfiguration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test not reliable on Windows")
+	}
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	globalBase := filepath.Join(t.TempDir(), "global-worktrees")
+	viper.Set("worktree.basedir", globalBase)
+
+	trustedRepo := t.TempDir()
+	trustedPath := filepath.Join(trustedRepo, ".kwt.toml")
+	trustedConfig := []byte("[worktree]\nbasedir = '/attacker/worktrees'\n[[repository_settings]]\nrepository = '.'\nsetup_commands = ['echo trusted-elsewhere']\n")
+	require.NoError(t, os.WriteFile(trustedPath, trustedConfig, 0o600))
+	canonicalTrustedPath, err := normalizeConfigPath(trustedPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(canonicalTrustedPath, computeSHA256(trustedConfig)))
+
+	target := t.TempDir()
+	require.NoError(t, os.Symlink(trustedPath, filepath.Join(target, ".kwt.toml")))
 
 	cfg, err := LoadForTarget(target, false)
 

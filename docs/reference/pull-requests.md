@@ -159,6 +159,9 @@ kwt chooses the deterministic local branch name, selects or creates a clean
 source remote, fetches the head, creates the worktree through the normal
 workspace manager (including trusted repository setup commands), and
 configures plain `git push` to update exactly the PR's original head branch.
+When it creates a fork remote, kwt uses SSH when the project's existing remote
+uses SSH and HTTPS otherwise, preserving the project's Git authentication
+transport.
 It will not reuse a remote with another push URL or a custom push refspec, and
 worktree-local `pushRemote` configuration takes precedence over global push
 defaults. Import reports the exact tmux session name a client can attach to;
@@ -169,7 +172,8 @@ in isolation. They never load configuration from the caller's working
 directory and never prompt or auto-trust in this automation path. Trusted
 `copy_files` and `setup_commands` continue to apply, but setup processes do
 not inherit `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, or the configured fleet
-token environment variable.
+token environment variable. A target repository's `.kwt.toml` must be a
+regular file, not a symlink, so trust granted to another path cannot be reused.
 
 Configured file copies use rooted destination operations and reject symlinks
 in the destination path, preventing contributor-controlled checkout entries
@@ -253,7 +257,9 @@ Repeating the same import returns the same shape and workspace with
 updated under a cross-process file lock. The lock covers checking, fetching,
 creating, configuring, and recording, so concurrent imports converge on one
 workspace. A stale provenance record is not reported as imported when its Git
-worktree no longer exists.
+worktree no longer exists. If an import fails after creating a workspace, kwt
+rolls it back even when the request context was canceled. A rollback failure
+is reported with the surviving workspace path for manual cleanup.
 
 ## Failure contract
 

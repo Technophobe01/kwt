@@ -131,6 +131,8 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		return "", NewError(CodeWorkspaceCreation, "failed to list Git remotes", false, err)
 	}
 	existing := make(map[string]bool)
+	matchingRemote := ""
+	projectUsesSSH := false
 	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		name := strings.TrimSpace(line)
 		if name == "" {
@@ -143,23 +145,48 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 			continue
 		}
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(fetchURL))
-		if fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
-			allRemoteURLsMatch(pushURLs, repository.Identity) && !b.remoteHasCustomPushRefspec(ctx, name) {
-			return name, nil
+		if fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) && isSSHRemoteURL(fetchURL) {
+			projectUsesSSH = true
 		}
+		if fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
+			matchingRemote == "" && allRemoteURLsMatch(pushURLs, repository.Identity) &&
+			!b.remoteHasCustomPushRefspec(ctx, name) {
+			matchingRemote = name
+		}
+	}
+	if matchingRemote != "" {
+		return matchingRemote, nil
 	}
 	if strings.TrimSpace(repository.CloneURL) == "" {
 		return "", NewError(CodeInaccessibleHead, "pull-request head repository has no clone URL", false, nil)
+	}
+	remoteURL := repository.CloneURL
+	if projectUsesSSH && strings.TrimSpace(repository.SSHURL) != "" {
+		remoteURL = repository.SSHURL
 	}
 	base := "kwt-pr-" + sanitizeRemoteComponent(repository.Owner)
 	name := base
 	for suffix := 2; existing[name]; suffix++ {
 		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
-	if _, err := b.git.RunWithContext(ctx, "remote", "add", name, repository.CloneURL); err != nil {
+	if _, err := b.git.RunWithContext(ctx, "remote", "add", name, remoteURL); err != nil {
 		return "", NewError(CodeWorkspaceCreation, "failed to add pull-request Git remote", false, err)
 	}
 	return name, nil
+}
+
+func isSSHRemoteURL(remoteURL string) bool {
+	remoteURL = strings.TrimSpace(remoteURL)
+	lower := strings.ToLower(remoteURL)
+	if strings.HasPrefix(lower, "ssh://") || strings.HasPrefix(lower, "git+ssh://") {
+		return true
+	}
+	if strings.Contains(lower, "://") {
+		return false
+	}
+	colon := strings.IndexByte(remoteURL, ':')
+	slash := strings.IndexAny(remoteURL, `/\`)
+	return colon >= 0 && (slash < 0 || colon < slash)
 }
 
 func allRemoteURLsMatch(output, repositoryIdentity string) bool {

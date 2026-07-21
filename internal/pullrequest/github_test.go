@@ -60,7 +60,7 @@ func TestGitHubProviderMapsPullRequests(t *testing.T) {
 		_, _ = io.WriteString(w, `[{"number":17,"html_url":"https://github.com/acme/widget/pull/17","title":"A draft",`+
 			`"user":{"login":"octocat"},"draft":true,"state":"open",`+
 			`"head":{"ref":"feature/widgets","sha":"0123456789abcdef0123456789abcdef01234567",`+
-			`"repo":{"name":"widget","full_name":"octocat/widget","html_url":"https://github.com/octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},`+
+			`"repo":{"name":"widget","full_name":"octocat/widget","html_url":"https://github.com/octocat/widget","clone_url":"https://github.com/octocat/widget.git","ssh_url":"git@github.com:octocat/widget.git"}},`+
 			`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","html_url":"https://github.com/acme/widget","clone_url":"https://github.com/acme/widget.git"}}}]`)
 	}))
 	defer server.Close()
@@ -80,6 +80,7 @@ func TestGitHubProviderMapsPullRequests(t *testing.T) {
 	assert.True(t, pr.Draft)
 	assert.Equal(t, "feature/widgets", pr.Source.Name)
 	assert.Equal(t, "github.com/octocat/widget", pr.Source.Repository.Identity)
+	assert.Equal(t, "git@github.com:octocat/widget.git", pr.Source.Repository.SSHURL)
 	assert.Equal(t, "main", pr.Target.Name)
 	assert.Equal(t, "github.com/acme/widget", pr.Repository.Identity)
 }

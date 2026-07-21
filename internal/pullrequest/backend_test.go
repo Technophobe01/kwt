@@ -292,6 +292,21 @@ func TestGitBackendCreatesDeterministicRemoteWithoutOverwritingCollision(t *test
 	assert.Equal(t, "https://github.com/octocat/widget.git", runGit(t, repo, "remote", "get-url", remote))
 }
 
+func TestGitBackendCreatesForkRemoteUsingProjectSSHTransport(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+		SSHURL: "git@github.com:octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+	assert.Equal(t, "git@github.com:octocat/widget.git", runGit(t, repo, "remote", "get-url", remote))
+}
+
 func TestGitBackendFetchReportsUnavailableHead(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	bare := filepath.Join(t.TempDir(), "fork.git")
