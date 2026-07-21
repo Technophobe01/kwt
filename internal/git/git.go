@@ -101,14 +101,20 @@ func (g *Git) runWithEnvironmentContext(ctx context.Context, environment []strin
 // NonInteractiveEnvironment disables Git, credential-manager, and OpenSSH
 // prompting while preserving the caller's ordinary authentication setup.
 func NonInteractiveEnvironment(environment []string) []string {
+	sshVariant := environmentValue(environment, "GIT_SSH_VARIANT")
 	sshCommand := environmentValue(environment, "GIT_SSH_COMMAND")
 	if strings.TrimSpace(sshCommand) == "" {
-		sshCommand = environmentValue(environment, "GIT_SSH")
+		if sshExecutable := environmentValue(environment, "GIT_SSH"); strings.TrimSpace(sshExecutable) != "" {
+			if variant := strings.ToLower(strings.TrimSpace(sshVariant)); variant == "" || variant == "auto" {
+				sshVariant = detectSSHExecutableVariant(sshExecutable)
+			}
+			sshCommand = shellQuote(sshExecutable)
+		}
 	}
 	if strings.TrimSpace(sshCommand) == "" {
 		sshCommand = "ssh"
 	}
-	sshCommand = nonInteractiveSSHCommand(sshCommand, environmentValue(environment, "GIT_SSH_VARIANT"))
+	sshCommand = nonInteractiveSSHCommand(sshCommand, sshVariant)
 	for _, key := range []string{
 		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
 		"GCM_INTERACTIVE", "GIT_CREDENTIAL_INTERACTIVE", "GIT_SSH_COMMAND",
@@ -147,6 +153,10 @@ func detectSSHVariant(command string) string {
 		return ""
 	}
 	executable := strings.Trim(fields[0], "\"'")
+	return detectSSHExecutableVariant(executable)
+}
+
+func detectSSHExecutableVariant(executable string) string {
 	executable = strings.ReplaceAll(executable, `\`, "/")
 	if slash := strings.LastIndexByte(executable, '/'); slash >= 0 {
 		executable = executable[slash+1:]
@@ -160,6 +170,10 @@ func detectSSHVariant(command string) string {
 	default:
 		return ""
 	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func environmentValue(environment []string, key string) string {

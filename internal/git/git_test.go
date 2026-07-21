@@ -202,12 +202,17 @@ func TestNonInteractiveEnvironmentUsesSSHVariantBatchFlag(t *testing.T) {
 		{
 			name:        "OpenSSH from GIT_SSH",
 			environment: []string{"GIT_SSH=/usr/local/bin/ssh"},
-			wantCommand: "/usr/local/bin/ssh -oBatchMode=yes",
+			wantCommand: "'/usr/local/bin/ssh' -oBatchMode=yes",
 		},
 		{
 			name:        "plink from GIT_SSH",
 			environment: []string{"GIT_SSH=C:\\PuTTY\\plink.exe", "GIT_SSH_VARIANT=plink"},
-			wantCommand: "C:\\PuTTY\\plink.exe -batch",
+			wantCommand: "'C:\\PuTTY\\plink.exe' -batch",
+		},
+		{
+			name:        "GIT_SSH path with spaces",
+			environment: []string{"GIT_SSH=C:\\Program Files\\PuTTY\\plink.exe"},
+			wantCommand: "'C:\\Program Files\\PuTTY\\plink.exe' -batch",
 		},
 		{
 			name:        "unknown implementation",
