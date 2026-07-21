@@ -318,6 +318,26 @@ func TestListDoesNotMatchProvenanceWhenLiveBranchDiffers(t *testing.T) {
 	assert.Nil(t, got[0].Workspace)
 }
 
+func TestListDoesNotMarkImportAfterSourceBranchRename(t *testing.T) {
+	pr := testPR(24, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-24", Repository: testProject().Identity, Branch: "pr-24-feature-old", Path: "/worktrees/24", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA,
+		SourceRepo: pr.Source.Repository.Identity, SourceBranch: "feature/old",
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	got, err := service.List(context.Background(), testProject(), "open")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.False(t, got[0].Imported)
+	assert.Nil(t, got[0].Workspace)
+}
+
 func TestListRecognizesLegacyCasedProvenance(t *testing.T) {
 	pr := testPR(22, false)
 	backend := newFakeBackend()
@@ -443,6 +463,25 @@ func TestImportDoesNotReturnExistingWorkspaceWhenBranchDiffers(t *testing.T) {
 	assert.Equal(t, 1, backend.createCalls)
 }
 
+func TestImportRejectsExistingWorkspaceAfterSourceBranchRename(t *testing.T) {
+	pr := testPR(45, false)
+	backend := newFakeBackend()
+	workspace := Workspace{ID: "ws-45", Repository: testProject().Identity, Branch: "pr-45-feature-old", Path: "/worktrees/45", State: "ready"}
+	backend.workspaces = []Workspace{workspace}
+	store := newMemoryStore()
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: workspace, HeadSHA: pr.HeadSHA,
+		SourceRepo: pr.Source.Repository.Identity, SourceBranch: "feature/old",
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	_, err := service.Import(context.Background(), testProject(), "45")
+
+	assertErrorCode(t, err, CodeConflict)
+	assert.ErrorContains(t, err, "source repository or branch changed")
+	assert.Zero(t, backend.createCalls)
+}
+
 func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
 	pr := testPR(43, false)
 	backend := newFakeBackend()
@@ -464,6 +503,8 @@ func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
 	assert.NotContains(t, store.records, legacyID)
 	assert.Contains(t, store.records, pr.ID)
 	assert.Equal(t, pr.ID, store.records[pr.ID].PullRequestID)
+	assert.Equal(t, pr.Source.Repository.Identity, store.records[pr.ID].SourceRepo)
+	assert.Equal(t, pr.Source.Name, store.records[pr.ID].SourceBranch)
 }
 
 func TestConcurrentImportConverges(t *testing.T) {

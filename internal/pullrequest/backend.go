@@ -3,6 +3,7 @@ package pullrequest
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -69,7 +70,53 @@ func (b *GitBackend) ValidateImport(ctx context.Context) error {
 	if !supportsWorktreeConfig(output) {
 		return NewError(CodeUnsupportedGitVersion, "pull-request import requires Git 2.20 or newer", false, nil)
 	}
+	configOutput, err := b.git.RunWithContext(ctx, "config", "--local", "--null", "--list")
+	if err != nil {
+		return NewError(CodeWorkspaceCreation, "failed to inspect local Git configuration", false, err)
+	}
+	if localGitConfigHasEmbeddedRemoteCredentials(configOutput) {
+		return NewError(CodeAuthentication,
+			"pull-request import requires credential-free Git remote URLs; use a credential helper or SSH agent",
+			false, nil)
+	}
 	return nil
+}
+
+func localGitConfigHasEmbeddedRemoteCredentials(output string) bool {
+	for record := range strings.SplitSeq(output, "\x00") {
+		key, value, found := strings.Cut(record, "\n")
+		if !found {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if !strings.HasPrefix(key, "remote.") ||
+			(!strings.HasSuffix(key, ".url") && !strings.HasSuffix(key, ".pushurl")) {
+			continue
+		}
+		if remoteURLHasEmbeddedCredentials(strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func remoteURLHasEmbeddedCredentials(remoteURL string) bool {
+	if strings.Contains(remoteURL, "://") {
+		parsed, err := neturl.Parse(remoteURL)
+		if err == nil && parsed.User != nil {
+			scheme := strings.ToLower(parsed.Scheme)
+			if scheme == "ssh" || scheme == "git+ssh" {
+				_, hasPassword := parsed.User.Password()
+				return hasPassword
+			}
+			return true
+		}
+	}
+	at := strings.IndexByte(remoteURL, '@')
+	if at < 0 {
+		return false
+	}
+	return strings.Contains(remoteURL[:at], ":") && strings.Contains(remoteURL[at+1:], ":")
 }
 
 var gitVersionPattern = regexp.MustCompile(`(?i)git version (\d+)\.(\d+)(?:\.(\d+))?`)
@@ -145,11 +192,13 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 			continue
 		}
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(strings.TrimSpace(fetchURL))
-		if fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) && isSSHRemoteURL(fetchURL) {
-			projectUsesSSH = true
+		if fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) {
+			if pushURL, single := singleRemoteURL(pushURLs); single && isSSHRemoteURL(pushURL) {
+				projectUsesSSH = true
+			}
 		}
 		if fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
-			matchingRemote == "" && allRemoteURLsMatch(pushURLs, repository.Identity) &&
+			matchingRemote == "" && singleRemoteURLMatches(pushURLs, repository.Identity) &&
 			!b.remoteHasCustomPushRefspec(ctx, name) {
 			matchingRemote = name
 		}
@@ -189,20 +238,28 @@ func isSSHRemoteURL(remoteURL string) bool {
 	return colon >= 0 && (slash < 0 || colon < slash)
 }
 
-func allRemoteURLsMatch(output, repositoryIdentity string) bool {
-	found := false
+func singleRemoteURLMatches(output, repositoryIdentity string) bool {
+	remoteURL, single := singleRemoteURL(output)
+	if !single {
+		return false
+	}
+	identity, ok := urlutil.CanonicalRepositoryIdentityFromRemote(remoteURL)
+	return ok && EqualRepositoryIdentity(identity, repositoryIdentity)
+}
+
+func singleRemoteURL(output string) (string, bool) {
+	remoteURL := ""
 	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		found = true
-		identity, ok := urlutil.CanonicalRepositoryIdentityFromRemote(line)
-		if !ok || !EqualRepositoryIdentity(identity, repositoryIdentity) {
-			return false
+		if remoteURL != "" {
+			return "", false
 		}
+		remoteURL = line
 	}
-	return found
+	return remoteURL, remoteURL != ""
 }
 
 func (b *GitBackend) remoteHasCustomPushRefspec(ctx context.Context, remote string) bool {

@@ -34,6 +34,11 @@ with `GIT_TERMINAL_PROMPT=0`, so missing Git credentials fail instead of
 blocking an embedded or SSH client. Configure a Git credential helper or SSH
 authentication for subsequent pushes.
 
+Import stops before mutation when a repository stores credentials directly in
+a remote fetch or push URL. Use a Git credential helper or SSH agent instead;
+this keeps trusted setup commands and contributor-controlled lifecycle scripts
+from reading reusable credentials out of the linked worktree's shared config.
+
 Import fetches also force the SSH implementation's noninteractive mode
 (OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
 credential prompts. Every ref-mutating import operation—including fetch,
@@ -159,12 +164,12 @@ kwt chooses the deterministic local branch name, selects or creates a clean
 source remote, fetches the head, creates the worktree through the normal
 workspace manager (including trusted repository setup commands), and
 configures plain `git push` to update exactly the PR's original head branch.
-When it creates a fork remote, kwt uses SSH when the project's existing remote
-uses SSH and HTTPS otherwise, preserving the project's Git authentication
-transport.
-It will not reuse a remote with another push URL or a custom push refspec, and
-worktree-local `pushRemote` configuration takes precedence over global push
-defaults. Import reports the exact tmux session name a client can attach to;
+When it creates a fork remote, kwt uses SSH when the project's effective push
+URL uses SSH and HTTPS otherwise, preserving the project's working push
+authentication transport. It reuses only remotes with exactly one effective
+push URL and no custom push refspec. Worktree-local `pushRemote` configuration
+takes precedence over global push defaults. Import reports the exact tmux
+session name a client can attach to;
 it does not launch or manipulate tmux panes.
 
 Cross-project imports load the selected project's already trusted `.kwt.toml`
@@ -259,7 +264,10 @@ creating, configuring, and recording, so concurrent imports converge on one
 workspace. A stale provenance record is not reported as imported when its Git
 worktree no longer exists. If an import fails after creating a workspace, kwt
 rolls it back even when the request context was canceled. A rollback failure
-is reported with the surviving workspace path for manual cleanup.
+is reported with the surviving workspace path for manual cleanup. If the PR's
+recorded source repository or branch changed while its imported workspace is
+still present, another import returns `import_conflict` instead of reusing
+stale push configuration.
 
 ## Failure contract
 

@@ -97,6 +97,21 @@ func TestGitBackendDoesNotReuseRemoteWithAdditionalPushURL(t *testing.T) {
 	assert.Equal(t, "kwt-pr-octocat", remote)
 }
 
+func TestGitBackendDoesNotReuseRemoteWithDuplicateMatchingPushURLs(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "personal", "https://github.com/octocat/widget.git")
+	runGit(t, repo, "remote", "set-url", "--add", "--push", "personal", "https://github.com/octocat/widget.git")
+	runGit(t, repo, "remote", "set-url", "--add", "--push", "personal", "https://github.com/octocat/widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+}
+
 func TestGitBackendDoesNotReuseRemoteWithCustomPushRefspec(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	runGit(t, repo, "remote", "add", "personal", "https://github.com/octocat/widget.git")
@@ -163,6 +178,49 @@ func TestParseGitVersionRequiresWorktreeConfigSupport(t *testing.T) {
 		{output: "not git", ok: false},
 	} {
 		assert.Equal(t, tc.ok, supportsWorktreeConfig(tc.output), tc.output)
+	}
+}
+
+func TestGitBackendValidateImportRejectsCredentialBearingRemoteURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pushURL bool
+	}{
+		{name: "fetch URL"},
+		{name: "push URL", pushURL: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, backend := newBackendRepo(t)
+			runGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widget.git")
+			credentialURL := "https://oauth2:never-log-this-secret@github.com/acme/widget.git"
+			if tc.pushURL {
+				runGit(t, repo, "remote", "set-url", "--push", "origin", credentialURL)
+			} else {
+				runGit(t, repo, "remote", "set-url", "origin", credentialURL)
+			}
+
+			err := backend.ValidateImport(context.Background())
+
+			assertErrorCode(t, err, CodeAuthentication)
+			assert.NotContains(t, err.Error(), "never-log-this-secret")
+			assert.NotContains(t, err.Error(), "oauth2")
+		})
+	}
+}
+
+func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
+	for _, tc := range []struct {
+		remoteURL string
+		want      bool
+	}{
+		{remoteURL: "https://github.com/acme/widget.git"},
+		{remoteURL: "https://token@github.com/acme/widget.git", want: true},
+		{remoteURL: "git@github.com:acme/widget.git"},
+		{remoteURL: "ssh://git@github.com/acme/widget.git"},
+		{remoteURL: "ssh://git:secret@github.com/acme/widget.git", want: true},
+		{remoteURL: "git:secret@github.com:acme/widget.git", want: true},
+	} {
+		assert.Equal(t, tc.want, remoteURLHasEmbeddedCredentials(tc.remoteURL), tc.remoteURL)
 	}
 }
 
@@ -295,6 +353,22 @@ func TestGitBackendCreatesDeterministicRemoteWithoutOverwritingCollision(t *test
 func TestGitBackendCreatesForkRemoteUsingProjectSSHTransport(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/widget.git")
+
+	remote, err := backend.EnsureRemote(context.Background(), Repository{
+		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
+		Owner: "octocat", Name: "widget", CloneURL: "https://github.com/octocat/widget.git",
+		SSHURL: "git@github.com:octocat/widget.git",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "kwt-pr-octocat", remote)
+	assert.Equal(t, "git@github.com:octocat/widget.git", runGit(t, repo, "remote", "get-url", remote))
+}
+
+func TestGitBackendCreatesForkRemoteUsingProjectPushTransport(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	runGit(t, repo, "remote", "set-url", "--push", "origin", "git@github.com:acme/widget.git")
 
 	remote, err := backend.EnsureRemote(context.Background(), Repository{
 		Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",

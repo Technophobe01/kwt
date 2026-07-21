@@ -71,7 +71,8 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 	for i := range prs {
 		prs[i].Source.IsFork = !EqualRepositoryIdentity(prs[i].Source.Repository.Identity, prs[i].Repository.Identity)
 		_, record, ok := findProvenance(records, prs[i])
-		if ok && EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
+		if ok && EqualRepositoryIdentity(record.Project.Identity, project.Identity) &&
+			provenanceSourceMatches(record, prs[i]) {
 			if workspace, live := matchingProvenanceWorkspace(paths, record); live {
 				prs[i].Imported = true
 				prs[i].Workspace = &workspace
@@ -126,15 +127,20 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 				return NewError(CodeConflict, "pull request is recorded for a different project", false, nil)
 			}
 			if workspace, live := matchingProvenanceWorkspace(byPath, record); live {
+				if !provenanceSourceMatches(record, pr) {
+					return NewError(CodeConflict,
+						"pull-request source repository or branch changed after import", false, nil)
+				}
 				if recordKey != pr.ID {
 					delete(records, recordKey)
-					record.PullRequestID = pr.ID
-					record.Repository = NormalizeRepositoryIdentity(record.Repository)
-					record.SourceRepo = NormalizeRepositoryIdentity(record.SourceRepo)
-					record.Project.Identity = NormalizeRepositoryIdentity(record.Project.Identity)
-					record.Workspace = workspace
-					records[pr.ID] = record
 				}
+				record.PullRequestID = pr.ID
+				record.Repository = NormalizeRepositoryIdentity(record.Repository)
+				record.SourceRepo = NormalizeRepositoryIdentity(pr.Source.Repository.Identity)
+				record.SourceBranch = pr.Source.Name
+				record.Project.Identity = NormalizeRepositoryIdentity(record.Project.Identity)
+				record.Workspace = workspace
+				records[pr.ID] = record
 				result = ImportResult{Status: ImportExisting, PullRequest: pr, Project: project, Workspace: workspace}
 				result.PullRequest.Imported = true
 				result.PullRequest.Workspace = &result.Workspace
@@ -224,6 +230,14 @@ func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance)
 		return Workspace{}, false
 	}
 	return workspace, true
+}
+
+func provenanceSourceMatches(record Provenance, pr PullRequest) bool {
+	if strings.TrimSpace(record.SourceRepo) != "" &&
+		!EqualRepositoryIdentity(record.SourceRepo, pr.Source.Repository.Identity) {
+		return false
+	}
+	return strings.TrimSpace(record.SourceBranch) == "" || record.SourceBranch == pr.Source.Name
 }
 
 func repositoryFromProject(project Project) (Repository, error) {
