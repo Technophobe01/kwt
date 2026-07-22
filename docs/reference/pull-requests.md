@@ -284,10 +284,12 @@ an import fails after creating a workspace—including a configured file-copy or
 setup-command failure—kwt rolls it back even when the request context was
 canceled. Request cancellation, including `SIGINT` and `SIGTERM`, terminates
 checkout filters and setup-command process trees; cleanup then runs without the
-canceled context. A rollback failure is reported with the surviving workspace
-path and branch for manual cleanup. If the PR's recorded source repository or
-branch changed while its imported workspace is still present, another import
-returns `import_conflict` instead of reusing stale push configuration.
+canceled context. Worktree creation reserves its path and branch, and failed-add
+cleanup removes only the reserved directory identity and the unchanged reserved
+ref. A rollback failure is reported with the surviving workspace path and
+branch for manual cleanup. If the PR's recorded source repository or branch
+changed while its imported workspace is still present, another import returns
+`import_conflict` instead of reusing stale push configuration.
 
 ## Failure contract
 

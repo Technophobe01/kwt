@@ -557,7 +557,7 @@ func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 		return err
 	}
 	for i := range settings {
-		resolvedRepository, err := resolveTargetRelativePath(repoRoot, settings[i].Repository)
+		resolvedRepository, err := resolveTargetRepositorySelector(repoRoot, settings[i].Repository)
 		if err != nil {
 			return fmt.Errorf("resolve target repository setting %d repository: %w", i, err)
 		}
@@ -572,6 +572,17 @@ func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 		local.Set("repository_settings", settings)
 	}
 	return nil
+}
+
+func resolveTargetRepositorySelector(repoRoot, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if targetPathHasEnvironmentReference(value) {
+		return "", fmt.Errorf("environment variable references are not allowed in repository-local paths")
+	}
+	if strings.ContainsAny(value, "*?[") {
+		return value, nil
+	}
+	return resolveTargetRelativePath(repoRoot, value)
 }
 
 func resolveTargetRelativePath(repoRoot, value string) (string, error) {

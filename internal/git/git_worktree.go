@@ -19,10 +19,24 @@ type PartialWorktreeCreationError struct {
 	Err    error
 }
 
-func (e *PartialWorktreeCreationError) Error() string { return e.Err.Error() }
+func (e *PartialWorktreeCreationError) Error() string {
+	remaining := make([]string, 0, 2)
+	if e.Path != "" {
+		remaining = append(remaining, fmt.Sprintf("path %q", e.Path))
+	}
+	if e.Branch != "" {
+		remaining = append(remaining, fmt.Sprintf("branch %q", e.Branch))
+	}
+	return fmt.Sprintf("%v; operation-owned %s still requires manual cleanup", e.Err, strings.Join(remaining, " and "))
+}
 func (e *PartialWorktreeCreationError) Unwrap() error { return e.Err }
-func (e *PartialWorktreeCreationError) PartialWorktree() (string, string) {
-	return e.Path, e.Branch
+
+type worktreeAddReservation struct {
+	path      string
+	pathInfo  os.FileInfo
+	branch    string
+	branchRef string
+	branchOID string
 }
 
 // ListWorktrees returns a list of all worktrees in the repository.
@@ -193,37 +207,90 @@ func (g *Git) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context
 }
 
 func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch string, environment []string, noCheckout bool) error {
-	args := []string{"worktree", "add"}
-	if noCheckout {
-		args = append(args, "--no-checkout")
-	}
-	args = append(args, "-b", branch, path)
-
-	if baseBranch != "" {
-		args = append(args, baseBranch)
-	}
-
 	if environment == nil {
+		args := []string{"worktree", "add"}
+		if noCheckout {
+			args = append(args, "--no-checkout")
+		}
+		args = append(args, "-b", branch, path)
+		if baseBranch != "" {
+			args = append(args, baseBranch)
+		}
 		if _, err := g.RunWithContext(ctx, args...); err != nil {
 			return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 		}
 		return nil
 	}
-	branchExisted := g.refExists("refs/heads/" + branch)
-	_, pathStatErr := os.Lstat(path)
-	pathExisted := !os.IsNotExist(pathStatErr)
+
+	reservation, err := g.reserveWorktreeAdd(ctx, path, branch, baseBranch, environment)
+	if err != nil {
+		return err
+	}
+	args := []string{"worktree", "add"}
+	if noCheckout {
+		args = append(args, "--no-checkout")
+	}
+	args = append(args, path, branch)
 	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, args...); err != nil {
 		addErr := fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
-		cleanupErr := g.cleanupFailedWorktreeAdd(context.WithoutCancel(ctx), path, branch, pathExisted, branchExisted, environment)
+		remainingPath, remainingBranch, cleanupErr := g.cleanupFailedWorktreeAdd(
+			context.WithoutCancel(ctx), reservation, environment,
+		)
 		if cleanupErr != nil {
-			return &PartialWorktreeCreationError{
-				Path: path, Branch: branch, Err: errors.Join(addErr, cleanupErr),
+			joinedErr := errors.Join(addErr, cleanupErr)
+			if remainingPath != "" || remainingBranch != "" {
+				return &PartialWorktreeCreationError{
+					Path: remainingPath, Branch: remainingBranch, Err: joinedErr,
+				}
 			}
+			return joinedErr
 		}
 		return addErr
 	}
 
 	return nil
+}
+
+func (g *Git) reserveWorktreeAdd(ctx context.Context, path, branch, baseBranch string, environment []string) (*worktreeAddReservation, error) {
+	baseRef := baseBranch
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	output, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+		"rev-parse", "--verify", baseRef+"^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve worktree base branch %s: %w", baseBranch, err)
+	}
+	branchOID := strings.TrimSpace(output)
+
+	if err := os.Mkdir(path, 0o755); err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("worktree path already exists: %s", path)
+		}
+		return nil, fmt.Errorf("failed to reserve worktree path %s: %w", path, err)
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("failed to inspect reserved worktree path %s: %w", path, err)
+	}
+
+	reservation := &worktreeAddReservation{
+		path: path, pathInfo: pathInfo, branch: branch,
+		branchRef: "refs/heads/" + branch, branchOID: branchOID,
+	}
+	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+		"update-ref", reservation.branchRef, branchOID, ""); err != nil {
+		removeErr := os.Remove(path)
+		reserveErr := fmt.Errorf("failed to reserve worktree branch %s: %w", branch, err)
+		if removeErr != nil {
+			return nil, &PartialWorktreeCreationError{
+				Path: path, Err: errors.Join(reserveErr, fmt.Errorf("remove reserved worktree path: %w", removeErr)),
+			}
+		}
+		return nil, reserveErr
+	}
+	return reservation, nil
 }
 
 // CheckoutWorktreeWithEnvironmentAndContext materializes a prepared
@@ -235,53 +302,169 @@ func (g *Git) CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, pat
 	return nil
 }
 
-func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, path, branch string, pathExisted, branchExisted bool, environment []string) error {
-	if !pathExisted {
-		if registered, _ := g.worktreeRegisteredWithEnvironment(ctx, path, environment); registered {
-			_ = g.RemoveWorktreeWithEnvironment(path, true, environment)
-		}
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("clean failed worktree directory: %w", err)
-		}
-		_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "prune", "--expire", "now")
-	}
-	if !branchExisted && g.refExists("refs/heads/"+branch) {
-		_ = g.DeleteBranchWithEnvironment(branch, true, environment)
-		if g.refExists("refs/heads/" + branch) {
-			_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "update-ref", "-d", "refs/heads/"+branch)
+func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktreeAddReservation, environment []string) (string, string, error) {
+	var cleanupErrs []error
+	pathOwned := reservation.pathInfo != nil && sameFileAtPath(reservation.path, reservation.pathInfo)
+	registration, registrationErr := g.worktreeRegistrationWithEnvironment(ctx, reservation.path, environment)
+	ownedRegistration := registration != nil && registration.Branch == reservation.branch &&
+		strings.EqualFold(registration.CommitHash, reservation.branchOID)
+	if registrationErr != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect failed worktree registration: %w", registrationErr))
+	} else if pathOwned && ownedRegistration {
+		if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+			"worktree", "remove", "--force", "--force", reservation.path); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove reserved worktree: %w", err))
 		}
 	}
 
-	var cleanupErrs []error
-	if !pathExisted {
-		if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree path still exists"))
-		}
-		if registered, err := g.worktreeRegisteredWithEnvironment(ctx, path, environment); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("verify failed worktree cleanup: %w", err))
-		} else if registered {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree remains registered"))
+	remainingPath := ""
+	pathOwned = reservation.pathInfo != nil && sameFileAtPath(reservation.path, reservation.pathInfo)
+	if pathOwned && registrationErr == nil && registration == nil {
+		var removeErr error
+		remainingPath, removeErr = removeReservedWorktreePath(reservation.path, reservation.pathInfo)
+		if removeErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove reserved worktree directory: %w", removeErr))
 		}
 	}
-	if !branchExisted && g.refExists("refs/heads/"+branch) {
-		cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree branch remains registered"))
+	pathOwned = reservation.pathInfo != nil && sameFileAtPath(reservation.path, reservation.pathInfo)
+
+	branchRegistrations, branchUseErr := g.worktreeBranchRegistrationsWithEnvironment(ctx, reservation.branch, environment)
+	if branchUseErr != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect failed worktree branch registration: %w", branchUseErr))
 	}
-	return errors.Join(cleanupErrs...)
+	if branchUseErr == nil && !pathOwned && registrationsBelongToReservation(branchRegistrations, reservation) {
+		_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "prune", "--expire", "now")
+		branchRegistrations, branchUseErr = g.worktreeBranchRegistrationsWithEnvironment(ctx, reservation.branch, environment)
+		if branchUseErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect pruned worktree branch registration: %w", branchUseErr))
+		}
+	}
+	branchInUse := len(branchRegistrations) > 0
+	if reservation.branchOID != "" && !branchInUse && branchUseErr == nil {
+		if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+			"update-ref", "-d", reservation.branchRef, reservation.branchOID); err != nil {
+			if oid, exists, inspectErr := g.refOIDWithEnvironment(ctx, reservation.branchRef, environment); inspectErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("verify reserved branch cleanup: %w", inspectErr))
+			} else if exists && strings.EqualFold(oid, reservation.branchOID) {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete reserved worktree branch: %w", err))
+			}
+		}
+	}
+
+	if pathOwned && remainingPath == "" {
+		remainingPath = reservation.path
+	}
+	remainingBranch := ""
+	if oid, exists, err := g.refOIDWithEnvironment(ctx, reservation.branchRef, environment); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect reserved branch after cleanup: %w", err))
+	} else if exists && strings.EqualFold(oid, reservation.branchOID) &&
+		(!branchInUse || remainingPath != "" && ownedRegistration) {
+		remainingBranch = reservation.branch
+	}
+	if remainingPath != "" {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("reserved worktree path remains"))
+	}
+	if remainingBranch != "" {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("reserved worktree branch remains"))
+	}
+	return remainingPath, remainingBranch, errors.Join(cleanupErrs...)
 }
 
-func (g *Git) worktreeRegisteredWithEnvironment(ctx context.Context, path string, environment []string) (bool, error) {
+func sameFileAtPath(path string, expected os.FileInfo) bool {
+	current, err := os.Lstat(path)
+	return err == nil && os.SameFile(expected, current)
+}
+
+func removeReservedWorktreePath(path string, expected os.FileInfo) (string, error) {
+	if !sameFileAtPath(path, expected) {
+		return "", nil
+	}
+	quarantine, err := os.MkdirTemp(filepath.Dir(path), ".kwt-cleanup-")
+	if err != nil {
+		return path, err
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return path, err
+	}
+	if err := os.Rename(path, quarantine); err != nil {
+		return path, err
+	}
+	moved, err := os.Lstat(quarantine)
+	if err != nil {
+		return quarantine, err
+	}
+	if !os.SameFile(expected, moved) {
+		if _, pathErr := os.Lstat(path); os.IsNotExist(pathErr) {
+			if restoreErr := os.Rename(quarantine, path); restoreErr != nil {
+				return "", fmt.Errorf("reserved path ownership changed and restore failed: %w", restoreErr)
+			}
+		}
+		return "", nil
+	}
+	if err := os.RemoveAll(quarantine); err != nil {
+		return quarantine, err
+	}
+	return "", nil
+}
+
+func (g *Git) refOIDWithEnvironment(ctx context.Context, ref string, environment []string) (string, bool, error) {
+	output, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+		"for-each-ref", "--format=%(objectname)", ref)
+	if err != nil {
+		return "", false, err
+	}
+	oid := strings.TrimSpace(output)
+	return oid, oid != "", nil
+}
+
+func (g *Git) worktreeBranchRegistrationsWithEnvironment(ctx context.Context, branch string, environment []string) ([]models.Worktree, error) {
 	output, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "list", "--porcelain")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	wanted := filepath.Clean(path)
-	for _, line := range strings.Split(output, "\n") {
-		listed, ok := strings.CutPrefix(line, "worktree ")
-		if ok && filepath.Clean(listed) == wanted {
-			return true, nil
+	var registrations []models.Worktree
+	for _, worktree := range parseWorktreePorcelain(output) {
+		if worktree.Branch == branch {
+			registrations = append(registrations, worktree)
 		}
 	}
-	return false, nil
+	return registrations, nil
+}
+
+func registrationsBelongToReservation(registrations []models.Worktree, reservation *worktreeAddReservation) bool {
+	if len(registrations) == 0 {
+		return false
+	}
+	for _, registration := range registrations {
+		if canonicalWorktreeAdminPath(registration.Path) != canonicalWorktreeAdminPath(reservation.path) ||
+			registration.Branch != reservation.branch ||
+			!strings.EqualFold(registration.CommitHash, reservation.branchOID) {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *Git) worktreeRegistrationWithEnvironment(ctx context.Context, path string, environment []string) (*models.Worktree, error) {
+	output, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	wanted := canonicalWorktreeAdminPath(path)
+	for _, worktree := range parseWorktreePorcelain(output) {
+		if canonicalWorktreeAdminPath(worktree.Path) == wanted {
+			return &worktree, nil
+		}
+	}
+	return nil, nil
+}
+
+func canonicalWorktreeAdminPath(path string) string {
+	cleaned := filepath.Clean(path)
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(cleaned)); err == nil {
+		return filepath.Join(parent, filepath.Base(cleaned))
+	}
+	return cleaned
 }
 
 // RemoveWorktree removes a worktree.

@@ -106,7 +106,9 @@ setup_commands = [
 
 Template variables include `Host`, `Owner`, `Repository`, `FullPath`, `Branch`,
 `Hash`, and `Path`. Quote variables in shell commands when values may contain
-spaces.
+spaces. `repository` may also be a glob such as `**/acme/widget`; trusted
+repository-local glob selectors remain repository selectors rather than being
+resolved as paths beneath that repository.
 
 Remote-only multi-machine sync skips repository setup (`copy_files` and
 `setup_commands`) because the branch name is reported by another host. Run any

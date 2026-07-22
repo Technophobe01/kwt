@@ -1661,6 +1661,32 @@ func TestLoadForTargetResolvesRelativePathsAgainstSelectedRepository(t *testing.
 	assert.Equal(t, filepath.Join(resolvedTarget, "repo-worktrees"), cfg.RepositorySettings[0].BaseDir)
 }
 
+func TestLoadForTargetPreservesRepositoryGlobSelectors(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := filepath.Join(t.TempDir(), "acme", "widget")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[[repository_settings]]\nrepository = '**/acme/widget'\nsetup_commands = ['echo trusted']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, "**/acme/widget", cfg.RepositorySettings[0].Repository)
+	assert.True(t, utils.MatchPath(cfg.RepositorySettings[0].Repository, utils.CanonicalPath(target)))
+	assert.Equal(t, []string{"echo trusted"}, cfg.RepositorySettings[0].SetupCommands)
+}
+
 func TestLoadForTargetRejectsEnvironmentReferencesInRepositoryLocalPaths(t *testing.T) {
 	secret := "credential-must-not-appear-in-a-workspace-path"
 	for _, tc := range []struct {

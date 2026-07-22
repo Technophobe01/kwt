@@ -297,7 +297,81 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	assert.NoDirExists(t, path)
 	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	cmd.Dir = repo.Path
-	assert.Error(t, cmd.Run(), "canceled checkout must not leave its newly created branch; add error: %v", err)
+	assert.Error(t, cmd.Run(), "canceled checkout must not leave its newly created branch; add error: %v; worktrees: %s",
+		err, gitOutput(t, repo.Path, "worktree", "list", "--porcelain"))
+}
+
+func TestFailedWorktreeCleanupPreservesArtifactsCreatedAfterSnapshot(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	path := filepath.Join(t.TempDir(), "concurrent-worktree")
+	branch := "review/concurrent-branch"
+	require.NoError(t, os.Mkdir(path, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(path, "owner.txt"), []byte("unrelated\n"), 0o644))
+	gitOutput(t, repo.Path, "branch", branch, "main")
+
+	_, _, err := g.cleanupFailedWorktreeAdd(context.Background(), &worktreeAddReservation{
+		path: path, branch: branch, branchRef: "refs/heads/" + branch,
+	}, NonInteractiveEnvironment(os.Environ()))
+
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(path, "owner.txt"))
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repo.Path
+	assert.NoError(t, cmd.Run(), "cleanup must not delete a branch created by another operation")
+}
+
+func TestFailedWorktreeCleanupPreservesChangedReservedBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	path := filepath.Join(t.TempDir(), "reserved-worktree")
+	branch := "review/changed-reserved-branch"
+	environment := NonInteractiveEnvironment(os.Environ())
+	reservation, err := g.reserveWorktreeAdd(context.Background(), path, branch, "main", environment)
+	require.NoError(t, err)
+	changedOID := gitOutput(t, repo.Path, "commit-tree", reservation.branchOID+"^{tree}", "-p", reservation.branchOID, "-m", "concurrent update")
+	gitOutput(t, repo.Path, "update-ref", reservation.branchRef, changedOID, reservation.branchOID)
+
+	_, _, err = g.cleanupFailedWorktreeAdd(context.Background(), reservation, environment)
+
+	require.NoError(t, err)
+	assert.NoDirExists(t, path)
+	assert.Equal(t, changedOID, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
+}
+
+func TestAddWorktreeReservationPreservesExistingArtifacts(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	environment := NonInteractiveEnvironment(os.Environ())
+
+	t.Run("path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "existing-worktree")
+		require.NoError(t, os.Mkdir(path, 0o755))
+		ownerPath := filepath.Join(path, "owner.txt")
+		require.NoError(t, os.WriteFile(ownerPath, []byte("unrelated\n"), 0o644))
+
+		err := g.AddWorktreeFromBaseWithEnvironment(path, "review/path-race", "main", environment)
+
+		require.Error(t, err)
+		assert.FileExists(t, ownerPath)
+		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/review/path-race")
+		cmd.Dir = repo.Path
+		assert.Error(t, cmd.Run())
+	})
+
+	t.Run("branch", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "reserved-worktree")
+		branch := "review/branch-race"
+		gitOutput(t, repo.Path, "branch", branch, "main")
+
+		err := g.AddWorktreeFromBaseWithEnvironment(path, branch, "main", environment)
+
+		require.Error(t, err)
+		assert.NoDirExists(t, path)
+		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+		cmd.Dir = repo.Path
+		assert.NoError(t, cmd.Run())
+	})
 }
 
 func TestListWorktrees(t *testing.T) {
