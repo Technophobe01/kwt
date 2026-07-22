@@ -22,6 +22,8 @@ type GitInterface interface {
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
 	AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
+	AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
+	CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, path string, environment []string) error
 	RemoveWorktree(path string, force bool) error
 	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
 	DeleteBranch(branch string, force bool) error
@@ -42,6 +44,7 @@ type Manager struct {
 // AddOptions controls optional behavior for creating a worktree.
 type AddOptions struct {
 	Context          context.Context
+	BeforeCheckout   func(context.Context, string) error
 	SkipSetup        bool
 	StrictSetup      bool
 	SetupEnvironment []string
@@ -98,7 +101,11 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 	}
 
 	var addErr error
-	if opts.SetupEnvironment != nil {
+	if opts.BeforeCheckout != nil {
+		addErr = m.git.AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(
+			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
+		)
+	} else if opts.SetupEnvironment != nil {
 		addErr = m.git.AddWorktreeFromBaseWithEnvironmentAndContext(
 			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
 		)
@@ -107,6 +114,16 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 	}
 	if addErr != nil {
 		return "", addErr
+	}
+	if opts.BeforeCheckout != nil {
+		if err := opts.BeforeCheckout(addOptionsContext(opts), path); err != nil {
+			return path, fmt.Errorf("pre-checkout validation failed: %w", err)
+		}
+		if err := m.git.CheckoutWorktreeWithEnvironmentAndContext(
+			addOptionsContext(opts), path, opts.SetupEnvironment,
+		); err != nil {
+			return path, err
+		}
 	}
 
 	if !opts.SkipSetup {
@@ -265,6 +282,7 @@ func (m *Manager) preparePath(customPath, branch string) (string, error) {
 			return "", fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
+	path = filepath.Join(utils.CanonicalPath(filepath.Dir(path)), filepath.Base(path))
 
 	return path, nil
 }

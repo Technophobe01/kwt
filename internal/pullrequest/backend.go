@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -71,14 +72,18 @@ func (b *GitBackend) ValidateImport(ctx context.Context) error {
 	if !supportsWorktreeConfig(output) {
 		return NewError(CodeUnsupportedGitVersion, "pull-request import requires Git 2.20 or newer", false, nil)
 	}
-	configOutput, err := b.runImportGit(ctx, "config", "--includes", "--null", "--list")
+	return b.validateImportConfigurationAt(ctx, "")
+}
+
+func (b *GitBackend) validateImportConfigurationAt(ctx context.Context, worktreePath string) error {
+	configOutput, err := b.runImportGitAt(ctx, worktreePath, "config", "--includes", "--null", "--list")
 	if err != nil {
 		return NewError(CodeWorkspaceCreation, "failed to inspect effective Git configuration", false, err)
 	}
 	if gitConfigHasEmbeddedRemoteCredentials(configOutput) {
 		return embeddedRemoteCredentialsError()
 	}
-	remotes, err := b.runImportGit(ctx, "remote")
+	remotes, err := b.runImportGitAt(ctx, worktreePath, "remote")
 	if err != nil {
 		return NewError(CodeWorkspaceCreation, "failed to enumerate effective Git remotes", false, err)
 	}
@@ -91,7 +96,7 @@ func (b *GitBackend) ValidateImport(ctx context.Context) error {
 			{"remote", "get-url", "--all", remote},
 			{"remote", "get-url", "--all", "--push", remote},
 		} {
-			urls, urlErr := b.runImportGit(ctx, args...)
+			urls, urlErr := b.runImportGitAt(ctx, worktreePath, args...)
 			if urlErr != nil {
 				return NewError(CodeWorkspaceCreation, "failed to inspect effective Git remote URLs", false, urlErr)
 			}
@@ -105,6 +110,50 @@ func (b *GitBackend) ValidateImport(ctx context.Context) error {
 
 func (b *GitBackend) runImportGit(ctx context.Context, args ...string) (string, error) {
 	return b.git.RunWithEnvironmentAndDisabledHooks(ctx, b.setupEnvironment, args...)
+}
+
+func (b *GitBackend) runImportGitAt(ctx context.Context, worktreePath string, args ...string) (string, error) {
+	if strings.TrimSpace(worktreePath) != "" {
+		args = append([]string{"-C", worktreePath}, args...)
+	}
+	return b.runImportGit(ctx, args...)
+}
+
+func (b *GitBackend) validateWorktreeConfiguration(ctx context.Context, worktreePath string) error {
+	if err := b.validateImportConfigurationAt(ctx, worktreePath); err != nil {
+		return err
+	}
+	mainConfig, err := b.effectiveConfigRecords(ctx, "")
+	if err != nil {
+		return NewError(CodeWorkspaceCreation, "failed to inspect main Git configuration", false, err)
+	}
+	worktreeConfig, err := b.effectiveConfigRecords(ctx, worktreePath)
+	if err != nil {
+		return NewError(CodeWorkspaceCreation, "failed to inspect pull-request worktree Git configuration", false, err)
+	}
+	if !slices.Equal(mainConfig, worktreeConfig) {
+		return NewError(CodeAuthentication,
+			"pull-request worktree activates different Git configuration; remove branch- or worktree-conditional includes",
+			false, nil)
+	}
+	return nil
+}
+
+func (b *GitBackend) effectiveConfigRecords(ctx context.Context, worktreePath string) ([]string, error) {
+	output, err := b.runImportGitAt(ctx, worktreePath, "config", "--includes", "--null", "--list")
+	if err != nil {
+		return nil, err
+	}
+	records := make([]string, 0)
+	for record := range strings.SplitSeq(output, "\x00") {
+		key, _, _ := strings.Cut(record, "\n")
+		if strings.EqualFold(strings.TrimSpace(key), "core.hookspath") || record == "" {
+			continue
+		}
+		records = append(records, record)
+	}
+	slices.Sort(records)
+	return records, nil
 }
 
 func embeddedRemoteCredentialsError() *Error {
@@ -140,8 +189,10 @@ func remoteURLListHasEmbeddedCredentials(output string) bool {
 	return false
 }
 
+var remoteHelperURLPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
+
 func remoteURLHasEmbeddedCredentials(remoteURL string) bool {
-	if strings.ContainsAny(remoteURL, "?#") {
+	if strings.ContainsAny(remoteURL, "?#") || remoteHelperURLPattern.MatchString(remoteURL) {
 		return true
 	}
 	if strings.Contains(remoteURL, "://") {
@@ -284,6 +335,10 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 }
 
 func (b *GitBackend) validateEffectiveRemote(ctx context.Context, remote, repositoryIdentity string) error {
+	return b.validateEffectiveRemoteAt(ctx, "", remote, repositoryIdentity)
+}
+
+func (b *GitBackend) validateEffectiveRemoteAt(ctx context.Context, worktreePath, remote, repositoryIdentity string) error {
 	for _, tc := range []struct {
 		label string
 		args  []string
@@ -291,7 +346,7 @@ func (b *GitBackend) validateEffectiveRemote(ctx context.Context, remote, reposi
 		{label: "fetch", args: []string{"remote", "get-url", "--all", remote}},
 		{label: "push", args: []string{"remote", "get-url", "--all", "--push", remote}},
 	} {
-		output, err := b.runImportGit(ctx, tc.args...)
+		output, err := b.runImportGitAt(ctx, worktreePath, tc.args...)
 		if err != nil {
 			return NewError(CodeWorkspaceCreation,
 				"failed to validate the new pull-request Git remote", false, err)
@@ -414,6 +469,7 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 	}
 	path, createErr := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{
 		Context: ctx, StrictSetup: true, SetupEnvironment: b.setupEnvironment,
+		BeforeCheckout: b.validateWorktreeConfiguration,
 	})
 	if createErr != nil && path == "" {
 		message := strings.ToLower(createErr.Error())
@@ -436,10 +492,21 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 	if createErr != nil {
 		return workspace, createErr
 	}
+	if validateErr := b.validateWorktreeConfiguration(ctx, workspace.Path); validateErr != nil {
+		return workspace, validateErr
+	}
 	return workspace, nil
 }
 
 func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, remote, sourceBranch string) error {
+	expectedFetchURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", remote)
+	if err != nil {
+		return err
+	}
+	expectedPushURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", remote)
+	if err != nil {
+		return err
+	}
 	commands := [][]string{
 		{"config", "extensions.worktreeConfig", "true"},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".remote", remote},
@@ -453,6 +520,60 @@ func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, rem
 	for _, args := range commands {
 		if _, err := b.git.RunWithContext(ctx, args...); err != nil {
 			return err
+		}
+	}
+	return b.validateWorkspacePushRouting(ctx, workspace, remote, sourceBranch, expectedFetchURLs, expectedPushURLs)
+}
+
+func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace Workspace, remote, sourceBranch, expectedFetchURLs, expectedPushURLs string) error {
+	if err := b.validateImportConfigurationAt(ctx, workspace.Path); err != nil {
+		return err
+	}
+	for _, tc := range []struct {
+		label    string
+		args     []string
+		expected string
+	}{
+		{label: "fetch URL", args: []string{"remote", "get-url", "--all", remote}, expected: expectedFetchURLs},
+		{label: "push URL", args: []string{"remote", "get-url", "--all", "--push", remote}, expected: expectedPushURLs},
+	} {
+		actual, err := b.runImportGitAt(ctx, workspace.Path, tc.args...)
+		if err != nil {
+			return NewError(CodeWorkspaceCreation, "failed to validate pull-request push routing", false, err)
+		}
+		if strings.TrimSpace(actual) != strings.TrimSpace(tc.expected) {
+			return NewError(CodeWorkspaceCreation,
+				fmt.Sprintf("pull-request worktree has an unsafe effective %s", tc.label), false, nil)
+		}
+	}
+
+	pushKey := "remote." + remote + ".push"
+	pushOutput, err := b.runImportGitAt(ctx, workspace.Path, "config", "--includes", "--get-all", pushKey)
+	if err != nil {
+		return NewError(CodeWorkspaceCreation, "failed to validate pull-request push configuration", false, err)
+	}
+	pushValue, single := singleRemoteURL(pushOutput)
+	if !single || pushValue != "HEAD:refs/heads/"+sourceBranch {
+		return NewError(CodeWorkspaceCreation,
+			fmt.Sprintf("pull-request worktree has unsafe push configuration for %s", pushKey), false, nil)
+	}
+
+	expectedValues := map[string]string{
+		"branch." + workspace.Branch + ".remote":     remote,
+		"branch." + workspace.Branch + ".pushRemote": remote,
+		"branch." + workspace.Branch + ".merge":      "refs/heads/" + sourceBranch,
+		"remote." + remote + ".mirror":               "false",
+		"push.default":                               "upstream",
+		"push.followTags":                            "false",
+	}
+	for key, expected := range expectedValues {
+		output, err := b.runImportGitAt(ctx, workspace.Path, "config", "--includes", "--get", key)
+		if err != nil {
+			return NewError(CodeWorkspaceCreation, "failed to validate pull-request push configuration", false, err)
+		}
+		if strings.TrimSpace(output) != expected {
+			return NewError(CodeWorkspaceCreation,
+				fmt.Sprintf("pull-request worktree has unsafe push configuration for %s", key), false, nil)
 		}
 	}
 	return nil

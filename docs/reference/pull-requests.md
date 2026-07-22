@@ -40,7 +40,8 @@ this keeps trusted setup commands and contributor-controlled lifecycle scripts
 from reading reusable credentials out of the linked worktree's shared config.
 Validation includes configured include files and checks Git's effective fetch
 and push URLs after `insteadOf` and `pushInsteadOf` rewriting. Remote URLs with
-query strings or fragments are rejected, as are invalid scheme-based URLs.
+query strings or fragments are rejected, as are invalid scheme-based URLs and
+opaque remote-helper (`transport::address`) URLs.
 
 Import fetches also force the SSH implementation's noninteractive mode
 (OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
@@ -193,6 +194,12 @@ target `.kwt.toml` are resolved against that target repository, never the
 caller's working directory, and target-local path fields cannot expand
 environment variables into workspace paths.
 
+Before materializing pull-request files, kwt creates a no-checkout worktree and
+verifies that branch- and worktree-conditional Git includes do not change its
+effective configuration. Push URLs and refspecs are validated again after
+setup and push configuration. Worktree paths are stored and matched in
+canonical form so symlinked base directories do not create duplicate imports.
+
 A new import returns:
 
 ```json
@@ -308,6 +315,9 @@ and return a stable nonzero status. For example:
 | 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
 | 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
 | 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |
+
+GitHub primary and secondary rate limits, including HTTP 429 responses, use
+`network_failure` with `retryable: true`.
 
 All diagnostics go to stderr. Consumers should parse stdout and branch on
 `error.code`; they never need to scrape CLI prose.

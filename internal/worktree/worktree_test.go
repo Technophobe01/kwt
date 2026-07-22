@@ -138,6 +138,14 @@ func (m *mockGit) AddWorktreeFromBaseWithEnvironmentAndContext(_ context.Context
 	return m.AddWorktreeFromBase(path, branch, baseBranch)
 }
 
+func (m *mockGit) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) error {
+	return m.AddWorktreeFromBase(path, branch, baseBranch)
+}
+
+func (m *mockGit) CheckoutWorktreeWithEnvironmentAndContext(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
 func TestManagerAdd(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -237,6 +245,23 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 			assert.DirExists(t, path)
 		})
 	}
+}
+
+func TestManagerReturnsCanonicalGeneratedPathThroughSymlinkedBase(t *testing.T) {
+	realBase := t.TempDir()
+	resolvedRealBase, err := filepath.EvalSymlinks(realBase)
+	require.NoError(t, err)
+	linkedBase := filepath.Join(t.TempDir(), "linked-base")
+	require.NoError(t, os.Symlink(realBase, linkedBase))
+	git := &mockGit{repoPath: t.TempDir()}
+	manager := New(git, &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: linkedBase, AutoMkdir: true},
+	})
+
+	path, err := manager.AddFromBase("feature/canonical", "HEAD", "")
+
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(path, resolvedRealBase+string(filepath.Separator)), path)
 }
 
 func TestManagerRemove(t *testing.T) {
@@ -856,7 +881,11 @@ func TestManagerAddGeneratesPathForLocalOnlyRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
-	want := filepath.Join(baseDir, localRepositoryFullPath(repoPath), "feature-local")
+	canonicalBaseDir, err := filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		t.Fatalf("failed to canonicalize base directory: %v", err)
+	}
+	want := filepath.Join(canonicalBaseDir, localRepositoryFullPath(repoPath), "feature-local")
 	if path != want {
 		t.Fatalf("Add() path = %s, want %s", path, want)
 	}

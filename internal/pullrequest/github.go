@@ -152,8 +152,16 @@ func mapGitHubRepository(repository *github.Repository) (Repository, error) {
 }
 
 func classifyGitHubError(err error, operation string) error {
+	var rateLimitError *github.RateLimitError
+	var abuseRateLimitError *github.AbuseRateLimitError
+	if errors.As(err, &rateLimitError) || errors.As(err, &abuseRateLimitError) {
+		return NewError(CodeNetwork, "GitHub rate limit exceeded", true, err)
+	}
 	var responseError *github.ErrorResponse
 	if errors.As(err, &responseError) && responseError.Response != nil {
+		if isGitHubRateLimitResponse(responseError.Response) {
+			return NewError(CodeNetwork, "GitHub rate limit exceeded", true, err)
+		}
 		switch responseError.Response.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return NewError(CodeAuthentication, "GitHub authentication failed", false, err)
@@ -175,4 +183,18 @@ func classifyGitHubError(err error, operation string) error {
 		return NewError(CodeNetwork, fmt.Sprintf("GitHub network failure while attempting to %s", operation), true, err)
 	}
 	return NewError(CodeNetwork, fmt.Sprintf("GitHub request failed while attempting to %s", operation), false, err)
+}
+
+func isGitHubRateLimitResponse(response *http.Response) bool {
+	if response == nil {
+		return false
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	return strings.TrimSpace(response.Header.Get("X-RateLimit-Remaining")) == "0" ||
+		strings.TrimSpace(response.Header.Get("Retry-After")) != ""
 }

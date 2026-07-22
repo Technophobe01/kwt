@@ -310,6 +310,32 @@ func TestGitBackendValidateImportRejectsQueryCredentialsFromURLRewrite(t *testin
 	}
 }
 
+func TestGitBackendValidateImportRejectsRemoteHelperURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rewrite bool
+	}{
+		{name: "direct"},
+		{name: "rewrite", rewrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, backend := newBackendRepo(t)
+			remoteURL := "corp::--token=never-log-helper"
+			if tc.rewrite {
+				runGit(t, repo, "remote", "add", "origin", "https://alias/acme/widget.git")
+				runGit(t, repo, "config", "url."+remoteURL+".insteadOf", "https://alias/")
+			} else {
+				runGit(t, repo, "remote", "add", "origin", remoteURL)
+			}
+
+			err := backend.ValidateImport(context.Background())
+
+			assertErrorCode(t, err, CodeAuthentication)
+			assert.NotContains(t, err.Error(), "never-log-helper")
+		})
+	}
+}
+
 func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
 	for _, tc := range []struct {
 		remoteURL string
@@ -325,6 +351,8 @@ func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
 		{remoteURL: "https://github.com/acme/widget.git#token", want: true},
 		{remoteURL: "https://github.com/%zz", want: true},
 		{remoteURL: "git@github.com:acme/widget.git?access_token=secret", want: true},
+		{remoteURL: "corp::--token=secret", want: true},
+		{remoteURL: "ssh://git@[2001:db8::1]/acme/widget.git"},
 	} {
 		assert.Equal(t, tc.want, remoteURLHasEmbeddedCredentials(tc.remoteURL), tc.remoteURL)
 	}
@@ -450,6 +478,44 @@ func TestPRImportCreateCancelsStrictSetup(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, time.Since(started), 2*time.Second)
 	assert.NotEmpty(t, workspace.Path, "canceled setup still needs rollback state")
+}
+
+func TestPRImportValidatesBranchConditionalConfigBeforeCheckoutAndSetup(t *testing.T) {
+	repo := t.TempDir()
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "initial")
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	conditionalPath := filepath.Join(t.TempDir(), "pr-branch.gitconfig")
+	require.NoError(t, os.WriteFile(conditionalPath, []byte(
+		"[remote \"origin\"]\n\turl = https://oauth2:conditional-secret@github.com/acme/widget.git\n",
+	), 0o600))
+	runGit(t, repo, "config", "includeIf.onbranch:pr-*.path", conditionalPath)
+	marker := filepath.Join(t.TempDir(), "setup-ran")
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: resolvedRepo, SetupCommands: []string{"touch '" + marker + "'"},
+		}},
+	}
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/13", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
+	require.NoError(t, backend.ValidateImport(context.Background()), "main-branch validation should not activate the conditional include")
+
+	workspace, err := backend.Create(context.Background(), "pr-13-conditional", "refs/kwt/pull-requests/acme/widget/13")
+	if workspace.Path != "" {
+		t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	}
+
+	assertErrorCode(t, err, CodeAuthentication)
+	assert.NotContains(t, err.Error(), "conditional-secret")
+	assert.NoFileExists(t, marker)
 }
 
 func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
@@ -631,6 +697,25 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	runGit(t, workspace.Path, "commit", "-m", "change")
 	pushOutput := runGit(t, workspace.Path, "push", "--dry-run")
 	assert.Contains(t, pushOutput, "HEAD -> feature/widgets")
+}
+
+func TestGitBackendConfigurePushRejectsConditionalRemoteRedirect(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/14", head)
+	workspace, err := backend.Create(context.Background(), "pr-14-routing", "refs/kwt/pull-requests/acme/widget/14")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	conditionalPath := filepath.Join(t.TempDir(), "redirect.gitconfig")
+	require.NoError(t, os.WriteFile(conditionalPath, []byte(
+		"[remote \"fork\"]\n\tpushurl = https://github.com/attacker/widget.git\n",
+	), 0o600))
+	runGit(t, repo, "config", "includeIf.onbranch:pr-14-*.path", conditionalPath)
+
+	err = backend.ConfigurePush(context.Background(), workspace, "fork", "feature/widgets")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
 }
 
 func TestGitBackendRollbackDisablesReferenceTransactionHooks(t *testing.T) {

@@ -101,10 +101,15 @@ func TestGitHubProviderClassifiesFailures(t *testing.T) {
 		name      string
 		status    int
 		body      string
+		headers   map[string]string
 		want      ErrorCode
 		retryable bool
 	}{
 		{name: "authentication", status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`, want: CodeAuthentication},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"message":"forbidden"}`, want: CodeAuthentication},
+		{name: "primary rate limit", status: http.StatusForbidden, body: `{"message":"API rate limit exceeded"}`, headers: map[string]string{"X-RateLimit-Remaining": "0"}, want: CodeNetwork, retryable: true},
+		{name: "secondary rate limit", status: http.StatusForbidden, body: `{"message":"secondary rate limit"}`, headers: map[string]string{"Retry-After": "60"}, want: CodeNetwork, retryable: true},
+		{name: "too many requests", status: http.StatusTooManyRequests, body: `{"message":"slow down"}`, want: CodeNetwork, retryable: true},
 		{name: "missing", status: http.StatusNotFound, body: `{"message":"Not Found"}`, want: CodeNotFound},
 		{name: "network", status: http.StatusServiceUnavailable, body: `{"message":"try later"}`, want: CodeNetwork, retryable: true},
 		{name: "malformed", status: http.StatusOK, body: `{broken`, want: CodeMalformedResponse},
@@ -112,6 +117,9 @@ func TestGitHubProviderClassifiesFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				for key, value := range tc.headers {
+					w.Header().Set(key, value)
+				}
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
 			}))

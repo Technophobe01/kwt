@@ -1630,7 +1630,9 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.DirExists(t, path)
-	assert.True(t, strings.HasPrefix(path, baseDir), path)
+	canonicalBaseDir, err := filepath.EvalSymlinks(baseDir)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(path, canonicalBaseDir), path)
 	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
 	assert.Equal(t, "feature/studio-only", branch)
 }

@@ -156,7 +156,7 @@ func (g *Git) refExists(ref string) bool {
 
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
 func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
-	return g.addWorktreeFromBase(context.Background(), path, branch, baseBranch, nil)
+	return g.addWorktreeFromBase(context.Background(), path, branch, baseBranch, nil, false)
 }
 
 // AddWorktreeFromBaseWithEnvironment creates a worktree with an explicit
@@ -169,11 +169,21 @@ func (g *Git) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string
 // explicit checkout environment while allowing request cancellation to stop
 // filters and checkout work.
 func (g *Git) AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
-	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment)
+	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, false)
 }
 
-func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch string, environment []string) error {
-	args := []string{"worktree", "add", "-b", branch, path}
+// AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext prepares a linked
+// worktree without materializing contributor-controlled files.
+func (g *Git) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
+	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, true)
+}
+
+func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch string, environment []string, noCheckout bool) error {
+	args := []string{"worktree", "add"}
+	if noCheckout {
+		args = append(args, "--no-checkout")
+	}
+	args = append(args, "-b", branch, path)
 
 	if baseBranch != "" {
 		args = append(args, baseBranch)
@@ -194,6 +204,15 @@ func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch 
 		return errors.Join(addErr, cleanupErr)
 	}
 
+	return nil
+}
+
+// CheckoutWorktreeWithEnvironmentAndContext materializes a prepared
+// no-checkout worktree with hooks disabled and an explicit environment.
+func (g *Git) CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, path string, environment []string) error {
+	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "-C", path, "reset", "--hard", "HEAD"); err != nil {
+		return fmt.Errorf("failed to check out prepared worktree: %w", err)
+	}
 	return nil
 }
 

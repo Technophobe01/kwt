@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"go.kenn.io/kwt/internal/utils"
 )
 
 type Provider interface {
@@ -58,7 +60,7 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 	}
 	paths := make(map[string]Workspace, len(workspaces))
 	for _, workspace := range workspaces {
-		paths[workspace.Path] = workspace
+		paths[utils.CanonicalPath(workspace.Path)] = workspace
 	}
 	records := make(map[string]Provenance)
 	if err := s.store.View(ctx, func(current map[string]Provenance) error {
@@ -120,7 +122,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		}
 		byPath := make(map[string]Workspace, len(workspaces))
 		for _, workspace := range workspaces {
-			byPath[workspace.Path] = workspace
+			byPath[utils.CanonicalPath(workspace.Path)] = workspace
 		}
 		recordKey, record, ok := findProvenance(records, pr)
 		if ok {
@@ -243,7 +245,7 @@ func findProvenance(records map[string]Provenance, pr PullRequest) (string, Prov
 }
 
 func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance) (Workspace, bool) {
-	workspace, ok := byPath[record.Workspace.Path]
+	workspace, ok := byPath[utils.CanonicalPath(record.Workspace.Path)]
 	if !ok || workspace.Branch != record.Workspace.Branch {
 		return Workspace{}, false
 	}

@@ -3,6 +3,8 @@ package pullrequest
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -324,6 +326,34 @@ func TestListMarksExistingImport(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.True(t, got[0].Imported)
 	assert.Equal(t, &workspace, got[0].Workspace)
+}
+
+func TestListMatchesCanonicalProvenancePathThroughSymlink(t *testing.T) {
+	pr := testPR(25, false)
+	realBase := t.TempDir()
+	workspacePath := filepath.Join(realBase, "workspace")
+	require.NoError(t, os.Mkdir(workspacePath, 0o755))
+	linkBase := filepath.Join(t.TempDir(), "linked-base")
+	require.NoError(t, os.Symlink(realBase, linkBase))
+	live := Workspace{ID: "ws-25", Repository: testProject().Identity, Branch: "pr-25-feature-widgets", Path: workspacePath, State: "ready"}
+	recorded := live
+	recorded.Path = filepath.Join(linkBase, "workspace")
+	backend := newFakeBackend()
+	backend.workspaces = []Workspace{live}
+	store := newMemoryStore()
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID, Project: testProject(), Workspace: recorded, HeadSHA: pr.HeadSHA,
+		SourceRepo: pr.Source.Repository.Identity, SourceBranch: pr.Source.Name,
+	}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+
+	got, err := service.List(context.Background(), testProject(), "open")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.True(t, got[0].Imported)
+	require.NotNil(t, got[0].Workspace)
+	assert.Equal(t, workspacePath, got[0].Workspace.Path)
 }
 
 func TestListDoesNotMatchProvenanceWhenLiveBranchDiffers(t *testing.T) {
