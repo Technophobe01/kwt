@@ -14,9 +14,10 @@ import (
 // PartialWorktreeCreationError reports repository state that remained after a
 // failed worktree add and its internal cleanup attempt.
 type PartialWorktreeCreationError struct {
-	Path   string
-	Branch string
-	Err    error
+	Path        string
+	Branch      string
+	Err         error
+	reservation *worktreeAddReservation
 }
 
 func (e *PartialWorktreeCreationError) Error() string {
@@ -30,6 +31,24 @@ func (e *PartialWorktreeCreationError) Error() string {
 	return fmt.Sprintf("%v; operation-owned %s still requires manual cleanup", e.Err, strings.Join(remaining, " and "))
 }
 func (e *PartialWorktreeCreationError) Unwrap() error { return e.Err }
+
+// PartialWorktree exposes only remnants that the failed add operation proved
+// it still owned when its initial cleanup completed.
+func (e *PartialWorktreeCreationError) PartialWorktree() (string, string) {
+	return e.Path, e.Branch
+}
+
+// RetryCleanup repeats the ownership-checked cleanup used by the failed add.
+// It never falls back to deleting a path or ref solely by name.
+func (e *PartialWorktreeCreationError) RetryCleanup(ctx context.Context, g *Git, environment []string) error {
+	if e.reservation == nil {
+		return fmt.Errorf("partial worktree cleanup reservation is unavailable: %w", e)
+	}
+	remainingPath, remainingBranch, err := g.cleanupFailedWorktreeAdd(ctx, e.reservation, environment)
+	e.Path = remainingPath
+	e.Branch = remainingBranch
+	return err
+}
 
 type worktreeAddReservation struct {
 	path      string
@@ -240,7 +259,7 @@ func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch 
 			joinedErr := errors.Join(addErr, cleanupErr)
 			if remainingPath != "" || remainingBranch != "" {
 				return &PartialWorktreeCreationError{
-					Path: remainingPath, Branch: remainingBranch, Err: joinedErr,
+					Path: remainingPath, Branch: remainingBranch, Err: joinedErr, reservation: reservation,
 				}
 			}
 			return joinedErr
@@ -286,6 +305,7 @@ func (g *Git) reserveWorktreeAdd(ctx context.Context, path, branch, baseBranch s
 		if removeErr != nil {
 			return nil, &PartialWorktreeCreationError{
 				Path: path, Err: errors.Join(reserveErr, fmt.Errorf("remove reserved worktree path: %w", removeErr)),
+				reservation: reservation,
 			}
 		}
 		return nil, reserveErr

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -333,6 +334,27 @@ func TestFailedWorktreeCleanupPreservesChangedReservedBranch(t *testing.T) {
 	gitOutput(t, repo.Path, "update-ref", reservation.branchRef, changedOID, reservation.branchOID)
 
 	_, _, err = g.cleanupFailedWorktreeAdd(context.Background(), reservation, environment)
+
+	require.NoError(t, err)
+	assert.NoDirExists(t, path)
+	assert.Equal(t, changedOID, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
+}
+
+func TestPartialWorktreeRetryCleanupPreservesChangedReservedBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	path := filepath.Join(t.TempDir(), "partial-worktree")
+	branch := "review/retry-changed-branch"
+	environment := NonInteractiveEnvironment(os.Environ())
+	reservation, err := g.reserveWorktreeAdd(context.Background(), path, branch, "main", environment)
+	require.NoError(t, err)
+	changedOID := gitOutput(t, repo.Path, "commit-tree", reservation.branchOID+"^{tree}", "-p", reservation.branchOID, "-m", "concurrent update")
+	gitOutput(t, repo.Path, "update-ref", reservation.branchRef, changedOID, reservation.branchOID)
+	partial := &PartialWorktreeCreationError{
+		Path: path, Branch: branch, Err: errors.New("initial cleanup failed"), reservation: reservation,
+	}
+
+	err = partial.RetryCleanup(context.Background(), g, environment)
 
 	require.NoError(t, err)
 	assert.NoDirExists(t, path)

@@ -360,7 +360,7 @@ func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
 func TestSafeSetupEnvironmentRemovesConfiguredSecrets(t *testing.T) {
 	environment := []string{"PATH=/bin", "KWT_GITHUB_TOKEN=secret", "KWT_FLEET_TOKEN=fleet", "CUSTOM_TOKEN=custom", "VISIBLE=yes"}
 
-	got := SafeSetupEnvironment(environment, "CUSTOM_TOKEN")
+	got := SafeSetupEnvironment(environment, "CUSTOM_TOKEN", "KWT_FLEET_TOKEN_FILE")
 
 	assert.Equal(t, []string{"PATH=/bin", "VISIBLE=yes"}, got)
 }
@@ -395,26 +395,35 @@ func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
 		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
-		Fleet:    models.FleetConfig{TokenEnv: "CUSTOM_FLEET_SECRET"},
+		Fleet: models.FleetConfig{
+			TokenEnv:             "CUSTOM_FLEET_SECRET",
+			TokenFileEnvironment: []string{"KWT_FLEET_TOKEN_FILE"},
+		},
 		RepositorySettings: []models.RepositorySetting{{
 			Repository:    resolvedRepo,
-			SetupCommands: []string{"printf '%s|%s|%s|%s' \"$KWT_GITHUB_TOKEN\" \"$KWT_FLEET_TOKEN\" \"$CUSTOM_FLEET_SECRET\" \"$VISIBLE_VALUE\" > setup-env.txt"},
+			SetupCommands: []string{"printf '%s|%s|%s|%s|%s' \"$KWT_GITHUB_TOKEN\" \"$KWT_FLEET_TOKEN\" \"$CUSTOM_FLEET_SECRET\" \"$KWT_FLEET_TOKEN_FILE\" \"$VISIBLE_VALUE\" > setup-env.txt"},
 		}},
 	}
 	t.Setenv("KWT_GITHUB_TOKEN", "github-secret")
 	t.Setenv("KWT_FLEET_TOKEN", "fleet-secret")
 	t.Setenv("CUSTOM_FLEET_SECRET", "custom-secret")
+	tokenFile := filepath.Join(t.TempDir(), "fleet.token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("token-file-secret"), 0o600))
+	t.Setenv("KWT_FLEET_TOKEN_FILE", tokenFile)
 	t.Setenv("VISIBLE_VALUE", "visible")
 	head := runGit(t, repo, "rev-parse", "HEAD")
 	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/9", head)
-	backend := NewGitBackend(g, worktree.New(g, cfg), testProject(), WithFleetTokenEnvironment(cfg.Fleet.TokenEnv))
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject(),
+		WithFleetTokenEnvironment(cfg.Fleet.TokenEnv),
+		WithFleetTokenFileEnvironment(cfg.Fleet.TokenFileEnvironment),
+	)
 
 	workspace, err := backend.Create(context.Background(), "pr-9-safe-env", "refs/kwt/pull-requests/acme/widget/9")
 
 	require.NoError(t, err)
 	contents, err := os.ReadFile(filepath.Join(workspace.Path, "setup-env.txt"))
 	require.NoError(t, err)
-	assert.Equal(t, "|||visible", string(contents))
+	assert.Equal(t, "||||visible", string(contents))
 }
 
 func TestPRImportCreatePropagatesStrictSetupFailure(t *testing.T) {
@@ -651,13 +660,16 @@ func TestGitBackendCreatesForkRemoteUsingProjectPushTransport(t *testing.T) {
 }
 
 func TestGitBackendCreatesForkRemoteUsingAliasedOrPortedProjectSSHTransport(t *testing.T) {
-	for _, projectURL := range []string{
-		"workgit:acme/widget.git",
-		"ssh://git@github.com:2222/acme/widget.git",
+	for _, tc := range []struct {
+		projectURL string
+		wantURL    string
+	}{
+		{projectURL: "git@workgit:acme/widget.git", wantURL: "git@workgit:octocat/widget.git"},
+		{projectURL: "ssh://custom@github.com:2222/acme/widget.git", wantURL: "ssh://custom@github.com:2222/octocat/widget.git"},
 	} {
-		t.Run(projectURL, func(t *testing.T) {
+		t.Run(tc.projectURL, func(t *testing.T) {
 			repo, backend := newBackendRepo(t)
-			runGit(t, repo, "remote", "add", "origin", projectURL)
+			runGit(t, repo, "remote", "add", "origin", tc.projectURL)
 
 			remote, err := backend.EnsureRemote(context.Background(), Repository{
 				Provider: "github", Identity: "github.com/octocat/widget", Host: "github.com",
@@ -667,7 +679,7 @@ func TestGitBackendCreatesForkRemoteUsingAliasedOrPortedProjectSSHTransport(t *t
 
 			require.NoError(t, err)
 			assert.Equal(t, "kwt-pr-octocat", remote)
-			assert.Equal(t, "git@github.com:octocat/widget.git", runGit(t, repo, "remote", "get-url", remote))
+			assert.Equal(t, tc.wantURL, runGit(t, repo, "remote", "get-url", remote))
 		})
 	}
 }

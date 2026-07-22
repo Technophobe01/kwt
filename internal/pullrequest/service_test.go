@@ -115,28 +115,29 @@ func (f *fakeProvider) Get(_ context.Context, _ Repository, number int) (PullReq
 }
 
 type fakeWorkspaceBackend struct {
-	mu               sync.Mutex
-	workspaces       []Workspace
-	remotes          map[string]string
-	fetchedRemote    string
-	fetchedRef       string
-	fetchedDest      string
-	fetchedSHA       string
-	createdBranch    string
-	createCalls      int
-	createErr        error
-	createAfterErr   error
-	configureErr     error
-	configureCalls   int
-	configuredRemote string
-	configuredRepo   string
-	configuredBranch string
-	configureCancel  context.CancelFunc
-	rollbackErr      error
-	rollbackCtxErr   error
-	ensureRemoteErr  error
-	validateErr      error
-	validateCalls    int
+	mu                   sync.Mutex
+	workspaces           []Workspace
+	remotes              map[string]string
+	fetchedRemote        string
+	fetchedRef           string
+	fetchedDest          string
+	fetchedSHA           string
+	createdBranch        string
+	createCalls          int
+	createErr            error
+	createAfterErr       error
+	createAfterWorkspace *Workspace
+	configureErr         error
+	configureCalls       int
+	configuredRemote     string
+	configuredRepo       string
+	configuredBranch     string
+	configureCancel      context.CancelFunc
+	rollbackErr          error
+	rollbackCtxErr       error
+	ensureRemoteErr      error
+	validateErr          error
+	validateCalls        int
 }
 
 func (f *fakeWorkspaceBackend) ValidateImport(context.Context) error {
@@ -215,6 +216,9 @@ func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Work
 		Path:        "/worktrees/widget/" + branch,
 		State:       "ready",
 		SessionName: "kwt-workspace-github-com-acme-widget-" + branch,
+	}
+	if f.createAfterWorkspace != nil {
+		workspace = *f.createAfterWorkspace
 	}
 	f.workspaces = append(f.workspaces, workspace)
 	if f.createAfterErr != nil {
@@ -779,6 +783,19 @@ func TestImportRollsBackWhenStrictWorkspaceSetupFails(t *testing.T) {
 
 	assertErrorCode(t, err, CodeWorkspaceCreation)
 	assert.ErrorContains(t, err, "setup failed")
+	assert.Empty(t, backend.workspaces)
+}
+
+func TestImportRollsBackBranchOnlyPartialCreation(t *testing.T) {
+	pr := testPR(62, false)
+	backend := newFakeBackend()
+	backend.createAfterErr = errors.New("partial creation cleanup failed")
+	backend.createAfterWorkspace = &Workspace{Branch: "pr-62-feature-widgets"}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	_, err := service.Import(context.Background(), testProject(), "62")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
 	assert.Empty(t, backend.workspaces)
 }
 

@@ -634,6 +634,7 @@ func expandConfigPaths(cfg *models.Config) error {
 	cfg.Worktree.BaseDir = expandedPath
 
 	if cfg.Fleet.TokenFile != "" {
+		cfg.Fleet.TokenFileEnvironment = environmentReferences(cfg.Fleet.TokenFile)
 		expandedPath, err = utils.ExpandPath(cfg.Fleet.TokenFile)
 		if err != nil {
 			return fmt.Errorf("failed to expand fleet token file: %w", err)
@@ -703,6 +704,19 @@ func expandConfigPaths(cfg *models.Config) error {
 		cfg.Workspaces[i].Path = expandedPath
 	}
 	return nil
+}
+
+func environmentReferences(value string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0)
+	_ = os.Expand(value, func(name string) string {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			result = append(result, name)
+		}
+		return os.Getenv(name)
+	})
+	return result
 }
 
 // RegisterProject records a repository in the global project registry.

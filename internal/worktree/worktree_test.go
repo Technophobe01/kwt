@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	configpkg "go.kenn.io/kwt/internal/config"
+	gitadapter "go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -29,16 +30,6 @@ type mockGit struct {
 	deleteBranchError error
 	recentCommits     []models.CommitInfo
 	mainRepoPathError error
-}
-
-type partialWorktreeAddError struct {
-	path   string
-	branch string
-}
-
-func (e *partialWorktreeAddError) Error() string { return "worktree cleanup failed" }
-func (e *partialWorktreeAddError) PartialWorktree() (string, string) {
-	return e.path, e.branch
 }
 
 func (m *mockGit) ListWorktrees() ([]models.Worktree, error) {
@@ -257,20 +248,34 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 	}
 }
 
-func TestManagerPreservesPathForPartialWorktreeCreationFailure(t *testing.T) {
+func TestManagerPreservesRealPartialWorktreeCreationFailure(t *testing.T) {
 	parent, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	path := filepath.Join(parent, "partial-worktree")
 	branch := "partial-branch"
-	git := &mockGit{addError: &partialWorktreeAddError{path: path, branch: branch}}
-	manager := New(git, &models.Config{Worktree: models.WorktreeConfig{AutoMkdir: true}})
+	for _, tc := range []struct {
+		name          string
+		remainingPath string
+		remainingRef  string
+	}{
+		{name: "path only", remainingPath: path},
+		{name: "branch only", remainingRef: branch},
+		{name: "path and branch", remainingPath: path, remainingRef: branch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			git := &mockGit{addError: &gitadapter.PartialWorktreeCreationError{
+				Path: tc.remainingPath, Branch: tc.remainingRef, Err: errors.New("cleanup failed"),
+			}}
+			manager := New(git, &models.Config{Worktree: models.WorktreeConfig{AutoMkdir: true}})
 
-	gotPath, err := manager.AddFromBaseWithOptions(branch, "HEAD", path, AddOptions{
-		SetupEnvironment: []string{},
-	})
+			gotPath, err := manager.AddFromBaseWithOptions(branch, "HEAD", path, AddOptions{
+				SetupEnvironment: []string{},
+			})
 
-	require.Error(t, err)
-	assert.Equal(t, path, gotPath)
+			require.Error(t, err)
+			assert.Equal(t, path, gotPath, "either remnant must signal the caller to roll back")
+		})
+	}
 }
 
 func TestManagerReturnsCanonicalGeneratedPathThroughSymlinkedBase(t *testing.T) {

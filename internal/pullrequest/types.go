@@ -2,6 +2,7 @@
 package pullrequest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -93,12 +94,17 @@ type PullRequest struct {
 }
 
 type Workspace struct {
-	ID          string `json:"id"`
-	Repository  string `json:"repository"`
-	Branch      string `json:"branch"`
-	Path        string `json:"path"`
-	State       string `json:"state"`
-	SessionName string `json:"session_name"`
+	ID             string `json:"id"`
+	Repository     string `json:"repository"`
+	Branch         string `json:"branch"`
+	Path           string `json:"path"`
+	State          string `json:"state"`
+	SessionName    string `json:"session_name"`
+	partialCleanup *workspacePartialCleanup
+}
+
+type workspacePartialCleanup struct {
+	run func(context.Context) error
 }
 
 type Provenance struct {

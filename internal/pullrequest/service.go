@@ -191,7 +191,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 
 		workspace, createErr := s.backend.Create(ctx, branch, fetchRef)
 		if createErr != nil {
-			if workspace.Path != "" {
+			if workspace.Path != "" || workspace.Branch != "" {
 				created = &workspace
 				cleanupReason = "workspace created but setup failed"
 			}

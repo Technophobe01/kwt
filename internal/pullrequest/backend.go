@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	gitadapter "go.kenn.io/kwt/internal/git"
@@ -20,11 +21,14 @@ import (
 )
 
 type GitBackend struct {
-	git              *gitadapter.Git
-	manager          *worktree.Manager
-	project          Project
-	fleetTokenEnv    string
-	setupEnvironment []string
+	git                       *gitadapter.Git
+	manager                   *worktree.Manager
+	project                   Project
+	fleetTokenEnv             string
+	fleetTokenFileEnvironment []string
+	setupEnvironment          []string
+	expectedRemoteURLsMu      sync.RWMutex
+	expectedRemoteURLs        map[string]string
 }
 
 type GitBackendOption func(*GitBackend)
@@ -35,24 +39,33 @@ func WithFleetTokenEnvironment(name string) GitBackendOption {
 	}
 }
 
+func WithFleetTokenFileEnvironment(names []string) GitBackendOption {
+	return func(backend *GitBackend) {
+		backend.fleetTokenFileEnvironment = append([]string(nil), names...)
+	}
+}
+
 func NewGitBackend(g *gitadapter.Git, manager *worktree.Manager, project Project, options ...GitBackendOption) *GitBackend {
-	backend := &GitBackend{git: g, manager: manager, project: project}
+	backend := &GitBackend{git: g, manager: manager, project: project, expectedRemoteURLs: make(map[string]string)}
 	for _, option := range options {
 		option(backend)
 	}
-	backend.setupEnvironment = gitadapter.NonInteractiveEnvironment(SafeSetupEnvironment(os.Environ(), backend.fleetTokenEnv))
+	blockedEnvironment := append([]string{backend.fleetTokenEnv}, backend.fleetTokenFileEnvironment...)
+	backend.setupEnvironment = gitadapter.NonInteractiveEnvironment(SafeSetupEnvironment(os.Environ(), blockedEnvironment...))
 	return backend
 }
 
 // SafeSetupEnvironment retains the user's ordinary setup environment while
 // removing credentials owned or sourced by kwt.
-func SafeSetupEnvironment(environment []string, fleetTokenEnv string) []string {
+func SafeSetupEnvironment(environment []string, fleetTokenEnvironment ...string) []string {
 	blocked := map[string]bool{
 		"kwt_github_token": true,
 		"kwt_fleet_token":  true,
 	}
-	if name := strings.TrimSpace(fleetTokenEnv); name != "" {
-		blocked[strings.ToLower(name)] = true
+	for _, environmentName := range fleetTokenEnvironment {
+		if name := strings.TrimSpace(environmentName); name != "" {
+			blocked[strings.ToLower(name)] = true
+		}
 	}
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {
@@ -284,7 +297,19 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		existing[name] = true
 		remoteNames = append(remoteNames, name)
 	}
-	projectUsesSSH := b.projectPushUsesSSH(ctx, existing)
+	projectSSHURL := b.projectPushSSHURL(ctx, existing)
+	remoteURL := strings.TrimSpace(repository.CloneURL)
+	if projectSSHURL != "" {
+		var buildErr error
+		remoteURL, buildErr = forkSSHURL(projectSSHURL, repository)
+		if buildErr != nil {
+			return "", NewError(CodeWorkspaceCreation,
+				"failed to preserve the project's SSH transport for the pull-request remote", false, buildErr)
+		}
+	}
+	if remoteURL == "" {
+		return "", NewError(CodeInaccessibleHead, "pull-request head repository has no clone URL", false, nil)
+	}
 	for _, name := range remoteNames {
 		fetchURLs, fetchErr := b.runImportGit(ctx, "remote", "get-url", "--all", name)
 		pushURLs, pushErr := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", name)
@@ -296,21 +321,22 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		}
 		fetchURL, singleFetch := singleRemoteURL(fetchURLs)
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(fetchURL)
-		if singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
-			matchingRemote == "" && singleRemoteURLMatches(pushURLs, repository.Identity) &&
+		fetchMatches := singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity)
+		pushMatches := singleRemoteURLMatches(pushURLs, repository.Identity)
+		if projectSSHURL != "" {
+			fetchMatches = singleFetch && remoteURLsEqual(fetchURL, remoteURL)
+			pushMatches = singleRemoteURLEquals(pushURLs, remoteURL)
+		}
+		if fetchMatches && matchingRemote == "" && pushMatches &&
 			!b.remoteHasCustomPushRefspec(ctx, name) {
 			matchingRemote = name
 		}
 	}
 	if matchingRemote != "" {
+		if projectSSHURL != "" {
+			b.rememberExpectedRemoteURL(matchingRemote, remoteURL)
+		}
 		return matchingRemote, nil
-	}
-	if strings.TrimSpace(repository.CloneURL) == "" {
-		return "", NewError(CodeInaccessibleHead, "pull-request head repository has no clone URL", false, nil)
-	}
-	remoteURL := repository.CloneURL
-	if projectUsesSSH && strings.TrimSpace(repository.SSHURL) != "" {
-		remoteURL = repository.SSHURL
 	}
 	base := "kwt-pr-" + sanitizeRemoteComponent(repository.Owner)
 	name := base
@@ -320,7 +346,9 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 	if _, err := b.runImportGit(ctx, "remote", "add", name, remoteURL); err != nil {
 		return "", NewError(CodeWorkspaceCreation, "failed to add pull-request Git remote", false, err)
 	}
+	b.rememberExpectedRemoteURL(name, remoteURL)
 	if validateErr := b.validateEffectiveRemote(ctx, name, repository.Identity); validateErr != nil {
+		b.forgetExpectedRemoteURL(name)
 		_, removeErr := b.runImportGit(context.WithoutCancel(ctx), "remote", "remove", name)
 		if removeErr != nil {
 			return "", NewError(CodeWorkspaceCreation,
@@ -332,7 +360,7 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 	return name, nil
 }
 
-func (b *GitBackend) projectPushUsesSSH(ctx context.Context, remotes map[string]bool) bool {
+func (b *GitBackend) projectPushSSHURL(ctx context.Context, remotes map[string]bool) string {
 	selected := ""
 	branch, branchErr := b.runImportGit(ctx, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if branchErr == nil {
@@ -354,14 +382,17 @@ func (b *GitBackend) projectPushUsesSSH(ctx context.Context, remotes map[string]
 		}
 	}
 	if !remotes[selected] {
-		return false
+		return ""
 	}
 	pushURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", selected)
 	if err != nil || remoteURLListHasEmbeddedCredentials(pushURLs) {
-		return false
+		return ""
 	}
 	pushURL, single := singleRemoteURL(pushURLs)
-	return single && isSSHRemoteURL(pushURL)
+	if !single || !isSSHRemoteURL(pushURL) {
+		return ""
+	}
+	return pushURL
 }
 
 func (b *GitBackend) configuredRemote(ctx context.Context, key string) string {
@@ -377,6 +408,7 @@ func (b *GitBackend) validateEffectiveRemote(ctx context.Context, remote, reposi
 }
 
 func (b *GitBackend) validateEffectiveRemoteAt(ctx context.Context, worktreePath, remote, repositoryIdentity string) error {
+	expectedURL, hasExpectedURL := b.expectedRemoteURL(remote)
 	for _, tc := range []struct {
 		label string
 		args  []string
@@ -392,13 +424,67 @@ func (b *GitBackend) validateEffectiveRemoteAt(ctx context.Context, worktreePath
 		if remoteURLListHasEmbeddedCredentials(output) {
 			return embeddedRemoteCredentialsError()
 		}
-		if !singleRemoteURLMatches(output, repositoryIdentity) {
+		matches := singleRemoteURLMatches(output, repositoryIdentity)
+		if hasExpectedURL {
+			matches = singleRemoteURLEquals(output, expectedURL)
+		}
+		if !matches {
 			return NewError(CodeWorkspaceCreation,
 				fmt.Sprintf("new pull-request Git remote has an unsafe effective %s destination", tc.label),
 				false, nil)
 		}
 	}
 	return nil
+}
+
+func (b *GitBackend) rememberExpectedRemoteURL(remote, expectedURL string) {
+	b.expectedRemoteURLsMu.Lock()
+	defer b.expectedRemoteURLsMu.Unlock()
+	b.expectedRemoteURLs[remote] = expectedURL
+}
+
+func (b *GitBackend) forgetExpectedRemoteURL(remote string) {
+	b.expectedRemoteURLsMu.Lock()
+	defer b.expectedRemoteURLsMu.Unlock()
+	delete(b.expectedRemoteURLs, remote)
+}
+
+func (b *GitBackend) expectedRemoteURL(remote string) (string, bool) {
+	b.expectedRemoteURLsMu.RLock()
+	defer b.expectedRemoteURLsMu.RUnlock()
+	expectedURL, ok := b.expectedRemoteURLs[remote]
+	return expectedURL, ok
+}
+
+func forkSSHURL(projectURL string, repository Repository) (string, error) {
+	projectURL = strings.TrimSpace(projectURL)
+	repositoryPath := strings.Trim(repository.Owner, "/") + "/" + strings.Trim(repository.Name, "/") + ".git"
+	if strings.Contains(projectURL, "://") {
+		parsed, err := neturl.Parse(projectURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", fmt.Errorf("invalid project SSH URL")
+		}
+		parsed.Path = "/" + repositoryPath
+		parsed.RawPath = ""
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String(), nil
+	}
+	colon := strings.IndexByte(projectURL, ':')
+	slash := strings.IndexAny(projectURL, `/\`)
+	if colon < 0 || slash >= 0 && colon > slash {
+		return "", fmt.Errorf("invalid project SSH URL")
+	}
+	return projectURL[:colon+1] + repositoryPath, nil
+}
+
+func singleRemoteURLEquals(output, expected string) bool {
+	remoteURL, single := singleRemoteURL(output)
+	return single && remoteURLsEqual(remoteURL, expected)
+}
+
+func remoteURLsEqual(left, right string) bool {
+	return strings.TrimSpace(left) == strings.TrimSpace(right)
 }
 
 func isSSHRemoteURL(remoteURL string) bool {
@@ -509,7 +595,22 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 		Context: ctx, StrictSetup: true, SetupEnvironment: b.setupEnvironment,
 		BeforeCheckout: b.validateWorktreeConfiguration,
 	})
-	if createErr != nil && path == "" {
+	workspaceBranch := branch
+	partialCreation := false
+	if createErr != nil {
+		var partial interface {
+			PartialWorktree() (string, string)
+		}
+		if errors.As(createErr, &partial) {
+			partialPath, partialBranch := partial.PartialWorktree()
+			if partialPath != "" || partialBranch != "" {
+				path = partialPath
+				workspaceBranch = partialBranch
+				partialCreation = true
+			}
+		}
+	}
+	if createErr != nil && path == "" && !partialCreation {
 		message := strings.ToLower(createErr.Error())
 		if strings.Contains(message, "already exists") || strings.Contains(message, "already checked out") ||
 			strings.Contains(message, "not an empty directory") || strings.Contains(message, "already registered worktree") {
@@ -523,9 +624,17 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 		return Workspace{}, fmt.Errorf("invalid project repository identity %q", b.project.Identity)
 	}
 	workspace := Workspace{
-		ID:         b.project.Identity + ":" + branch + ":" + template.ShortHash(path),
-		Repository: b.project.Identity, Branch: branch, Path: path, State: "ready",
-		SessionName: tmux.WorkspaceSessionName(info, branch, path),
+		ID:         b.project.Identity + ":" + workspaceBranch + ":" + template.ShortHash(path),
+		Repository: b.project.Identity, Branch: workspaceBranch, Path: path, State: "ready",
+		SessionName: tmux.WorkspaceSessionName(info, workspaceBranch, path),
+	}
+	var concretePartial *gitadapter.PartialWorktreeCreationError
+	if errors.As(createErr, &concretePartial) {
+		workspace.partialCleanup = &workspacePartialCleanup{
+			run: func(cleanupCtx context.Context) error {
+				return concretePartial.RetryCleanup(cleanupCtx, b.git, b.setupEnvironment)
+			},
+		}
 	}
 	if createErr != nil {
 		return workspace, createErr
@@ -617,6 +726,9 @@ func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace
 func (b *GitBackend) Rollback(ctx context.Context, workspace Workspace) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if workspace.partialCleanup != nil {
+		return workspace.partialCleanup.run(ctx)
 	}
 	return b.manager.RemoveWithBranchWithEnvironment(workspace.Path, workspace.Branch, true, true, true, b.setupEnvironment)
 }

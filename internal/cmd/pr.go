@@ -155,7 +155,10 @@ func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullre
 	}
 	g := gitadapter.New(project.Path)
 	manager := worktree.New(g, cfg)
-	backend := pullrequest.NewGitBackend(g, manager, project, pullrequest.WithFleetTokenEnvironment(cfg.Fleet.TokenEnv))
+	backend := pullrequest.NewGitBackend(g, manager, project,
+		pullrequest.WithFleetTokenEnvironment(cfg.Fleet.TokenEnv),
+		pullrequest.WithFleetTokenFileEnvironment(cfg.Fleet.TokenFileEnvironment),
+	)
 	return pullrequest.NewService(provider, backend, pullrequest.NewFileStore(prStorePath())), nil
 }
 

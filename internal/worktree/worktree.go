@@ -119,7 +119,9 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		}
 		if errors.As(addErr, &partial) {
 			partialPath, partialBranch := partial.PartialWorktree()
-			if partialPath == path && partialBranch == branch {
+			pathRemains := partialPath != "" && partialPath == path
+			branchRemains := partialBranch != "" && partialBranch == branch
+			if pathRemains || branchRemains {
 				return path, addErr
 			}
 		}
@@ -173,15 +175,18 @@ func (m *Manager) RemoveWithBranchWithEnvironment(path string, branch string, fo
 
 func (m *Manager) removeWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
 	var removeErr error
-	removeWorktree := true
-	if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
-		if worktrees, listErr := m.git.ListWorktrees(); listErr == nil {
-			removeWorktree = false
-			canonicalPath := utils.CanonicalPath(path)
-			for _, candidate := range worktrees {
-				if utils.CanonicalPath(candidate.Path) == canonicalPath {
-					removeWorktree = true
-					break
+	removeWorktree := path != ""
+	if removeWorktree {
+		_, statErr := os.Lstat(path)
+		if os.IsNotExist(statErr) {
+			if worktrees, listErr := m.git.ListWorktrees(); listErr == nil {
+				removeWorktree = false
+				canonicalPath := utils.CanonicalPath(path)
+				for _, candidate := range worktrees {
+					if utils.CanonicalPath(candidate.Path) == canonicalPath {
+						removeWorktree = true
+						break
+					}
 				}
 			}
 		}
