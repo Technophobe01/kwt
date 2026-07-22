@@ -2,7 +2,6 @@ package pullrequest
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -692,15 +691,12 @@ func TestGitBackendCreateClassifiesDuplicateBranchOrWorkspaceName(t *testing.T) 
 
 func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	repo, backend := newBackendRepo(t)
-	bare := filepath.Join(t.TempDir(), "fork.git")
 	wrong := filepath.Join(t.TempDir(), "wrong.git")
-	runGit(t, repo, "init", "--bare", bare)
 	runGit(t, repo, "init", "--bare", wrong)
-	runGit(t, repo, "remote", "add", "fork", bare)
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
 	runGit(t, repo, "remote", "add", "wrong", wrong)
 	runGit(t, repo, "config", "remote.pushDefault", "wrong")
 	head := runGit(t, repo, "rev-parse", "HEAD")
-	runGit(t, repo, "push", "fork", fmt.Sprintf("%s:refs/heads/feature/widgets", head))
 	runGit(t, repo, "config", "remote.fork.mirror", "true")
 	runGit(t, repo, "config", "push.followTags", "true")
 	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/8", head)
@@ -708,7 +704,7 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	require.NoError(t, err)
 	runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.pushRemote", "wrong")
 
-	require.NoError(t, backend.ConfigurePush(context.Background(), workspace, "fork", "feature/widgets"))
+	require.NoError(t, backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets"))
 
 	assert.Equal(t, "fork", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.remote"))
 	assert.Equal(t, "fork", runGit(t, workspace.Path, "config", "branch.pr-8-feature-widgets.pushRemote"))
@@ -728,11 +724,6 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	cmd.Dir = repo
 	output, configErr := cmd.CombinedOutput()
 	assert.Error(t, configErr, "remote.fork.push unexpectedly visible in main checkout: %s", output)
-	require.NoError(t, os.WriteFile(filepath.Join(workspace.Path, "change.txt"), []byte("change\n"), 0644))
-	runGit(t, workspace.Path, "add", "change.txt")
-	runGit(t, workspace.Path, "commit", "-m", "change")
-	pushOutput := runGit(t, workspace.Path, "push", "--dry-run")
-	assert.Contains(t, pushOutput, "HEAD -> feature/widgets")
 }
 
 func TestGitBackendConfigurePushRejectsConditionalRemoteRedirect(t *testing.T) {
@@ -749,7 +740,37 @@ func TestGitBackendConfigurePushRejectsConditionalRemoteRedirect(t *testing.T) {
 	), 0o600))
 	runGit(t, repo, "config", "includeIf.onbranch:pr-14-*.path", conditionalPath)
 
-	err = backend.ConfigurePush(context.Background(), workspace, "fork", "feature/widgets")
+	err = backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+}
+
+func TestGitBackendConfigurePushRejectsRemoteChangedAfterWorkspaceSetup(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/15", head)
+	workspace, err := backend.Create(context.Background(), "pr-15-routing", "refs/kwt/pull-requests/acme/widget/15")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	runGit(t, workspace.Path, "remote", "set-url", "fork", "https://github.com/attacker/widget.git")
+
+	err = backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+}
+
+func TestGitBackendConfigurePushRejectsChangedWorkspaceHead(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/16", head)
+	workspace, err := backend.Create(context.Background(), "pr-16-head", "refs/kwt/pull-requests/acme/widget/16")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	runGit(t, workspace.Path, "checkout", "--detach", "HEAD")
+
+	err = backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets")
 
 	assertErrorCode(t, err, CodeWorkspaceCreation)
 }

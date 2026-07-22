@@ -25,7 +25,7 @@ type WorkspaceBackend interface {
 	EnsureRemote(context.Context, Repository) (string, error)
 	Fetch(context.Context, string, string, string) (string, error)
 	Create(context.Context, string, string) (Workspace, error)
-	ConfigurePush(context.Context, Workspace, string, string) error
+	ConfigurePush(context.Context, Workspace, string, string, string) error
 	Rollback(context.Context, Workspace) error
 }
 
@@ -143,7 +143,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 					return AsError(remoteErr, CodeWorkspaceCreation,
 						"failed to validate the existing import's Git remote")
 				}
-				if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Name); configErr != nil {
+				if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Repository.Identity, pr.Source.Name); configErr != nil {
 					return NewError(CodeWorkspaceCreation,
 						"failed to repair the existing import's push configuration", false, configErr)
 				}
@@ -197,7 +197,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 			return AsError(createErr, CodeWorkspaceCreation, "failed to create pull-request workspace")
 		}
 		created = &workspace
-		if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Name); configErr != nil {
+		if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Repository.Identity, pr.Source.Name); configErr != nil {
 			cleanupReason = "workspace created but push configuration failed"
 			return NewError(CodeWorkspaceCreation, cleanupReason, false, configErr)
 		}

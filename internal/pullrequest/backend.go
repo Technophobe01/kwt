@@ -497,13 +497,11 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 	return workspace, nil
 }
 
-func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, remote, sourceBranch string) error {
-	expectedFetchURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", remote)
-	if err != nil {
+func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, remote, sourceRepository, sourceBranch string) error {
+	if err := b.validateWorkspaceHead(ctx, workspace); err != nil {
 		return err
 	}
-	expectedPushURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", remote)
-	if err != nil {
+	if err := b.validateEffectiveRemoteAt(ctx, workspace.Path, remote, sourceRepository); err != nil {
 		return err
 	}
 	commands := [][]string{
@@ -521,29 +519,28 @@ func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, rem
 			return err
 		}
 	}
-	return b.validateWorkspacePushRouting(ctx, workspace, remote, sourceBranch, expectedFetchURLs, expectedPushURLs)
+	return b.validateWorkspacePushRouting(ctx, workspace, remote, sourceRepository, sourceBranch)
 }
 
-func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace Workspace, remote, sourceBranch, expectedFetchURLs, expectedPushURLs string) error {
+func (b *GitBackend) validateWorkspaceHead(ctx context.Context, workspace Workspace) error {
+	branch, err := b.runImportGitAt(ctx, workspace.Path, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || strings.TrimSpace(branch) != workspace.Branch {
+		return NewError(CodeWorkspaceCreation,
+			fmt.Sprintf("pull-request worktree is no longer on generated branch %q", workspace.Branch),
+			false, err)
+	}
+	return nil
+}
+
+func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace Workspace, remote, sourceRepository, sourceBranch string) error {
 	if err := b.validateImportConfigurationAt(ctx, workspace.Path); err != nil {
 		return err
 	}
-	for _, tc := range []struct {
-		label    string
-		args     []string
-		expected string
-	}{
-		{label: "fetch URL", args: []string{"remote", "get-url", "--all", remote}, expected: expectedFetchURLs},
-		{label: "push URL", args: []string{"remote", "get-url", "--all", "--push", remote}, expected: expectedPushURLs},
-	} {
-		actual, err := b.runImportGitAt(ctx, workspace.Path, tc.args...)
-		if err != nil {
-			return NewError(CodeWorkspaceCreation, "failed to validate pull-request push routing", false, err)
-		}
-		if strings.TrimSpace(actual) != strings.TrimSpace(tc.expected) {
-			return NewError(CodeWorkspaceCreation,
-				fmt.Sprintf("pull-request worktree has an unsafe effective %s", tc.label), false, nil)
-		}
+	if err := b.validateWorkspaceHead(ctx, workspace); err != nil {
+		return err
+	}
+	if err := b.validateEffectiveRemoteAt(ctx, workspace.Path, remote, sourceRepository); err != nil {
+		return err
 	}
 
 	pushKey := "remote." + remote + ".push"

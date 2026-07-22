@@ -112,6 +112,7 @@ type fakeWorkspaceBackend struct {
 	configureErr     error
 	configureCalls   int
 	configuredRemote string
+	configuredRepo   string
 	configuredBranch string
 	configureCancel  context.CancelFunc
 	rollbackErr      error
@@ -204,9 +205,10 @@ func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Work
 	return workspace, nil
 }
 
-func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, remote, sourceBranch string) error {
+func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, remote, sourceRepository, sourceBranch string) error {
 	f.configureCalls++
 	f.configuredRemote = remote
+	f.configuredRepo = sourceRepository
 	f.configuredBranch = sourceBranch
 	if f.configureCancel != nil {
 		f.configureCancel()
@@ -214,7 +216,7 @@ func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, rem
 	if f.configureErr != nil {
 		return f.configureErr
 	}
-	if remote == "" || sourceBranch == "" {
+	if remote == "" || sourceRepository == "" || sourceBranch == "" {
 		return errors.New("missing push configuration")
 	}
 	return nil
@@ -576,6 +578,7 @@ func TestImportRepairsPushRoutingBeforeReturningExisting(t *testing.T) {
 	assert.Equal(t, ImportExisting, result.Status)
 	assert.Equal(t, 1, backend.configureCalls)
 	assert.Equal(t, "origin", backend.configuredRemote)
+	assert.Equal(t, pr.Source.Repository.Identity, backend.configuredRepo)
 	assert.Equal(t, pr.Source.Name, backend.configuredBranch)
 }
 
