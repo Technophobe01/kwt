@@ -311,7 +311,7 @@ func ParseSelector(selector, repository string) (int, error) {
 func importBranchName(pr PullRequest) string {
 	var out strings.Builder
 	lastDash := false
-	for _, r := range strings.ToLower(pr.Source.Name) {
+	for _, r := range pr.Source.Name {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
 			out.WriteRune(r)
 			lastDash = false

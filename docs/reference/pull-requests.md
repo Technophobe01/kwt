@@ -38,8 +38,8 @@ authentication for subsequent pushes.
 
 Import stops before mutation when a repository stores credentials directly in
 a remote fetch or push URL. Use a Git credential helper or SSH agent instead;
-this keeps trusted setup commands and contributor-controlled lifecycle scripts
-from reading reusable credentials out of the linked worktree's shared config.
+this keeps contributor-triggered Git operations from reading reusable
+credentials out of the linked worktree's shared config.
 Validation includes configured include files and checks Git's effective fetch
 and push URLs after `insteadOf` and `pushInsteadOf` rewriting. Remote URLs with
 query strings or fragments are rejected, as are invalid scheme-based URLs and
@@ -49,8 +49,11 @@ Import fetches also force the SSH implementation's noninteractive mode
 (OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
 credential prompts. Every ref-mutating import operation—including fetch,
 checkout, and rollback—runs with the same sanitized environment and an empty
-trusted hooks directory, so repository hooks cannot run during import;
-configured content filters may run but cannot inherit kwt-managed tokens.
+trusted hooks directory. Checkout additionally disables every configured
+smudge/process filter. Repository hooks, filters, copied files, and setup
+commands therefore do not run during PR import: environment scrubbing alone
+cannot prevent same-user processes from reading kwt configuration or token
+files from disk.
 
 Import requires Git 2.20 or newer because kwt uses per-worktree Git
 configuration to make plain `git push` target the PR head without changing
@@ -167,9 +170,11 @@ An imported list result adds the canonical workspace record:
 ## Import contract
 
 kwt chooses the deterministic local branch name, selects or creates a clean
-source remote, fetches the head, creates the worktree through the normal
-workspace manager (including trusted repository setup commands), and
-configures plain `git push` to update exactly the PR's original head branch.
+source remote, fetches the head, creates a no-checkout worktree, materializes
+it with external filters disabled, and configures plain `git push` to update
+exactly the PR's original head branch. Unlike an ordinary `kwt add`, PR import
+does not apply `copy_files` or `setup_commands`; run any desired project setup
+explicitly after reviewing the imported files.
 When it creates a fork remote, kwt uses SSH when the project's effective push
 URL uses SSH and HTTPS otherwise, preserving the project's working push
 authentication transport, including SSH host aliases and explicit ports. It
@@ -180,10 +185,9 @@ to; it does not launch or manipulate tmux panes.
 
 Cross-project imports load the selected project's already trusted `.kwt.toml`
 in isolation. They never load configuration from the caller's working
-directory and never prompt or auto-trust in this automation path. Trusted
-`copy_files` and `setup_commands` continue to apply, but setup processes do
-not inherit `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, or the configured fleet
-token environment variable. A target repository's `.kwt.toml` must be a
+directory and never prompt or auto-trust in this automation path. Repository
+`copy_files` and `setup_commands` are deliberately ignored for PR imports. A
+target repository's `.kwt.toml` must be a
 regular file, not a symlink, so trust granted to another path cannot be reused.
 The registered project path must resolve to that repository's main Git root;
 empty, relative, missing, subdirectory, and linked-worktree paths are rejected
@@ -282,15 +286,15 @@ creating, configuring, and recording, so concurrent imports converge on one
 workspace. A stale provenance record is not reported as imported when its Git
 worktree no longer exists. Existing imports require complete source provenance
 and have their push routing repaired before `already_imported` is returned. If
-an import fails after creating a workspace—including a configured file-copy or
-setup-command failure—kwt rolls it back even when the request context was
-canceled. Request cancellation, including `SIGINT` and `SIGTERM`, terminates
-checkout filters and setup-command process trees; cleanup then runs without the
-canceled context. Worktree creation reserves its path and branch, and failed-add
-cleanup removes only the reserved directory identity and the unchanged reserved
-ref. A rollback failure is reported with the surviving workspace path and
-branch for manual cleanup. If the PR's recorded source repository or branch
-changed while its imported workspace is still present, another import returns
+an import fails after creating a workspace, kwt rolls it back even when the
+request context was canceled. Request cancellation, including `SIGINT` and
+`SIGTERM`, terminates checkout; cleanup then runs without the canceled context.
+Worktree creation retains an ownership reservation through late rollback and
+removes only the original directory identity, a clean worktree, and the
+unchanged reserved ref. A replaced path, dirty worktree, or advanced branch is
+preserved and reported for manual cleanup. If the PR's recorded source
+repository or branch changed while its imported workspace is still present,
+another import returns
 `import_conflict` instead of reusing stale push configuration.
 
 ## Failure contract

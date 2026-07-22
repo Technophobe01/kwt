@@ -23,7 +23,7 @@ type GitInterface interface {
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
 	AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
-	AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
+	AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) (func(context.Context) (string, string, error), error)
 	CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, path string, environment []string) error
 	RemoveWorktree(path string, force bool) error
 	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
@@ -46,6 +46,7 @@ type Manager struct {
 type AddOptions struct {
 	Context          context.Context
 	BeforeCheckout   func(context.Context, string) error
+	CaptureCleanup   func(func(context.Context) (string, string, error))
 	SkipSetup        bool
 	StrictSetup      bool
 	SetupEnvironment []string
@@ -84,7 +85,7 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 			setupCtx := addOptionsContext(opts)
 			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, nil)
 			if err := setupCtx.Err(); err != nil {
-				return m.rollbackCanceledAdd(path, branch, createBranch, nil, err)
+				return path, canceledAddError(err, path, branch, createBranch)
 			}
 		}
 	}
@@ -107,9 +108,13 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 
 	var addErr error
 	if opts.BeforeCheckout != nil {
-		addErr = m.git.AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(
+		var cleanup func(context.Context) (string, string, error)
+		cleanup, addErr = m.git.AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(
 			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
 		)
+		if addErr == nil && cleanup != nil && opts.CaptureCleanup != nil {
+			opts.CaptureCleanup(cleanup)
+		}
 	} else if opts.SetupEnvironment != nil {
 		addErr = m.git.AddWorktreeFromBaseWithEnvironmentAndContext(
 			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
@@ -151,25 +156,19 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 			setupCtx := addOptionsContext(opts)
 			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, opts.SetupEnvironment)
 			if err := setupCtx.Err(); err != nil {
-				return m.rollbackCanceledAdd(path, branch, true, opts.SetupEnvironment, err)
+				return path, canceledAddError(err, path, branch, true)
 			}
 		}
 	}
 	return path, nil
 }
 
-func (m *Manager) rollbackCanceledAdd(
-	path, branch string,
-	createdBranch bool,
-	environment []string,
-	cancelErr error,
-) (string, error) {
-	cleanupErr := m.removeWithBranch(path, branch, true, createdBranch, true, environment)
-	if cleanupErr == nil {
-		return "", cancelErr
+func canceledAddError(cancelErr error, path, branch string, createdBranch bool) error {
+	message := fmt.Sprintf("canceled add left worktree at %q", path)
+	if createdBranch {
+		message += fmt.Sprintf(" and created branch %q", branch)
 	}
-	return path, errors.Join(cancelErr,
-		fmt.Errorf("canceled add cleanup failed for worktree %q and branch %q: %w", path, branch, cleanupErr))
+	return fmt.Errorf("%w: %s; manual cleanup is required", cancelErr, message)
 }
 
 func addOptionsContext(opts AddOptions) context.Context {

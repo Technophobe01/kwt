@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"go.kenn.io/kwt/pkg/models"
@@ -204,7 +205,8 @@ func (g *Git) refExists(ref string) bool {
 
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
 func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
-	return g.addWorktreeFromBase(context.Background(), path, branch, baseBranch, nil, false)
+	_, err := g.addWorktreeFromBase(context.Background(), path, branch, baseBranch, nil, false)
+	return err
 }
 
 // AddWorktreeFromBaseWithEnvironment creates a worktree with an explicit
@@ -217,16 +219,33 @@ func (g *Git) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string
 // explicit checkout environment while allowing request cancellation to stop
 // filters and checkout work.
 func (g *Git) AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
-	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, false)
+	_, err := g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, false)
+	return err
 }
 
 // AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext prepares a linked
 // worktree without materializing contributor-controlled files.
-func (g *Git) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
-	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, true)
+func (g *Git) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(
+	ctx context.Context,
+	path, branch, baseBranch string,
+	environment []string,
+) (func(context.Context) (string, string, error), error) {
+	reservation, err := g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, true)
+	if err != nil {
+		return nil, err
+	}
+	cleanupEnvironment := append([]string(nil), environment...)
+	return func(cleanupCtx context.Context) (string, string, error) {
+		return g.cleanupFailedWorktreeAdd(cleanupCtx, reservation, cleanupEnvironment)
+	}, nil
 }
 
-func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch string, environment []string, noCheckout bool) error {
+func (g *Git) addWorktreeFromBase(
+	ctx context.Context,
+	path, branch, baseBranch string,
+	environment []string,
+	noCheckout bool,
+) (*worktreeAddReservation, error) {
 	if environment == nil {
 		args := []string{"worktree", "add"}
 		if noCheckout {
@@ -237,14 +256,14 @@ func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch 
 			args = append(args, baseBranch)
 		}
 		if _, err := g.RunWithContext(ctx, args...); err != nil {
-			return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
+			return nil, fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 		}
-		return nil
+		return nil, nil
 	}
 
 	reservation, err := g.reserveWorktreeAdd(ctx, path, branch, baseBranch, environment)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	args := []string{"worktree", "add"}
 	if noCheckout {
@@ -259,16 +278,16 @@ func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch 
 		if cleanupErr != nil {
 			joinedErr := errors.Join(addErr, cleanupErr)
 			if remainingPath != "" || remainingBranch != "" {
-				return &PartialWorktreeCreationError{
+				return nil, &PartialWorktreeCreationError{
 					Path: remainingPath, Branch: remainingBranch, Err: joinedErr, reservation: reservation,
 				}
 			}
-			return joinedErr
+			return nil, joinedErr
 		}
-		return addErr
+		return nil, addErr
 	}
 
-	return nil
+	return reservation, nil
 }
 
 func (g *Git) reserveWorktreeAdd(ctx context.Context, path, branch, baseBranch string, environment []string) (*worktreeAddReservation, error) {
@@ -316,26 +335,99 @@ func (g *Git) reserveWorktreeAdd(ctx context.Context, path, branch, baseBranch s
 }
 
 // CheckoutWorktreeWithEnvironmentAndContext materializes a prepared
-// no-checkout worktree with hooks disabled and an explicit environment.
+// no-checkout worktree with hooks and content filters disabled and an explicit
+// environment.
 func (g *Git) CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, path string, environment []string) error {
-	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "-C", path, "reset", "--hard", "HEAD"); err != nil {
+	args, err := g.disabledFilterArguments(ctx, path, environment)
+	if err != nil {
+		return fmt.Errorf("failed to inspect checkout filters: %w", err)
+	}
+	args = append(args, "-C", path, "reset", "--hard", "HEAD")
+	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, args...); err != nil {
 		return fmt.Errorf("failed to check out prepared worktree: %w", err)
 	}
 	return nil
 }
 
+func (g *Git) disabledFilterArguments(ctx context.Context, path string, environment []string) ([]string, error) {
+	configOutput, err := g.RunWithEnvironmentAndDisabledHooks(
+		ctx, environment, "-C", path, "config", "--includes", "--null", "--list",
+	)
+	if err != nil {
+		return nil, err
+	}
+	drivers := configuredFilterDrivers(configOutput)
+	args := make([]string, 0, len(drivers)*8+2)
+	args = append(args, "-c", "core.fsmonitor=false")
+	for _, driver := range drivers {
+		prefix := "filter." + driver + "."
+		args = append(args,
+			"-c", prefix+"clean=",
+			"-c", prefix+"smudge=",
+			"-c", prefix+"process=",
+			"-c", prefix+"required=false",
+		)
+	}
+	return args, nil
+}
+
+func configuredFilterDrivers(configOutput string) []string {
+	drivers := make(map[string]struct{})
+	for record := range strings.SplitSeq(configOutput, "\x00") {
+		key, _, found := strings.Cut(record, "\n")
+		if !found {
+			continue
+		}
+		trimmedKey := strings.TrimSpace(key)
+		lowerKey := strings.ToLower(trimmedKey)
+		if !strings.HasPrefix(lowerKey, "filter.") {
+			continue
+		}
+		for _, suffix := range []string{".clean", ".smudge", ".process", ".required"} {
+			if strings.HasSuffix(lowerKey, suffix) {
+				driver := trimmedKey[len("filter.") : len(trimmedKey)-len(suffix)]
+				if driver == "" {
+					continue
+				}
+				drivers[driver] = struct{}{}
+			}
+		}
+	}
+	result := make([]string, 0, len(drivers))
+	for driver := range drivers {
+		result = append(result, driver)
+	}
+	slices.Sort(result)
+	return result
+}
+
 func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktreeAddReservation, environment []string) (string, string, error) {
 	var cleanupErrs []error
 	pathOwned := reservation.pathInfo != nil && sameFileAtPath(reservation.path, reservation.pathInfo)
+	pathChanged := reservation.pathInfo != nil && pathExists(reservation.path) && !pathOwned
 	registration, registrationErr := g.worktreeRegistrationWithEnvironment(ctx, reservation.path, environment)
 	ownedRegistration := reservation.branchOwned && registration != nil && registration.Branch == reservation.branch &&
 		strings.EqualFold(registration.CommitHash, reservation.branchOID)
 	if registrationErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect failed worktree registration: %w", registrationErr))
 	} else if pathOwned && ownedRegistration {
-		if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
-			"worktree", "remove", "--force", "--force", reservation.path); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove reserved worktree: %w", err))
+		statusArgs, statusErr := g.disabledFilterArguments(ctx, reservation.path, environment)
+		var status string
+		if statusErr == nil {
+			statusArgs = append(statusArgs,
+				"-C", reservation.path, "status", "--porcelain=v1", "--untracked-files=all")
+			status, statusErr = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, statusArgs...)
+		}
+		switch {
+		case statusErr != nil:
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect reserved worktree changes: %w", statusErr))
+		case strings.TrimSpace(status) != "":
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("reserved worktree contains changes; preserving it"))
+		default:
+			if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
+				"worktree", "remove", "--force", "--force", reservation.path); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove reserved worktree: %w", err))
+			}
 		}
 	}
 
@@ -376,6 +468,10 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 	if pathOwned && remainingPath == "" {
 		remainingPath = reservation.path
 	}
+	if pathChanged {
+		remainingPath = reservation.path
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("reserved worktree path ownership changed; preserving it"))
+	}
 	remainingBranch := ""
 	if oid, exists, err := g.refOIDWithEnvironment(ctx, reservation.branchRef, environment); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect reserved branch after cleanup: %w", err))
@@ -390,6 +486,11 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("reserved worktree branch remains"))
 	}
 	return remainingPath, remainingBranch, errors.Join(cleanupErrs...)
+}
+
+func pathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func sameFileAtPath(path string, expected os.FileInfo) bool {

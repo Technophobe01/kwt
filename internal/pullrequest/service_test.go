@@ -75,6 +75,17 @@ func TestImportBranchNameTruncatesAtUTF8Boundary(t *testing.T) {
 	assert.Equal(t, "a"+strings.Repeat("é", 39), slug)
 }
 
+func TestImportBranchNamePreservesCaseNeededForValidRef(t *testing.T) {
+	pr := testPR(17, false)
+	pr.Source.Name = "feature.LOCK"
+
+	branch := importBranchName(pr)
+
+	assert.Equal(t, "pr-17-feature.LOCK", branch)
+	cmd := exec.Command("git", "check-ref-format", "--branch", branch)
+	require.NoError(t, cmd.Run(), "generated branch %q must be a valid Git ref", branch)
+}
+
 func TestPullRequestFetchRefIsValidForRepositoryNamesInvalidInRefs(t *testing.T) {
 	for _, identity := range []string{
 		"github.com/.github/widget",

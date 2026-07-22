@@ -606,9 +606,13 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 	if err := ctx.Err(); err != nil {
 		return Workspace{}, err
 	}
+	var ownershipCleanup func(context.Context) (string, string, error)
 	path, createErr := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{
-		Context: ctx, StrictSetup: true, SetupEnvironment: b.setupEnvironment,
+		Context: ctx, SkipSetup: true, SetupEnvironment: b.setupEnvironment,
 		BeforeCheckout: b.validateWorktreeConfiguration,
+		CaptureCleanup: func(cleanup func(context.Context) (string, string, error)) {
+			ownershipCleanup = cleanup
+		},
 	})
 	workspaceBranch := branch
 	partialCreation := false
@@ -642,6 +646,18 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 		ID:         b.project.Identity + ":" + workspaceBranch + ":" + template.ShortHash(path),
 		Repository: b.project.Identity, Branch: workspaceBranch, Path: path, State: "ready",
 		SessionName: tmux.WorkspaceSessionName(info, workspaceBranch, path),
+	}
+	if ownershipCleanup != nil {
+		workspace.partialCleanup = &workspacePartialCleanup{run: func(cleanupCtx context.Context) error {
+			remainingPath, remainingBranch, cleanupErr := ownershipCleanup(cleanupCtx)
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+			if remainingPath != "" || remainingBranch != "" {
+				return fmt.Errorf("ownership-safe cleanup preserved path %q and branch %q", remainingPath, remainingBranch)
+			}
+			return nil
+		}}
 	}
 	var concretePartial *gitadapter.PartialWorktreeCreationError
 	if errors.As(createErr, &concretePartial) {

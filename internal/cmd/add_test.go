@@ -83,7 +83,7 @@ func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {
 	assert.Zero(t, calls)
 }
 
-func TestAddRollsBackCanceledSetup(t *testing.T) {
+func TestAddReportsCanceledSetupWithoutNameOnlyCleanup(t *testing.T) {
 	resetFleetCommandDeps(t)
 	resetAddCommandFlags(t)
 
@@ -105,10 +105,11 @@ func TestAddRollsBackCanceledSetup(t *testing.T) {
 	err := runAdd(cmd, []string{"feature/canceled-add", worktreePath})
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.NoDirExists(t, worktreePath)
+	assert.ErrorContains(t, err, worktreePath)
+	assert.DirExists(t, worktreePath)
 	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-add")
 	branchCheck.Dir = repoPath
-	assert.Error(t, branchCheck.Run(), "the operation-owned branch must be deleted")
+	assert.NoError(t, branchCheck.Run(), "cancellation cleanup must not delete by branch name")
 }
 
 func TestShouldLaunch(t *testing.T) {

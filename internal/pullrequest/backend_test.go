@@ -400,7 +400,7 @@ func TestNewGitBackendSanitizesKWTSecretsByDefault(t *testing.T) {
 	assert.NotNil(t, backend.setupEnvironment)
 }
 
-func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
+func TestPRImportSkipsRepositorySetupCommands(t *testing.T) {
 	repo := t.TempDir()
 	resolvedRepo, err := filepath.EvalSymlinks(repo)
 	require.NoError(t, err)
@@ -438,9 +438,7 @@ func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
 	workspace, err := backend.Create(context.Background(), "pr-9-safe-env", "refs/kwt/pull-requests/acme/widget/9")
 
 	require.NoError(t, err)
-	contents, err := os.ReadFile(filepath.Join(workspace.Path, "setup-env.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "||||visible", string(contents))
+	assert.NoFileExists(t, filepath.Join(workspace.Path, "setup-env.txt"))
 }
 
 func TestPRImportSetupCannotDiscoverFleetTokenThroughKWTHome(t *testing.T) {
@@ -480,7 +478,7 @@ func TestPRImportSetupCannotDiscoverFleetTokenThroughKWTHome(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(workspace.Path, "stolen-token.txt"))
 }
 
-func TestPRImportCreatePropagatesStrictSetupFailure(t *testing.T) {
+func TestPRImportCreateDoesNotRunFailingSetupCommand(t *testing.T) {
 	repo := t.TempDir()
 	resolvedRepo, err := filepath.EvalSymlinks(repo)
 	require.NoError(t, err)
@@ -501,15 +499,13 @@ func TestPRImportCreatePropagatesStrictSetupFailure(t *testing.T) {
 	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
 
 	workspace, err := backend.Create(context.Background(), "pr-10-setup-fails", "refs/kwt/pull-requests/acme/widget/10")
-	if workspace.Path != "" {
-		t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
-	}
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
 
-	require.Error(t, err)
-	assert.NotEmpty(t, workspace.Path, "service needs the created workspace for rollback")
+	require.NoError(t, err)
+	assert.DirExists(t, workspace.Path)
 }
 
-func TestPRImportCreateCancelsStrictSetup(t *testing.T) {
+func TestPRImportCreateDoesNotStartSlowSetupCommand(t *testing.T) {
 	repo := t.TempDir()
 	resolvedRepo, err := filepath.EvalSymlinks(repo)
 	require.NoError(t, err)
@@ -528,18 +524,14 @@ func TestPRImportCreateCancelsStrictSetup(t *testing.T) {
 	head := runGit(t, repo, "rev-parse", "HEAD")
 	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/12", head)
 	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
 	started := time.Now()
 
-	workspace, err := backend.Create(ctx, "pr-12-cancel-setup", "refs/kwt/pull-requests/acme/widget/12")
-	if workspace.Path != "" {
-		t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
-	}
+	workspace, err := backend.Create(context.Background(), "pr-12-cancel-setup", "refs/kwt/pull-requests/acme/widget/12")
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
 
-	require.Error(t, err)
+	require.NoError(t, err)
 	assert.Less(t, time.Since(started), 2*time.Second)
-	assert.NotEmpty(t, workspace.Path, "canceled setup still needs rollback state")
+	assert.DirExists(t, workspace.Path)
 }
 
 func TestPRImportValidatesBranchConditionalConfigBeforeCheckoutAndSetup(t *testing.T) {
@@ -616,7 +608,7 @@ func TestPRImportRejectsReorderedBranchConditionalConfiguration(t *testing.T) {
 	assert.NoFileExists(t, marker)
 }
 
-func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
+func TestPRCheckoutAndRollbackDisableHooksAndFilters(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")
 	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("filtered.txt filter=kwt-capture\n"), 0o644))
@@ -624,9 +616,12 @@ func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
 	runGit(t, repo, "add", ".gitattributes", "filtered.txt")
 	runGit(t, repo, "commit", "-m", "add filtered content")
 
+	filterMarker := filepath.Join(t.TempDir(), "filter-ran")
 	filterScript := filepath.Join(t.TempDir(), "filter.sh")
-	require.NoError(t, os.WriteFile(filterScript, []byte("#!/bin/sh\nif test -n \"$KWT_GITHUB_TOKEN$KWT_FLEET_TOKEN$CUSTOM_FLEET_TOKEN\"; then exit 42; fi\nprintf 'filtered:'\ncat\n"), 0o755))
+	quotedFilterMarker := "'" + strings.ReplaceAll(filepath.ToSlash(filterMarker), "'", "'\\''") + "'"
+	require.NoError(t, os.WriteFile(filterScript, []byte("#!/bin/sh\nprintf ran > "+quotedFilterMarker+"\nprintf 'filtered:'\ncat\n"), 0o755))
 	filterCommand := "sh '" + strings.ReplaceAll(filepath.ToSlash(filterScript), "'", "'\\''") + "'"
+	runGit(t, repo, "config", "filter.kwt-capture.clean", filterCommand)
 	runGit(t, repo, "config", "filter.kwt-capture.smudge", filterCommand)
 	hookPath := filepath.Join(repo, ".git", "hooks", "post-checkout")
 	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 73\n"), 0o755))
@@ -649,7 +644,63 @@ func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	contents, err := os.ReadFile(filepath.Join(workspace.Path, "filtered.txt"))
 	require.NoError(t, err)
-	assert.Equal(t, "filtered:content\n", string(contents))
+	assert.Equal(t, "content\n", string(contents))
+	assert.NoFileExists(t, filterMarker)
+	require.NoError(t, backend.Rollback(context.Background(), workspace))
+	assert.NoFileExists(t, filterMarker)
+}
+
+func TestGitBackendRollbackPreservesAdvancedWorkspaceAndBranch(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/93", head)
+	workspace, err := backend.Create(context.Background(), "pr-93-owned", "refs/kwt/pull-requests/acme/widget/93")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace.Path, "review.txt"), []byte("keep\n"), 0o644))
+	runGit(t, workspace.Path, "add", "review.txt")
+	runGit(t, workspace.Path, "commit", "-m", "review work")
+	advancedOID := runGit(t, workspace.Path, "rev-parse", "HEAD")
+
+	err = backend.Rollback(context.Background(), workspace)
+
+	require.Error(t, err)
+	assert.DirExists(t, workspace.Path)
+	assert.FileExists(t, filepath.Join(workspace.Path, "review.txt"))
+	assert.Equal(t, advancedOID, runGit(t, repo, "rev-parse", "refs/heads/"+workspace.Branch))
+}
+
+func TestGitBackendRollbackPreservesUncommittedWorkspaceChanges(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/95", head)
+	workspace, err := backend.Create(context.Background(), "pr-95-owned", "refs/kwt/pull-requests/acme/widget/95")
+	require.NoError(t, err)
+	marker := filepath.Join(workspace.Path, "uncommitted.txt")
+	require.NoError(t, os.WriteFile(marker, []byte("keep\n"), 0o644))
+
+	err = backend.Rollback(context.Background(), workspace)
+
+	require.Error(t, err)
+	assert.FileExists(t, marker)
+	assert.Equal(t, head, runGit(t, repo, "rev-parse", "refs/heads/"+workspace.Branch))
+}
+
+func TestGitBackendRollbackPreservesReplacedWorkspacePath(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/94", head)
+	workspace, err := backend.Create(context.Background(), "pr-94-owned", "refs/kwt/pull-requests/acme/widget/94")
+	require.NoError(t, err)
+	originalPath := workspace.Path + "-original"
+	require.NoError(t, os.Rename(workspace.Path, originalPath))
+	require.NoError(t, os.Mkdir(workspace.Path, 0o755))
+	marker := filepath.Join(workspace.Path, "unrelated.txt")
+	require.NoError(t, os.WriteFile(marker, []byte("keep\n"), 0o644))
+
+	err = backend.Rollback(context.Background(), workspace)
+
+	require.Error(t, err)
+	assert.FileExists(t, marker)
 }
 
 func TestGitBackendListWorkspacesOmitsMissingWorktrees(t *testing.T) {

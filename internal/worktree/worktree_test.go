@@ -143,8 +143,11 @@ func (m *mockGit) AddWorktreeFromBaseWithEnvironmentAndContext(_ context.Context
 	return m.AddWorktreeFromBase(path, branch, baseBranch)
 }
 
-func (m *mockGit) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) error {
-	return m.AddWorktreeFromBase(path, branch, baseBranch)
+func (m *mockGit) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) (func(context.Context) (string, string, error), error) {
+	if err := m.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
+		return nil, err
+	}
+	return func(context.Context) (string, string, error) { return "", "", nil }, nil
 }
 
 func (m *mockGit) CheckoutWorktreeWithEnvironmentAndContext(_ context.Context, _ string, _ []string) error {
@@ -252,7 +255,7 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 	}
 }
 
-func TestManagerNonStrictSetupRollsBackCanceledAdd(t *testing.T) {
+func TestManagerNonStrictSetupReportsCanceledAddWithoutDeleting(t *testing.T) {
 	for _, createBranch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "existing branch", true: "created branch"}[createBranch], func(t *testing.T) {
 			repoPath, err := filepath.EvalSymlinks(t.TempDir())
@@ -271,15 +274,13 @@ func TestManagerNonStrictSetupRollsBackCanceledAdd(t *testing.T) {
 			path, err := manager.AddWithOptions("canceled-setup", worktreePath, createBranch, AddOptions{Context: ctx})
 
 			require.ErrorIs(t, err, context.Canceled)
-			assert.Empty(t, path, "successful rollback must not report a surviving worktree")
+			assert.NotEmpty(t, path, "the surviving worktree must be reported")
+			assert.ErrorContains(t, err, path)
 			resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
 			require.NoError(t, resolveErr)
-			assert.Equal(t, []string{resolvedWorktreePath}, git.removedWorktrees)
-			if createBranch {
-				assert.Equal(t, []string{"canceled-setup"}, git.deletedBranches)
-			} else {
-				assert.Empty(t, git.deletedBranches, "an existing branch is not operation-owned")
-			}
+			assert.Equal(t, resolvedWorktreePath, path)
+			assert.Empty(t, git.removedWorktrees)
+			assert.Empty(t, git.deletedBranches)
 			assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
 		})
 	}

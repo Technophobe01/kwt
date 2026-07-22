@@ -1482,7 +1482,7 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	assert.Equal(t, 1, published)
 }
 
-func TestTUIBackendCreateWorktreeRollsBackCanceledSetup(t *testing.T) {
+func TestTUIBackendCreateWorktreeReportsCanceledSetupWithoutNameOnlyCleanup(t *testing.T) {
 	repoPath := newTUITestRepo(t)
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
@@ -1499,12 +1499,13 @@ func TestTUIBackendCreateWorktreeRollsBackCanceledSetup(t *testing.T) {
 	path, err := backend.CreateWorktree(ctx, row, "feature/canceled-tui-add")
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.Empty(t, path)
+	assert.NotEmpty(t, path)
+	assert.ErrorContains(t, err, path)
 	worktrees := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
-	assert.NotContains(t, worktrees, "feature/canceled-tui-add")
+	assert.Contains(t, worktrees, "feature/canceled-tui-add")
 	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-tui-add")
 	branchCheck.Dir = repoPath
-	assert.Error(t, branchCheck.Run(), "the operation-owned branch must be deleted")
+	assert.NoError(t, branchCheck.Run(), "cancellation cleanup must not delete by branch name")
 }
 
 func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {

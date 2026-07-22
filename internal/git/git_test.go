@@ -274,6 +274,12 @@ func TestAddWorktreeFromBaseWithEnvironmentCleansUpFailedCheckout(t *testing.T) 
 	assert.NotContains(t, worktrees, path)
 }
 
+func TestConfiguredFilterDriversPreservesSubsectionCase(t *testing.T) {
+	config := "filter.MixedCase.smudge\ncommand\x00filter.MixedCase.required\ntrue\x00core.bare\nfalse\x00"
+
+	assert.Equal(t, []string{"MixedCase"}, configuredFilterDrivers(config))
+}
+
 func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	repo := NewTestRepository(t)
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
@@ -295,10 +301,14 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Less(t, time.Since(started), 8*time.Second)
-	assert.NoDirExists(t, path)
+	var partial *PartialWorktreeCreationError
+	require.ErrorAs(t, err, &partial)
+	assert.Equal(t, path, partial.Path)
+	assert.Equal(t, branch, partial.Branch)
+	assert.DirExists(t, path, "a dirty partial checkout must be preserved for manual cleanup")
 	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	cmd.Dir = repo.Path
-	assert.Error(t, cmd.Run(), "canceled checkout must not leave its newly created branch; add error: %v; worktrees: %s",
+	assert.NoError(t, cmd.Run(), "the branch for a preserved dirty checkout must remain; add error: %v; worktrees: %s",
 		err, gitOutput(t, repo.Path, "worktree", "list", "--porcelain"))
 }
 
