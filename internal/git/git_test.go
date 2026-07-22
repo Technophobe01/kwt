@@ -283,11 +283,13 @@ func TestConfiguredFilterDriversPreservesSubsectionCase(t *testing.T) {
 func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	repo := NewTestRepository(t)
 	filterStarted := filepath.Join(t.TempDir(), "filter-started")
+	filterRelease := filepath.Join(t.TempDir(), "filter-release")
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", fmt.Sprintf(
-		"printf started > \"%s\"; sleep 10; cat", filepath.ToSlash(filterStarted),
+		"printf started > \"%s\"; while [ ! -f \"%s\" ]; do sleep 0.05; done; cat",
+		filepath.ToSlash(filterStarted), filepath.ToSlash(filterRelease),
 	))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
 	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
@@ -309,6 +311,7 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 	cancel()
+	require.NoError(t, os.WriteFile(filterRelease, []byte("release\n"), 0o644))
 	err := <-errCh
 
 	require.Error(t, err)
