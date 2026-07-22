@@ -288,7 +288,7 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", fmt.Sprintf(
-		"printf started > \"%s\"; while [ ! -f \"%s\" ]; do sleep 0.05; done; cat",
+		"printf started > \"%s\"; printf dirty > partial-marker.txt; while [ ! -f \"%s\" ]; do sleep 0.05; done; cat",
 		filepath.ToSlash(filterStarted), filepath.ToSlash(filterRelease),
 	))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
