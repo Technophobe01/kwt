@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	managedworktree "go.kenn.io/kit/git/managed"
 	"go.kenn.io/kwt/internal/template"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
@@ -23,8 +24,7 @@ type GitInterface interface {
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
 	AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
-	AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) (func(context.Context) (string, string, error), error)
-	CheckoutWorktreeWithEnvironmentAndContext(ctx context.Context, path string, environment []string) error
+	CreateManagedWorktreeFromBaseWithEnvironment(ctx context.Context, path, branch, baseBranch string, environment []string, beforeCheckout func(context.Context, string) error) (managedworktree.CreateWorktreeResult, error)
 	RemoveWorktree(path string, force bool) error
 	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
 	DeleteBranch(branch string, force bool) error
@@ -107,13 +107,19 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 	}
 
 	var addErr error
+	var managedPath string
 	if opts.BeforeCheckout != nil {
-		var cleanup func(context.Context) (string, string, error)
-		cleanup, addErr = m.git.AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(
+		var created managedworktree.CreateWorktreeResult
+		created, addErr = m.git.CreateManagedWorktreeFromBaseWithEnvironment(
 			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
+			opts.BeforeCheckout,
 		)
-		if addErr == nil && cleanup != nil && opts.CaptureCleanup != nil {
-			opts.CaptureCleanup(cleanup)
+		managedPath = created.Path
+		if created.Path != "" && opts.CaptureCleanup != nil {
+			opts.CaptureCleanup(func(cleanupCtx context.Context) (string, string, error) {
+				remaining, cleanupErr := created.Rollback(cleanupCtx)
+				return remaining.Path, remaining.Branch, cleanupErr
+			})
 		}
 	} else if opts.SetupEnvironment != nil {
 		addErr = m.git.AddWorktreeFromBaseWithEnvironmentAndContext(
@@ -123,6 +129,9 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
 	}
 	if addErr != nil {
+		if managedPath != "" {
+			return path, addErr
+		}
 		var partial interface {
 			PartialWorktree() (string, string)
 		}
@@ -136,17 +145,6 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		}
 		return "", addErr
 	}
-	if opts.BeforeCheckout != nil {
-		if err := opts.BeforeCheckout(addOptionsContext(opts), path); err != nil {
-			return path, fmt.Errorf("pre-checkout validation failed: %w", err)
-		}
-		if err := m.git.CheckoutWorktreeWithEnvironmentAndContext(
-			addOptionsContext(opts), path, opts.SetupEnvironment,
-		); err != nil {
-			return path, err
-		}
-	}
-
 	if !opts.SkipSetup {
 		if opts.StrictSetup {
 			if setupErr := m.runPostWorktreeSetupStrict(addOptionsContext(opts), branch, path, opts.SetupEnvironment); setupErr != nil {

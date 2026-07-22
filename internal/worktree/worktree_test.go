@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	managedworktree "go.kenn.io/kit/git/managed"
 	configpkg "go.kenn.io/kwt/internal/config"
 	gitadapter "go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/pkg/models"
@@ -148,6 +149,23 @@ func (m *mockGit) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(_ conte
 		return nil, err
 	}
 	return func(context.Context) (string, string, error) { return "", "", nil }, nil
+}
+
+func (m *mockGit) CreateManagedWorktreeFromBaseWithEnvironment(
+	ctx context.Context,
+	path, branch, baseBranch string,
+	_ []string,
+	beforeCheckout func(context.Context, string) error,
+) (managedworktree.CreateWorktreeResult, error) {
+	if err := m.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
+		return managedworktree.CreateWorktreeResult{}, err
+	}
+	if beforeCheckout != nil {
+		if err := beforeCheckout(ctx, path); err != nil {
+			return managedworktree.CreateWorktreeResult{}, err
+		}
+	}
+	return managedworktree.CreateWorktreeResult{Path: path, Branch: branch, BranchCreated: true}, nil
 }
 
 func (m *mockGit) CheckoutWorktreeWithEnvironmentAndContext(_ context.Context, _ string, _ []string) error {

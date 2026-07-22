@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	gitcmd "go.kenn.io/kit/git/cmd"
+	managedworktree "go.kenn.io/kit/git/managed"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -221,6 +223,30 @@ func (g *Git) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string
 func (g *Git) AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
 	_, err := g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment, false)
 	return err
+}
+
+// CreateManagedWorktreeFromBaseWithEnvironment delegates the named worktree
+// lifecycle to kit's middleman-derived implementation.
+func (g *Git) CreateManagedWorktreeFromBaseWithEnvironment(
+	ctx context.Context,
+	path, branch, baseBranch string,
+	environment []string,
+	beforeCheckout func(context.Context, string) error,
+) (managedworktree.CreateWorktreeResult, error) {
+	runner := gitcmd.Runner{
+		Env:                         append([]string(nil), environment...),
+		TerminalPrompt:              false,
+		DisableSafeDirectoryForward: true,
+	}
+	return managedworktree.CreateWorktreeOnDisk(ctx, managedworktree.CreateWorktreeOptions{
+		ProjectRoot:      g.workDir,
+		Path:             path,
+		Branch:           branch,
+		BaseRef:          baseBranch,
+		Runner:           runner,
+		IsolatedCheckout: true,
+		BeforeCheckout:   beforeCheckout,
+	})
 }
 
 // AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext prepares a linked
