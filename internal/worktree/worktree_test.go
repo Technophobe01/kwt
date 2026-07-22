@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -130,6 +131,10 @@ func (m *mockGit) AddWorktreeFromBase(path, branch, baseBranch string) error {
 }
 
 func (m *mockGit) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, _ []string) error {
+	return m.AddWorktreeFromBase(path, branch, baseBranch)
+}
+
+func (m *mockGit) AddWorktreeFromBaseWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) error {
 	return m.AddWorktreeFromBase(path, branch, baseBranch)
 }
 

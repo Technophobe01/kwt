@@ -156,16 +156,23 @@ func (g *Git) refExists(ref string) bool {
 
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
 func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
-	return g.addWorktreeFromBase(path, branch, baseBranch, nil)
+	return g.addWorktreeFromBase(context.Background(), path, branch, baseBranch, nil)
 }
 
 // AddWorktreeFromBaseWithEnvironment creates a worktree with an explicit
 // checkout environment and a trusted empty hooks directory.
 func (g *Git) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error {
-	return g.addWorktreeFromBase(path, branch, baseBranch, environment)
+	return g.AddWorktreeFromBaseWithEnvironmentAndContext(context.Background(), path, branch, baseBranch, environment)
 }
 
-func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment []string) error {
+// AddWorktreeFromBaseWithEnvironmentAndContext creates a worktree with an
+// explicit checkout environment while allowing request cancellation to stop
+// filters and checkout work.
+func (g *Git) AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error {
+	return g.addWorktreeFromBase(ctx, path, branch, baseBranch, environment)
+}
+
+func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch string, environment []string) error {
 	args := []string{"worktree", "add", "-b", branch, path}
 
 	if baseBranch != "" {
@@ -173,7 +180,7 @@ func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment [
 	}
 
 	if environment == nil {
-		if _, err := g.run(args...); err != nil {
+		if _, err := g.RunWithContext(ctx, args...); err != nil {
 			return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 		}
 		return nil
@@ -181,27 +188,30 @@ func (g *Git) addWorktreeFromBase(path, branch, baseBranch string, environment [
 	branchExisted := g.refExists("refs/heads/" + branch)
 	_, pathStatErr := os.Lstat(path)
 	pathExisted := !os.IsNotExist(pathStatErr)
-	if _, err := g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, args...); err != nil {
+	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, args...); err != nil {
 		addErr := fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
-		cleanupErr := g.cleanupFailedWorktreeAdd(path, branch, pathExisted, branchExisted, environment)
+		cleanupErr := g.cleanupFailedWorktreeAdd(context.WithoutCancel(ctx), path, branch, pathExisted, branchExisted, environment)
 		return errors.Join(addErr, cleanupErr)
 	}
 
 	return nil
 }
 
-func (g *Git) cleanupFailedWorktreeAdd(path, branch string, pathExisted, branchExisted bool, environment []string) error {
+func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, path, branch string, pathExisted, branchExisted bool, environment []string) error {
 	if !pathExisted {
-		if registered, _ := g.worktreeRegisteredWithEnvironment(path, environment); registered {
+		if registered, _ := g.worktreeRegisteredWithEnvironment(ctx, path, environment); registered {
 			_ = g.RemoveWorktreeWithEnvironment(path, true, environment)
 		}
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("clean failed worktree directory: %w", err)
 		}
-		_, _ = g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, "worktree", "prune", "--expire", "now")
+		_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "prune", "--expire", "now")
 	}
 	if !branchExisted && g.refExists("refs/heads/"+branch) {
 		_ = g.DeleteBranchWithEnvironment(branch, true, environment)
+		if g.refExists("refs/heads/" + branch) {
+			_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "update-ref", "-d", "refs/heads/"+branch)
+		}
 	}
 
 	var cleanupErrs []error
@@ -209,7 +219,7 @@ func (g *Git) cleanupFailedWorktreeAdd(path, branch string, pathExisted, branchE
 		if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree path still exists"))
 		}
-		if registered, err := g.worktreeRegisteredWithEnvironment(path, environment); err != nil {
+		if registered, err := g.worktreeRegisteredWithEnvironment(ctx, path, environment); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("verify failed worktree cleanup: %w", err))
 		} else if registered {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("failed worktree remains registered"))
@@ -221,8 +231,8 @@ func (g *Git) cleanupFailedWorktreeAdd(path, branch string, pathExisted, branchE
 	return errors.Join(cleanupErrs...)
 }
 
-func (g *Git) worktreeRegisteredWithEnvironment(path string, environment []string) (bool, error) {
-	output, err := g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, "worktree", "list", "--porcelain")
+func (g *Git) worktreeRegisteredWithEnvironment(ctx context.Context, path string, environment []string) (bool, error) {
+	output, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, err
 	}

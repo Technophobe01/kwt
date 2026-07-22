@@ -141,9 +141,15 @@ func remoteURLListHasEmbeddedCredentials(output string) bool {
 }
 
 func remoteURLHasEmbeddedCredentials(remoteURL string) bool {
+	if strings.ContainsAny(remoteURL, "?#") {
+		return true
+	}
 	if strings.Contains(remoteURL, "://") {
 		parsed, err := neturl.Parse(remoteURL)
-		if err == nil && parsed.User != nil {
+		if err != nil {
+			return true
+		}
+		if parsed.User != nil {
 			scheme := strings.ToLower(parsed.Scheme)
 			if scheme == "ssh" || scheme == "git+ssh" {
 				_, hasPassword := parsed.User.Password()
@@ -407,7 +413,7 @@ func (b *GitBackend) Create(ctx context.Context, branch, baseRef string) (Worksp
 		return Workspace{}, err
 	}
 	path, createErr := b.manager.AddFromBaseWithOptions(branch, baseRef, "", worktree.AddOptions{
-		StrictSetup: true, SetupEnvironment: b.setupEnvironment,
+		Context: ctx, StrictSetup: true, SetupEnvironment: b.setupEnvironment,
 	})
 	if createErr != nil && path == "" {
 		message := strings.ToLower(createErr.Error())

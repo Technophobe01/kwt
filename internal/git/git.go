@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	processutil "go.kenn.io/kwt/internal/process"
 )
 
 // Git provides Git command operations.
@@ -90,6 +92,7 @@ func (g *Git) runWithContext(ctx context.Context, nonInteractive bool, args ...s
 
 func (g *Git) runWithEnvironmentContext(ctx context.Context, environment []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	processutil.ConfigureCommandCancellation(cmd)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}

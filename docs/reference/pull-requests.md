@@ -39,7 +39,8 @@ a remote fetch or push URL. Use a Git credential helper or SSH agent instead;
 this keeps trusted setup commands and contributor-controlled lifecycle scripts
 from reading reusable credentials out of the linked worktree's shared config.
 Validation includes configured include files and checks Git's effective fetch
-and push URLs after `insteadOf` and `pushInsteadOf` rewriting.
+and push URLs after `insteadOf` and `pushInsteadOf` rewriting. Remote URLs with
+query strings or fragments are rejected, as are invalid scheme-based URLs.
 
 Import fetches also force the SSH implementation's noninteractive mode
 (OpenSSH batch mode or PuTTY/plink's equivalent) and disable askpass-style
@@ -272,11 +273,12 @@ worktree no longer exists. Existing imports require complete source provenance
 and have their push routing repaired before `already_imported` is returned. If
 an import fails after creating a workspace—including a configured file-copy or
 setup-command failure—kwt rolls it back even when the request context was
-canceled. A rollback failure
-is reported with the surviving workspace path for manual cleanup. If the PR's
-recorded source repository or branch changed while its imported workspace is
-still present, another import returns `import_conflict` instead of reusing
-stale push configuration.
+canceled. Request cancellation terminates checkout filters and setup-command
+process trees; cleanup then runs without the canceled context. A rollback
+failure is reported with the surviving workspace path for manual cleanup. If
+the PR's recorded source repository or branch changed while its imported
+workspace is still present, another import returns `import_conflict` instead
+of reusing stale push configuration.
 
 ## Failure contract
 

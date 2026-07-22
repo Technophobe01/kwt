@@ -3,9 +3,11 @@ package pullrequest
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +58,18 @@ func testPR(number int, fork bool) PullRequest {
 		State:   "open",
 		HeadSHA: "0123456789abcdef0123456789abcdef01234567",
 	}
+}
+
+func TestImportBranchNameTruncatesAtUTF8Boundary(t *testing.T) {
+	pr := testPR(42, false)
+	pr.Source.Name = "a" + strings.Repeat("é", 40)
+
+	branch := importBranchName(pr)
+	slug := strings.TrimPrefix(branch, "pr-42-")
+
+	assert.True(t, utf8.ValidString(branch))
+	assert.LessOrEqual(t, len(slug), 80)
+	assert.Equal(t, "a"+strings.Repeat("é", 39), slug)
 }
 
 type fakeProvider struct {

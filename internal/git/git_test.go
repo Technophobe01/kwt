@@ -273,6 +273,33 @@ func TestAddWorktreeFromBaseWithEnvironmentCleansUpFailedCheckout(t *testing.T) 
 	assert.NotContains(t, worktrees, path)
 }
 
+func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
+	repo := NewTestRepository(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
+	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
+	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", "exec sleep 3")
+	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
+	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
+	gitOutput(t, repo.Path, "commit", "-m", "Add slow checkout fixture")
+
+	path := filepath.Join(t.TempDir(), "canceled-worktree")
+	branch := "review/canceled-checkout"
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := New(repo.Path).AddWorktreeFromBaseWithEnvironmentAndContext(
+		ctx, path, branch, "main", NonInteractiveEnvironment(os.Environ()),
+	)
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(started), 2*time.Second)
+	assert.NoDirExists(t, path)
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repo.Path
+	assert.Error(t, cmd.Run(), "canceled checkout must not leave its newly created branch; add error: %v", err)
+}
+
 func TestListWorktrees(t *testing.T) {
 	repo := NewTestRepository(t)
 	g := New(repo.Path)

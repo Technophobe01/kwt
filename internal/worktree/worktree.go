@@ -2,6 +2,7 @@
 package worktree
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ type GitInterface interface {
 	AddWorktree(path, branch string, createBranch bool) error
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
+	AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
 	RemoveWorktree(path string, force bool) error
 	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
 	DeleteBranch(branch string, force bool) error
@@ -39,6 +41,7 @@ type Manager struct {
 
 // AddOptions controls optional behavior for creating a worktree.
 type AddOptions struct {
+	Context          context.Context
 	SkipSetup        bool
 	StrictSetup      bool
 	SetupEnvironment []string
@@ -70,7 +73,7 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 
 	if !opts.SkipSetup {
 		if opts.StrictSetup {
-			if setupErr := m.runPostWorktreeSetupStrict(branch, path, opts.SetupEnvironment); setupErr != nil {
+			if setupErr := m.runPostWorktreeSetupStrict(addOptionsContext(opts), branch, path, opts.SetupEnvironment); setupErr != nil {
 				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
 			}
 		} else {
@@ -96,7 +99,9 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 
 	var addErr error
 	if opts.SetupEnvironment != nil {
-		addErr = m.git.AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch, opts.SetupEnvironment)
+		addErr = m.git.AddWorktreeFromBaseWithEnvironmentAndContext(
+			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
+		)
 	} else {
 		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
 	}
@@ -106,7 +111,7 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 
 	if !opts.SkipSetup {
 		if opts.StrictSetup {
-			if setupErr := m.runPostWorktreeSetupStrict(branch, path, opts.SetupEnvironment); setupErr != nil {
+			if setupErr := m.runPostWorktreeSetupStrict(addOptionsContext(opts), branch, path, opts.SetupEnvironment); setupErr != nil {
 				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
 			}
 		} else {
@@ -114,6 +119,13 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		}
 	}
 	return path, nil
+}
+
+func addOptionsContext(opts AddOptions) context.Context {
+	if opts.Context != nil {
+		return opts.Context
+	}
+	return context.Background()
 }
 
 // Remove deletes a worktree.

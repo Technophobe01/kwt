@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type Provider interface {
@@ -318,7 +319,11 @@ func importBranchName(pr PullRequest) string {
 		slug = "head"
 	}
 	if len(slug) > 80 {
-		slug = strings.TrimRight(slug[:80], "-.")
+		end := 80
+		for end > 0 && !utf8.RuneStart(slug[end]) {
+			end--
+		}
+		slug = strings.TrimRight(slug[:end], "-.")
 	}
 	return fmt.Sprintf("pr-%d-%s", pr.Number, slug)
 }

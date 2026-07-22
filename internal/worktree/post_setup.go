@@ -24,8 +24,8 @@ func (m *Manager) runPostWorktreeSetupWithEnvironment(branch, worktreePath strin
 	_, _ = m.runPostWorktreeSetupDetailed(context.Background(), command.NewStandardExecutor(), branch, worktreePath, environment)
 }
 
-func (m *Manager) runPostWorktreeSetupStrict(branch, worktreePath string, environment []string) error {
-	_, err := m.runPostWorktreeSetupDetailed(context.Background(), command.NewStandardExecutor(), branch, worktreePath, environment)
+func (m *Manager) runPostWorktreeSetupStrict(ctx context.Context, branch, worktreePath string, environment []string) error {
+	_, err := m.runPostWorktreeSetupDetailed(ctx, command.NewStandardExecutor(), branch, worktreePath, environment)
 	return err
 }
 
