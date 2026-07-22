@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -81,37 +80,6 @@ func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory is not empty")
 	assert.Zero(t, calls)
-}
-
-func TestAddReportsCanceledSetupWithoutNameOnlyCleanup(t *testing.T) {
-	resetFleetCommandDeps(t)
-	resetAddCommandFlags(t)
-
-	repoPath := newTUITestRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "canceled-add")
-	initCommandTestConfig(t, t.TempDir())
-	viper.Set("repository_settings", []models.RepositorySetting{{
-		Repository:    repoPath,
-		SetupCommands: []string{"printf ran > setup-ran.txt"},
-	}})
-	t.Chdir(repoPath)
-	addBranch = true
-	addNoLaunch = true
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cmd, _, _ := fleetTestCommand()
-	cmd.SetContext(ctx)
-
-	err := runAdd(cmd, []string{"feature/canceled-add", worktreePath})
-
-	require.ErrorIs(t, err, context.Canceled)
-	assert.DirExists(t, worktreePath)
-	resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
-	require.NoError(t, resolveErr)
-	assert.ErrorContains(t, err, resolvedWorktreePath)
-	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-add")
-	branchCheck.Dir = repoPath
-	assert.NoError(t, branchCheck.Run(), "cancellation cleanup must not delete by branch name")
 }
 
 func TestShouldLaunch(t *testing.T) {

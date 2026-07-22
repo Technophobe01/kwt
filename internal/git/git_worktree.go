@@ -1,14 +1,11 @@
 package git
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	gitcmd "go.kenn.io/kit/git/cmd"
-	managedworktree "go.kenn.io/kit/git/managed"
 	gitworktree "go.kenn.io/kit/git/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -128,27 +125,6 @@ func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
 		return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 	}
 	return nil
-}
-
-// CreateManagedWorktreeFromBaseWithEnvironment delegates isolated creation,
-// checkout, and ownership-aware rollback to kit's shared lifecycle.
-func (g *Git) CreateManagedWorktreeFromBaseWithEnvironment(
-	ctx context.Context,
-	path, branch, baseBranch string,
-	environment []string,
-	beforeCheckout func(context.Context, string) error,
-) (managedworktree.CreateWorktreeResult, error) {
-	runner := gitcmd.New()
-	runner.Env = append([]string(nil), environment...)
-	runner.DisableSafeDirectoryForward = true
-	return managedworktree.CreateWorktreeOnDisk(
-		ctx,
-		managedworktree.CreateWorktreeOptions{
-			ProjectRoot: g.workDir, Path: path, Branch: branch,
-			BaseRef: baseBranch, Runner: runner, IsolatedCheckout: true,
-			BeforeCheckout: beforeCheckout,
-		},
-	)
 }
 
 // RemoveWorktree removes a worktree.

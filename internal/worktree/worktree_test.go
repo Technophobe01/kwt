@@ -1,7 +1,6 @@
 package worktree
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,9 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	managedworktree "go.kenn.io/kit/git/managed"
 	configpkg "go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -28,8 +24,6 @@ type mockGit struct {
 	listError         error
 	pruneError        error
 	deleteBranchError error
-	removedWorktrees  []string
-	deletedBranches   []string
 	recentCommits     []models.CommitInfo
 	mainRepoPathError error
 }
@@ -45,9 +39,6 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 	if m.addError != nil {
 		return m.addError
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return err
-	}
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
@@ -56,7 +47,6 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 }
 
 func (m *mockGit) RemoveWorktree(path string, force bool) error {
-	m.removedWorktrees = append(m.removedWorktrees, path)
 	if m.removeError != nil {
 		return m.removeError
 	}
@@ -96,7 +86,6 @@ func (m *mockGit) GetRepositoryURL() (string, error) {
 }
 
 func (m *mockGit) DeleteBranch(branch string, force bool) error {
-	m.deletedBranches = append(m.deletedBranches, branch)
 	if m.deleteBranchError != nil {
 		return m.deleteBranchError
 	}
@@ -117,31 +106,11 @@ func (m *mockGit) AddWorktreeFromBase(path, branch, baseBranch string) error {
 	if m.addError != nil {
 		return m.addError
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return err
-	}
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
 	})
 	return nil
-}
-
-func (m *mockGit) CreateManagedWorktreeFromBaseWithEnvironment(
-	ctx context.Context,
-	path, branch, baseBranch string,
-	_ []string,
-	beforeCheckout func(context.Context, string) error,
-) (managedworktree.CreateWorktreeResult, error) {
-	if err := m.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
-		return managedworktree.CreateWorktreeResult{}, err
-	}
-	if beforeCheckout != nil {
-		if err := beforeCheckout(ctx, path); err != nil {
-			return managedworktree.CreateWorktreeResult{}, err
-		}
-	}
-	return managedworktree.CreateWorktreeResult{Path: path, Branch: branch, BranchCreated: true}, nil
 }
 
 func TestManagerAdd(t *testing.T) {
@@ -214,83 +183,6 @@ func TestManagerAdd(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		setting models.RepositorySetting
-	}{
-		{name: "setup command", setting: models.RepositorySetting{SetupCommands: []string{"exit 17"}}},
-		{name: "file copy", setting: models.RepositorySetting{CopyFiles: []string{"["}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			repoPath := t.TempDir()
-			git := &mockGit{repoPath: repoPath}
-			tc.setting.Repository = repoPath
-			manager := New(git, &models.Config{
-				Worktree:           models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
-				RepositorySettings: []models.RepositorySetting{tc.setting},
-			})
-
-			path, err := manager.AddFromBaseWithOptions(
-				"strict-setup", "HEAD", filepath.Join(t.TempDir(), "worktree"),
-				AddOptions{StrictSetup: true},
-			)
-
-			require.Error(t, err)
-			assert.NotEmpty(t, path, "caller needs the created path for rollback")
-			assert.DirExists(t, path)
-		})
-	}
-}
-
-func TestManagerNonStrictSetupReportsCanceledAddWithoutDeleting(t *testing.T) {
-	for _, createBranch := range []bool{false, true} {
-		t.Run(map[bool]string{false: "existing branch", true: "created branch"}[createBranch], func(t *testing.T) {
-			repoPath, err := filepath.EvalSymlinks(t.TempDir())
-			require.NoError(t, err)
-			worktreePath := filepath.Join(t.TempDir(), "canceled-setup")
-			git := &mockGit{repoPath: repoPath}
-			manager := New(git, &models.Config{
-				Worktree: models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
-				RepositorySettings: []models.RepositorySetting{{
-					Repository: repoPath, SetupCommands: []string{"printf ran > setup-ran.txt"},
-				}},
-			})
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-
-			path, err := manager.AddWithOptions("canceled-setup", worktreePath, createBranch, AddOptions{Context: ctx})
-
-			require.ErrorIs(t, err, context.Canceled)
-			assert.NotEmpty(t, path, "the surviving worktree must be reported")
-			assert.ErrorContains(t, err, path)
-			resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
-			require.NoError(t, resolveErr)
-			assert.Equal(t, resolvedWorktreePath, path)
-			assert.Empty(t, git.removedWorktrees)
-			assert.Empty(t, git.deletedBranches)
-			assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
-		})
-	}
-}
-
-func TestManagerReturnsCanonicalGeneratedPathThroughSymlinkedBase(t *testing.T) {
-	realBase := t.TempDir()
-	resolvedRealBase, err := filepath.EvalSymlinks(realBase)
-	require.NoError(t, err)
-	linkedBase := filepath.Join(t.TempDir(), "linked-base")
-	require.NoError(t, os.Symlink(realBase, linkedBase))
-	git := &mockGit{repoPath: t.TempDir()}
-	manager := New(git, &models.Config{
-		Worktree: models.WorktreeConfig{BaseDir: linkedBase, AutoMkdir: true},
-	})
-
-	path, err := manager.AddFromBase("feature/canonical", "HEAD", "")
-
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(path, resolvedRealBase+string(filepath.Separator)), path)
 }
 
 func TestManagerRemove(t *testing.T) {
@@ -910,11 +802,7 @@ func TestManagerAddGeneratesPathForLocalOnlyRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
-	canonicalBaseDir, err := filepath.EvalSymlinks(baseDir)
-	if err != nil {
-		t.Fatalf("failed to canonicalize base directory: %v", err)
-	}
-	want := filepath.Join(canonicalBaseDir, localRepositoryFullPath(repoPath), "feature-local")
+	want := filepath.Join(baseDir, localRepositoryFullPath(repoPath), "feature-local")
 	if path != want {
 		t.Fatalf("Add() path = %s, want %s", path, want)
 	}

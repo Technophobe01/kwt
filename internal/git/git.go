@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	processutil "go.kenn.io/kwt/internal/process"
 )
 
 // Git provides Git command operations.
@@ -41,7 +39,7 @@ func (g *Git) RunCommand(args ...string) (string, error) {
 
 // RunWithContext executes a git command with context support for cancellation and timeout.
 func (g *Git) RunWithContext(ctx context.Context, args ...string) (string, error) {
-	return g.runWithEnvironmentContext(ctx, nil, args...)
+	return g.runWithContext(ctx, args...)
 }
 
 // run executes a git command.
@@ -62,14 +60,11 @@ func (g *Git) run(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-func (g *Git) runWithEnvironmentContext(ctx context.Context, environment []string, args ...string) (string, error) {
+// runWithContext executes a git command with context support.
+func (g *Git) runWithContext(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	processutil.ConfigureCommandCancellation(cmd)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
-	}
-	if environment != nil {
-		cmd.Env = environment
 	}
 
 	var stdout, stderr bytes.Buffer

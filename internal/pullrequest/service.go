@@ -2,7 +2,6 @@ package pullrequest
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -20,13 +19,8 @@ type Provider interface {
 }
 
 type WorkspaceBackend interface {
-	ValidateImport(context.Context) error
 	ListWorkspaces(context.Context) ([]Workspace, error)
-	BranchExists(context.Context, string) (bool, error)
-	EnsureRemote(context.Context, Repository) (string, error)
-	Fetch(context.Context, string, string, string, string) (string, error)
-	Create(context.Context, string, string) (Workspace, error)
-	ConfigurePush(context.Context, Workspace, string, string, string) error
+	ImportPullRequest(context.Context, PullRequest, string) (Workspace, error)
 	Rollback(context.Context, Workspace) error
 }
 
@@ -96,9 +90,6 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	if err != nil {
 		return result, err
 	}
-	if err := s.backend.ValidateImport(ctx); err != nil {
-		return result, err
-	}
 	pr, err := s.provider.Get(ctx, repository, number)
 	if err != nil {
 		return result, err
@@ -139,15 +130,6 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 					return NewError(CodeConflict,
 						"pull-request source repository or branch changed after import", false, nil)
 				}
-				remote, remoteErr := s.backend.EnsureRemote(ctx, pr.Source.Repository)
-				if remoteErr != nil {
-					return AsError(remoteErr, CodeWorkspaceCreation,
-						"failed to validate the existing import's Git remote")
-				}
-				if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Repository.Identity, pr.Source.Name); configErr != nil {
-					return NewError(CodeWorkspaceCreation,
-						"failed to repair the existing import's push configuration", false, configErr)
-				}
 				if recordKey != pr.ID {
 					delete(records, recordKey)
 				}
@@ -168,37 +150,21 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 			}
 		}
 
-		exists, branchErr := s.backend.BranchExists(ctx, branch)
-		if branchErr != nil {
-			return NewError(CodeWorkspaceCreation, "failed to validate import branch", false, branchErr)
-		}
-		if exists {
-			return NewError(CodeNamingConflict, fmt.Sprintf("branch %q already exists", branch), false, nil)
-		}
-
-		remote, remoteErr := s.backend.EnsureRemote(ctx, pr.Source.Repository)
-		if remoteErr != nil {
-			return AsError(remoteErr, CodeWorkspaceCreation, "failed to configure the pull-request Git remote")
-		}
-		fetchRef := pullRequestFetchRef(pr)
-		_, fetchErr := s.backend.Fetch(ctx, remote, "refs/heads/"+pr.Source.Name, fetchRef, pr.HeadSHA)
-		if fetchErr != nil {
-			return AsError(fetchErr, CodeInaccessibleHead, "failed to fetch the pull-request head")
-		}
-
-		workspace, createErr := s.backend.Create(ctx, branch, fetchRef)
+		workspace, createErr := s.backend.ImportPullRequest(ctx, pr, branch)
 		if createErr != nil {
 			if workspace.Path != "" || workspace.Branch != "" {
-				created = &workspace
-				cleanupReason = "workspace created but setup failed"
+				return NewError(
+					CodeWorkspaceCreation,
+					fmt.Sprintf(
+						"pull-request lifecycle preserved path %q and branch %q; manual cleanup is required",
+						workspace.Path, workspace.Branch,
+					),
+					false, createErr,
+				)
 			}
 			return AsError(createErr, CodeWorkspaceCreation, "failed to create pull-request workspace")
 		}
 		created = &workspace
-		if configErr := s.backend.ConfigurePush(ctx, workspace, remote, pr.Source.Repository.Identity, pr.Source.Name); configErr != nil {
-			cleanupReason = "workspace created but push configuration failed"
-			return NewError(CodeWorkspaceCreation, cleanupReason, false, configErr)
-		}
 
 		newRecord := Provenance{
 			PullRequestID: pr.ID, Provider: pr.Provider, Repository: pr.Repository.Identity,
@@ -224,11 +190,6 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		return ImportResult{}, AsError(err, CodeWorkspaceCreation, "pull-request import failed")
 	}
 	return result, err
-}
-
-func pullRequestFetchRef(pr PullRequest) string {
-	repositoryHash := sha256.Sum256([]byte(NormalizeRepositoryIdentity(pr.Repository.Identity)))
-	return fmt.Sprintf("refs/kwt/pull-requests/repository-%x/%d", repositoryHash, pr.Number)
 }
 
 func findProvenance(records map[string]Provenance, pr PullRequest) (string, Provenance, bool) {

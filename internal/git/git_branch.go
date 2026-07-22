@@ -73,8 +73,7 @@ func (g *Git) DeleteBranch(branch string, force bool) error {
 	}
 	args = append(args, branch)
 
-	_, err := g.run(args...)
-	if err != nil {
+	if _, err := g.run(args...); err != nil {
 		return fmt.Errorf("failed to delete branch %s: %w", branch, err)
 	}
 

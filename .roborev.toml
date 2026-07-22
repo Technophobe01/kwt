@@ -37,22 +37,18 @@ Threat model for pull-request discovery and import:
   fetched PR checkout are contributor-controlled and untrusted. API
   authentication proves the kwt user's access; it does not make a PR trusted.
   Apply this equally to same-repository and fork PRs.
-- Import is an explicit mutation initiated by the local user. Global config
-  and a target project's previously trust-approved `.kwt.toml` express that
-  user's workspace policy. In particular, configured `copy_files` and
-  `setup_commands` are a persistent opt-in for normal worktree creation,
-  including selected PR worktrees. Do not report the mere fact that a
-  user-authored setup command can invoke code from the checkout as a new
-  arbitrary-code-execution vulnerability. Do flag paths where PR content can
-  define or change the hook without the target-config trust decision, where a
-  hook runs without an explicit import, or where behavior exceeds the
-  documented workspace policy.
-- Trust in the hook definition does not grant PR contents access to kwt-owned
-  secrets. `KWT_GITHUB_TOKEN`, fleet bearer tokens and token-file locations,
-  and credential-bearing remote URLs remain sensitive. Flag persistence,
-  output, transmission, or unnecessary environment inheritance that exposes
-  them to contributor-controlled processes. Ordinary developer credentials
-  and environment outside kwt's own token/config surfaces remain the user's
+- Import is an explicit mutation initiated by the local user, but PR imports
+  do not run repository `copy_files` or `setup_commands`. Git remote handling,
+  fetch, isolated checkout, push routing, and ownership-aware rollback are one
+  operation delegated to `go.kenn.io/kit/git/managed`; do not require a second
+  KWT-local implementation of those mechanics. Review the KWT adapter for
+  correct trusted project identity, provider head metadata, exact expected
+  OID, destination path, error mapping, and preservation reporting.
+- `KWT_GITHUB_TOKEN`, fleet bearer tokens and token-file locations, and
+  credential-bearing remote URLs remain sensitive. Flag persistence, output,
+  transmission, or unnecessary environment inheritance that exposes them to
+  contributor-controlled processes. Ordinary developer credentials and
+  environment outside kwt's own token/config surfaces remain the user's
   responsibility under the local-execution model above.
 - Cross-project and SSH invocation must resolve configuration from the
   selected target project, never from the caller's current repository. In

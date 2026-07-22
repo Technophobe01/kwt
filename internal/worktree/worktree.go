@@ -2,15 +2,12 @@
 package worktree
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	managedworktree "go.kenn.io/kit/git/managed"
 	"go.kenn.io/kwt/internal/template"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
@@ -22,7 +19,6 @@ type GitInterface interface {
 	ListWorktrees() ([]models.Worktree, error)
 	AddWorktree(path, branch string, createBranch bool) error
 	AddWorktreeFromBase(path, branch, baseBranch string) error
-	CreateManagedWorktreeFromBaseWithEnvironment(ctx context.Context, path, branch, baseBranch string, environment []string, beforeCheckout func(context.Context, string) error) (managedworktree.CreateWorktreeResult, error)
 	RemoveWorktree(path string, force bool) error
 	DeleteBranch(branch string, force bool) error
 	PruneWorktrees() error
@@ -40,12 +36,7 @@ type Manager struct {
 
 // AddOptions controls optional behavior for creating a worktree.
 type AddOptions struct {
-	Context          context.Context
-	BeforeCheckout   func(context.Context, string) error
-	CaptureCleanup   func(func(context.Context) (string, string, error))
-	SkipSetup        bool
-	StrictSetup      bool
-	SetupEnvironment []string
+	SkipSetup bool
 }
 
 // New creates a new worktree Manager.
@@ -73,17 +64,7 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 	}
 
 	if !opts.SkipSetup {
-		if opts.StrictSetup {
-			if setupErr := m.runPostWorktreeSetupStrict(addOptionsContext(opts), branch, path, opts.SetupEnvironment); setupErr != nil {
-				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
-			}
-		} else {
-			setupCtx := addOptionsContext(opts)
-			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, nil)
-			if err := setupCtx.Err(); err != nil {
-				return path, canceledAddError(err, path, branch, createBranch)
-			}
-		}
+		m.runPostWorktreeSetup(branch, path)
 	}
 	return path, nil
 }
@@ -91,81 +72,17 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 // AddFromBase creates a new worktree with a branch from a specific base branch
 // and returns the path of the created worktree.
 func (m *Manager) AddFromBase(branch string, baseBranch string, customPath string) (string, error) {
-	return m.AddFromBaseWithOptions(branch, baseBranch, customPath, AddOptions{})
-}
-
-// AddFromBaseWithOptions creates a worktree from a base ref while applying
-// the same setup path and caller-selected setup environment as ordinary adds.
-func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, customPath string, opts AddOptions) (string, error) {
 	path, err := m.preparePath(customPath, branch)
 	if err != nil {
 		return "", err
 	}
 
-	var addErr error
-	var managedPath string
-	if opts.BeforeCheckout != nil {
-		var created managedworktree.CreateWorktreeResult
-		created, addErr = m.git.CreateManagedWorktreeFromBaseWithEnvironment(
-			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
-			opts.BeforeCheckout,
-		)
-		managedPath = created.Path
-		if created.Path != "" && opts.CaptureCleanup != nil {
-			opts.CaptureCleanup(func(cleanupCtx context.Context) (string, string, error) {
-				remaining, cleanupErr := created.Rollback(cleanupCtx)
-				return remaining.Path, remaining.Branch, cleanupErr
-			})
-		}
-	} else {
-		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
+	if err := m.git.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
+		return "", err
 	}
-	if addErr != nil {
-		if managedPath != "" {
-			return path, addErr
-		}
-		var partial interface {
-			PartialWorktree() (string, string)
-		}
-		if errors.As(addErr, &partial) {
-			partialPath, partialBranch := partial.PartialWorktree()
-			pathRemains := partialPath != "" && partialPath == path
-			branchRemains := partialBranch != "" && partialBranch == branch
-			if pathRemains || branchRemains {
-				return path, addErr
-			}
-		}
-		return "", addErr
-	}
-	if !opts.SkipSetup {
-		if opts.StrictSetup {
-			if setupErr := m.runPostWorktreeSetupStrict(addOptionsContext(opts), branch, path, opts.SetupEnvironment); setupErr != nil {
-				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
-			}
-		} else {
-			setupCtx := addOptionsContext(opts)
-			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, opts.SetupEnvironment)
-			if err := setupCtx.Err(); err != nil {
-				return path, canceledAddError(err, path, branch, true)
-			}
-		}
-	}
+
+	m.runPostWorktreeSetup(branch, path)
 	return path, nil
-}
-
-func canceledAddError(cancelErr error, path, branch string, createdBranch bool) error {
-	message := fmt.Sprintf("canceled add left worktree at %s", path)
-	if createdBranch {
-		message += fmt.Sprintf(" and created branch %q", branch)
-	}
-	return fmt.Errorf("%w: %s; manual cleanup is required", cancelErr, message)
-}
-
-func addOptionsContext(opts AddOptions) context.Context {
-	if opts.Context != nil {
-		return opts.Context
-	}
-	return context.Background()
 }
 
 // Remove deletes a worktree.
@@ -175,32 +92,20 @@ func (m *Manager) Remove(path string, force bool) error {
 
 // RemoveWithBranch deletes a worktree and optionally its branch.
 func (m *Manager) RemoveWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool) error {
-	var removeErr error
-	removeWorktree := path != ""
-	if removeWorktree {
-		_, statErr := os.Lstat(path)
-		if os.IsNotExist(statErr) {
-			if worktrees, listErr := m.git.ListWorktrees(); listErr == nil {
-				removeWorktree = false
-				canonicalPath := utils.CanonicalPath(path)
-				for _, candidate := range worktrees {
-					if utils.CanonicalPath(candidate.Path) == canonicalPath {
-						removeWorktree = true
-						break
-					}
-				}
-			}
-		}
-	}
-	if removeWorktree {
-		removeErr = m.git.RemoveWorktree(path, forceWorktree)
+	// First remove the worktree
+	if err := m.git.RemoveWorktree(path, forceWorktree); err != nil {
+		return err
 	}
 
-	var deleteErr error
+	// Then delete the branch if requested
 	if deleteBranch && branch != "" {
-		deleteErr = m.git.DeleteBranch(branch, forceBranch)
+		if err := m.git.DeleteBranch(branch, forceBranch); err != nil {
+			// Return error but worktree is already removed
+			return fmt.Errorf("worktree removed but failed to delete branch: %w", err)
+		}
 	}
-	return errors.Join(removeErr, deleteErr)
+
+	return nil
 }
 
 // List returns all worktrees.
@@ -272,6 +177,13 @@ func (m *Manager) ValidateWorktreePath(path string) error {
 	return nil
 }
 
+// PreparePath applies KWT's configured naming and destination policy without
+// creating a worktree. Callers can then hand the resolved path to a shared
+// lifecycle implementation.
+func (m *Manager) PreparePath(customPath, branch string) (string, error) {
+	return m.preparePath(customPath, branch)
+}
+
 // preparePath resolves and prepares the worktree path, creating parent directories if needed.
 func (m *Manager) preparePath(customPath, branch string) (string, error) {
 	path := customPath
@@ -295,7 +207,6 @@ func (m *Manager) preparePath(customPath, branch string) (string, error) {
 			return "", fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
-	path = filepath.Join(utils.CanonicalPath(filepath.Dir(path)), filepath.Base(path))
 
 	return path, nil
 }
@@ -345,7 +256,7 @@ func (m *Manager) generateWorktreePath(branch string) (string, error) {
 }
 
 func (m *Manager) repositoryInfo() (*url.RepositoryInfo, error) {
-	return RepositoryInfoWithProjects(m.git, m.config.Projects)
+	return RepositoryInfoFromGit(m.git)
 }
 
 // RepoIdentityGit is the minimal git surface RepositoryInfoFromGit needs: the

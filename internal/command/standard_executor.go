@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-
-	processutil "go.kenn.io/kwt/internal/process"
 )
 
 // StandardExecutor implements CommandExecutor using os/exec
@@ -18,21 +16,15 @@ func NewStandardExecutor() *StandardExecutor {
 	return &StandardExecutor{}
 }
 
-func newCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
-	processutil.ConfigureCommandCancellation(cmd)
-	return cmd
-}
-
 // Execute runs a command and returns error only
 func (e *StandardExecutor) Execute(ctx context.Context, name string, args ...string) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.Run()
 }
 
 // ExecuteWithOutput runs a command and returns output and error
 func (e *StandardExecutor) ExecuteWithOutput(ctx context.Context, name string, args ...string) (string, error) {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -46,14 +38,14 @@ func (e *StandardExecutor) ExecuteWithOutput(ctx context.Context, name string, a
 
 // ExecuteInDir runs a command in a specific directory
 func (e *StandardExecutor) ExecuteInDir(ctx context.Context, dir, name string, args ...string) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	return cmd.Run()
 }
 
 // ExecuteInDirWithOutput runs a command in a specific directory and returns output
 func (e *StandardExecutor) ExecuteInDirWithOutput(ctx context.Context, dir, name string, args ...string) (string, error) {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -68,7 +60,7 @@ func (e *StandardExecutor) ExecuteInDirWithOutput(ctx context.Context, dir, name
 
 // ExecuteWithStreams runs a command with custom input/output streams
 func (e *StandardExecutor) ExecuteWithStreams(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -77,14 +69,14 @@ func (e *StandardExecutor) ExecuteWithStreams(ctx context.Context, stdin io.Read
 
 // ExecuteWithEnv runs a command with custom environment variables
 func (e *StandardExecutor) ExecuteWithEnv(ctx context.Context, env []string, name string, args ...string) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
 	return cmd.Run()
 }
 
 // ExecuteWithEnvInDir runs a command with custom environment and directory
 func (e *StandardExecutor) ExecuteWithEnvInDir(ctx context.Context, env []string, dir, name string, args ...string) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
 	cmd.Dir = dir
 	return cmd.Run()
@@ -118,14 +110,14 @@ func applyOptions(cmd *exec.Cmd, opts *CommandOptions, captureOutput bool) {
 
 // ExecuteWithOptions runs a command with comprehensive options
 func (e *StandardExecutor) ExecuteWithOptions(ctx context.Context, name string, args []string, opts *CommandOptions) error {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	applyOptions(cmd, opts, false)
 	return cmd.Run()
 }
 
 // ExecuteWithOptionsAndOutput runs a command with options and returns output
 func (e *StandardExecutor) ExecuteWithOptionsAndOutput(ctx context.Context, name string, args []string, opts *CommandOptions) (string, error) {
-	cmd := newCommand(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

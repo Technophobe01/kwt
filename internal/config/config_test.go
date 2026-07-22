@@ -211,27 +211,6 @@ store_path = "~/kwt/fleet/state.json"
 	assert.Equal(t, filepath.Join(home, "kwt", "fleet", "state.json"), cfg.Fleet.Hub.StorePath)
 }
 
-func TestLoadFleetConfigTracksTokenFileEnvironmentReferences(t *testing.T) {
-	viper.Reset()
-	t.Cleanup(func() { viper.Reset() })
-	tokenDir := t.TempDir()
-	t.Setenv("KWT_FLEET_TOKEN_DIR", tokenDir)
-	viper.SetConfigType("toml")
-	require.NoError(t, viper.ReadConfig(strings.NewReader(`
-[worktree]
-basedir = "/tmp/worktrees"
-
-[fleet]
-token_file = "$KWT_FLEET_TOKEN_DIR/fleet.token"
-`)))
-
-	cfg, err := Load()
-
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(tokenDir, "fleet.token"), cfg.Fleet.TokenFile)
-	assert.Equal(t, []string{"KWT_FLEET_TOKEN_DIR"}, cfg.Fleet.TokenFileEnvironment)
-}
-
 func TestGetConfigDir(t *testing.T) {
 	t.Setenv("KWT_HOME", "")
 

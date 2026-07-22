@@ -1482,33 +1482,6 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	assert.Equal(t, 1, published)
 }
 
-func TestTUIBackendCreateWorktreeReportsCanceledSetupWithoutNameOnlyCleanup(t *testing.T) {
-	repoPath := newTUITestRepo(t)
-	cfg := &models.Config{
-		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
-		Naming:   models.NamingConfig{Template: "{{.Branch}}"},
-		RepositorySettings: []models.RepositorySetting{{
-			Repository:    repoPath,
-			SetupCommands: []string{"printf ran > setup-ran.txt"},
-		}},
-	}
-	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{Branch: "main", Path: repoPath}}
-	backend := newTUIBackendWithLaunchDir(cfg, "")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	path, err := backend.CreateWorktree(ctx, row, "feature/canceled-tui-add")
-
-	require.ErrorIs(t, err, context.Canceled)
-	assert.NotEmpty(t, path)
-	assert.ErrorContains(t, err, path)
-	worktrees := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
-	assert.Contains(t, worktrees, "feature/canceled-tui-add")
-	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-tui-add")
-	branchCheck.Dir = repoPath
-	assert.NoError(t, branchCheck.Run(), "cancellation cleanup must not delete by branch name")
-}
-
 func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {
 	resetFleetCommandDeps(t)
 	t.Setenv("HOME", t.TempDir())
@@ -1657,9 +1630,7 @@ func TestTUIBackendMaterializeWorktreeUsesRegisteredProjectRoot(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.DirExists(t, path)
-	canonicalBaseDir, err := filepath.EvalSymlinks(baseDir)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(path, canonicalBaseDir), path)
+	assert.True(t, strings.HasPrefix(path, baseDir), path)
 	branch := strings.TrimSpace(runTUITestGitOutput(t, path, "branch", "--show-current"))
 	assert.Equal(t, "feature/studio-only", branch)
 }

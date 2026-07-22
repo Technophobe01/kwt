@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	managedworktree "go.kenn.io/kit/git/managed"
 )
 
 func testProject() Project {
@@ -86,21 +87,6 @@ func TestImportBranchNamePreservesCaseNeededForValidRef(t *testing.T) {
 	require.NoError(t, cmd.Run(), "generated branch %q must be a valid Git ref", branch)
 }
 
-func TestPullRequestFetchRefIsValidForRepositoryNamesInvalidInRefs(t *testing.T) {
-	for _, identity := range []string{
-		"github.com/.github/widget",
-		"github.com/acme/widget.lock",
-		"github.com/acme.lock/widget",
-	} {
-		pr := testPR(42, false)
-		pr.Repository.Identity = identity
-		ref := pullRequestFetchRef(pr)
-
-		cmd := exec.Command("git", "check-ref-format", ref)
-		require.NoError(t, cmd.Run(), "generated ref %q for %q must be valid", ref, identity)
-	}
-}
-
 type fakeProvider struct {
 	prs      []PullRequest
 	listErr  error
@@ -126,45 +112,18 @@ func (f *fakeProvider) Get(_ context.Context, _ Repository, number int) (PullReq
 }
 
 type fakeWorkspaceBackend struct {
-	mu                   sync.Mutex
-	workspaces           []Workspace
-	remotes              map[string]string
-	fetchedRemote        string
-	fetchedRef           string
-	fetchedDest          string
-	fetchedSHA           string
-	createdBranch        string
-	createCalls          int
-	createErr            error
-	createAfterErr       error
-	createAfterWorkspace *Workspace
-	configureErr         error
-	configureCalls       int
-	configuredRemote     string
-	configuredRepo       string
-	configuredBranch     string
-	configureCancel      context.CancelFunc
-	rollbackErr          error
-	rollbackCtxErr       error
-	ensureRemoteErr      error
-	validateErr          error
-	validateCalls        int
-}
-
-func (f *fakeWorkspaceBackend) ValidateImport(context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.validateCalls++
-	return f.validateErr
+	mu                 sync.Mutex
+	workspaces         []Workspace
+	createCalls        int
+	createErr          error
+	createErrWorkspace Workspace
+	rollbackErr        error
+	importCalls        int
+	importedPR         PullRequest
 }
 
 func newFakeBackend() *fakeWorkspaceBackend {
-	return &fakeWorkspaceBackend{
-		remotes: map[string]string{
-			"origin": "github.com/acme/widget",
-		},
-		fetchedSHA: "0123456789abcdef0123456789abcdef01234567",
-	}
+	return &fakeWorkspaceBackend{}
 }
 
 func (f *fakeWorkspaceBackend) ListWorkspaces(context.Context) ([]Workspace, error) {
@@ -173,52 +132,16 @@ func (f *fakeWorkspaceBackend) ListWorkspaces(context.Context) ([]Workspace, err
 	return append([]Workspace(nil), f.workspaces...), nil
 }
 
-func (f *fakeWorkspaceBackend) BranchExists(_ context.Context, branch string) (bool, error) {
+func (f *fakeWorkspaceBackend) ImportPullRequest(
+	_ context.Context, pr PullRequest, branch string,
+) (Workspace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, workspace := range f.workspaces {
-		if workspace.Branch == branch {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (f *fakeWorkspaceBackend) EnsureRemote(_ context.Context, repo Repository) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.ensureRemoteErr != nil {
-		return "", f.ensureRemoteErr
-	}
-	for name, identity := range f.remotes {
-		if EqualRepositoryIdentity(identity, repo.Identity) {
-			return name, nil
-		}
-	}
-	name := "kwt-pr-" + repo.Owner
-	f.remotes[name] = repo.Identity
-	return name, nil
-}
-
-func (f *fakeWorkspaceBackend) Fetch(_ context.Context, remote, sourceRef, destinationRef, _ string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.fetchedRemote = remote
-	f.fetchedRef = sourceRef
-	f.fetchedDest = destinationRef
-	if f.fetchedSHA == "" {
-		return "", NewError(CodeInaccessibleHead, "head ref is unavailable", false, nil)
-	}
-	return f.fetchedSHA, nil
-}
-
-func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Workspace, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.importCalls++
+	f.importedPR = pr
 	f.createCalls++
-	f.createdBranch = branch
 	if f.createErr != nil {
-		return Workspace{}, f.createErr
+		return f.createErrWorkspace, f.createErr
 	}
 	workspace := Workspace{
 		ID:          "github.com/acme/widget:" + branch,
@@ -228,39 +151,15 @@ func (f *fakeWorkspaceBackend) Create(_ context.Context, branch, _ string) (Work
 		State:       "ready",
 		SessionName: "kwt-workspace-github-com-acme-widget-" + branch,
 	}
-	if f.createAfterWorkspace != nil {
-		workspace = *f.createAfterWorkspace
-	}
 	f.workspaces = append(f.workspaces, workspace)
-	if f.createAfterErr != nil {
-		return workspace, f.createAfterErr
-	}
 	return workspace, nil
-}
-
-func (f *fakeWorkspaceBackend) ConfigurePush(_ context.Context, _ Workspace, remote, sourceRepository, sourceBranch string) error {
-	f.configureCalls++
-	f.configuredRemote = remote
-	f.configuredRepo = sourceRepository
-	f.configuredBranch = sourceBranch
-	if f.configureCancel != nil {
-		f.configureCancel()
-	}
-	if f.configureErr != nil {
-		return f.configureErr
-	}
-	if remote == "" || sourceRepository == "" || sourceBranch == "" {
-		return errors.New("missing push configuration")
-	}
-	return nil
 }
 
 func (f *fakeWorkspaceBackend) Rollback(ctx context.Context, workspace Workspace) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.rollbackCtxErr = ctx.Err()
-	if f.rollbackCtxErr != nil {
-		return f.rollbackCtxErr
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if f.rollbackErr != nil {
 		return f.rollbackErr
@@ -461,25 +360,36 @@ func TestImportSameRepositoryUsesMatchingRemoteAndCanonicalName(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, ImportCreated, result.Status)
-	assert.Equal(t, "origin", backend.fetchedRemote)
-	assert.Equal(t, "refs/heads/feature/widgets", backend.fetchedRef)
-	assert.Equal(t, pullRequestFetchRef(pr), backend.fetchedDest)
+	assert.Equal(t, 1, backend.importCalls)
+	assert.Equal(t, pr.ID, backend.importedPR.ID)
 	assert.Equal(t, "pr-31-feature-widgets", result.Workspace.Branch)
 	assert.Equal(t, testProject().Identity, result.Workspace.Repository)
 }
 
-func TestImportRejectsUnsupportedGitBeforeProviderOrMutation(t *testing.T) {
+func TestImportDelegatesGitLifecycleAsOneOperation(t *testing.T) {
+	pr := testPR(35, true)
 	backend := newFakeBackend()
-	backend.validateErr = NewError(CodeUnsupportedGitVersion, "Git 2.20 or newer is required", false, nil)
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	result, err := service.Import(context.Background(), testProject(), "35")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, backend.importCalls)
+	assert.Equal(t, pr.ID, backend.importedPR.ID)
+	assert.Equal(t, "pr-35-feature-widgets", result.Workspace.Branch)
+}
+
+func TestImportPropagatesUnsupportedGitFromSharedLifecycle(t *testing.T) {
+	backend := newFakeBackend()
+	backend.createErr = NewError(CodeUnsupportedGitVersion, "Git 2.20 or newer is required", false, nil)
 	provider := &fakeProvider{prs: []PullRequest{testPR(30, false)}}
 	service := newTestService(provider, backend, newMemoryStore())
 
 	_, err := service.Import(context.Background(), testProject(), "30")
 
 	assertErrorCode(t, err, CodeUnsupportedGitVersion)
-	assert.Equal(t, map[string]string{"origin": "github.com/acme/widget"}, backend.remotes)
-	assert.Zero(t, backend.createCalls)
-	assert.Zero(t, provider.getCalls.Load())
+	assert.Equal(t, 1, backend.importCalls)
+	assert.Equal(t, int64(1), provider.getCalls.Load())
 }
 
 func TestGitHubRepositoryIdentityIsCaseInsensitive(t *testing.T) {
@@ -489,14 +399,13 @@ func TestGitHubRepositoryIdentityIsCaseInsensitive(t *testing.T) {
 	pr.Repository.Identity = "github.com/ACME/WIDGET"
 	pr.Source.Repository.Identity = "github.com/acme/widget"
 	backend := newFakeBackend()
-	backend.remotes = map[string]string{"origin": "github.com/Acme/Widget"}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
 
 	result, err := service.Import(context.Background(), project, "https://github.com/aCmE/wIdGeT/pull/33")
 
 	require.NoError(t, err)
 	assert.False(t, result.PullRequest.Source.IsFork)
-	assert.Equal(t, "origin", backend.fetchedRemote)
+	assert.Equal(t, pr.ID, backend.importedPR.ID)
 }
 
 func TestParseSelectorAcceptsMixedCaseGitHubIdentity(t *testing.T) {
@@ -519,8 +428,7 @@ func TestImportForkCreatesAndUsesForkRemote(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, ImportCreated, result.Status)
-	assert.Equal(t, "kwt-pr-octocat", backend.fetchedRemote)
-	assert.Equal(t, "github.com/octocat/widget", backend.remotes["kwt-pr-octocat"])
+	assert.Equal(t, pr.Source.Repository.Identity, backend.importedPR.Source.Repository.Identity)
 }
 
 func TestImportIsIdempotent(t *testing.T) {
@@ -591,10 +499,10 @@ func TestImportRejectsExistingWorkspaceWithMissingSourceProvenance(t *testing.T)
 
 	assertErrorCode(t, err, CodeConflict)
 	assert.ErrorContains(t, err, "source provenance")
-	assert.Zero(t, backend.configureCalls)
+	assert.Zero(t, backend.importCalls)
 }
 
-func TestImportRepairsPushRoutingBeforeReturningExisting(t *testing.T) {
+func TestImportExistingDoesNotReenterSharedLifecycle(t *testing.T) {
 	pr := testPR(47, false)
 	backend := newFakeBackend()
 	workspace := Workspace{ID: "ws-47", Repository: testProject().Identity, Branch: "pr-47-feature-widgets", Path: "/worktrees/47", State: "ready"}
@@ -610,10 +518,7 @@ func TestImportRepairsPushRoutingBeforeReturningExisting(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, ImportExisting, result.Status)
-	assert.Equal(t, 1, backend.configureCalls)
-	assert.Equal(t, "origin", backend.configuredRemote)
-	assert.Equal(t, pr.Source.Repository.Identity, backend.configuredRepo)
-	assert.Equal(t, pr.Source.Name, backend.configuredBranch)
+	assert.Zero(t, backend.importCalls)
 }
 
 func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
@@ -676,7 +581,7 @@ func TestConcurrentImportConverges(t *testing.T) {
 func TestImportReportsNamingConflict(t *testing.T) {
 	pr := testPR(51, false)
 	backend := newFakeBackend()
-	backend.workspaces = []Workspace{{Branch: "pr-51-feature-widgets", Path: "/unrelated"}}
+	backend.createErr = NewError(CodeNamingConflict, "branch is already in use", false, nil)
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
 
 	_, err := service.Import(context.Background(), testProject(), "51")
@@ -687,7 +592,7 @@ func TestImportReportsNamingConflict(t *testing.T) {
 func TestImportReportsUnavailableHead(t *testing.T) {
 	pr := testPR(52, true)
 	backend := newFakeBackend()
-	backend.fetchedSHA = ""
+	backend.createErr = NewError(CodeInaccessibleHead, "head is unavailable", false, nil)
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
 
 	_, err := service.Import(context.Background(), testProject(), "52")
@@ -719,46 +624,34 @@ func TestImportPropagatesTypedProviderFailures(t *testing.T) {
 	}
 }
 
-func TestImportUsesMatchingRemoteAmongMultipleRemotes(t *testing.T) {
-	pr := testPR(54, true)
+func TestImportWrapsCreationFailure(t *testing.T) {
+	pr := testPR(55, false)
 	backend := newFakeBackend()
-	backend.remotes = map[string]string{
-		"origin":   "github.com/acme/widget",
-		"personal": "github.com/octocat/widget",
-		"mirror":   "github.com/mirror/widget",
+	backend.createErr = errors.New("create failed")
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
+
+	_, err := service.Import(context.Background(), testProject(), "55")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.Empty(t, backend.workspaces)
+}
+
+func TestImportReportsArtifactsPreservedBySharedLifecycle(t *testing.T) {
+	pr := testPR(63, false)
+	backend := newFakeBackend()
+	backend.createErr = managedworktree.ErrWorktreeCleanupIncomplete
+	backend.createErrWorkspace = Workspace{
+		Path:   "/worktrees/widget/pr-63-feature-widgets",
+		Branch: "pr-63-feature-widgets",
 	}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
 
-	_, err := service.Import(context.Background(), testProject(), "54")
+	_, err := service.Import(context.Background(), testProject(), "63")
 
-	require.NoError(t, err)
-	assert.Equal(t, "personal", backend.fetchedRemote)
-}
-
-func TestImportWrapsCreationAndPushConfigurationFailures(t *testing.T) {
-	pr := testPR(55, false)
-	for _, tc := range []struct {
-		name      string
-		configure bool
-	}{
-		{name: "creation"},
-		{name: "push configuration", configure: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			backend := newFakeBackend()
-			if tc.configure {
-				backend.configureErr = errors.New("config failed")
-			} else {
-				backend.createErr = errors.New("create failed")
-			}
-			service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
-
-			_, err := service.Import(context.Background(), testProject(), "55")
-
-			assertErrorCode(t, err, CodeWorkspaceCreation)
-			assert.Empty(t, backend.workspaces, "a partially configured workspace must be rolled back")
-		})
-	}
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.ErrorContains(t, err, backend.createErrWorkspace.Path)
+	assert.ErrorContains(t, err, backend.createErrWorkspace.Branch)
+	assert.ErrorContains(t, err, "manual cleanup")
 }
 
 func TestImportPreservesTypedNamingFailureFromWorkspaceCreation(t *testing.T) {
@@ -784,77 +677,20 @@ func TestImportRollsBackWhenProvenanceCannotBeCommitted(t *testing.T) {
 	assert.Empty(t, backend.workspaces)
 }
 
-func TestImportRollsBackWhenStrictWorkspaceSetupFails(t *testing.T) {
-	pr := testPR(61, false)
-	backend := newFakeBackend()
-	backend.createAfterErr = errors.New("setup failed")
-	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
-
-	_, err := service.Import(context.Background(), testProject(), "61")
-
-	assertErrorCode(t, err, CodeWorkspaceCreation)
-	assert.ErrorContains(t, err, "setup failed")
-	assert.Empty(t, backend.workspaces)
-}
-
-func TestImportRollsBackBranchOnlyPartialCreation(t *testing.T) {
-	pr := testPR(62, false)
-	backend := newFakeBackend()
-	backend.createAfterErr = errors.New("partial creation cleanup failed")
-	backend.createAfterWorkspace = &Workspace{Branch: "pr-62-feature-widgets"}
-	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
-
-	_, err := service.Import(context.Background(), testProject(), "62")
-
-	assertErrorCode(t, err, CodeWorkspaceCreation)
-	assert.Empty(t, backend.workspaces)
-}
-
-func TestImportRollbackIgnoresCanceledRequestContext(t *testing.T) {
-	pr := testPR(58, false)
-	backend := newFakeBackend()
-	ctx, cancel := context.WithCancel(context.Background())
-	backend.configureCancel = cancel
-	backend.configureErr = errors.New("config failed")
-	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
-
-	_, err := service.Import(ctx, testProject(), "58")
-
-	assertErrorCode(t, err, CodeWorkspaceCreation)
-	assert.NoError(t, backend.rollbackCtxErr)
-	assert.Empty(t, backend.workspaces)
-}
-
 func TestImportReportsRollbackFailureAndPreservesWorkspace(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		number    int
-		configure bool
-	}{
-		{name: "push configuration", number: 59, configure: true},
-		{name: "provenance persistence", number: 60},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pr := testPR(tc.number, false)
-			backend := newFakeBackend()
-			backend.rollbackErr = errors.New("remove failed")
-			var store Store = newMemoryStore()
-			if tc.configure {
-				backend.configureErr = errors.New("config failed")
-			} else {
-				store = &commitFailStore{memoryStore: newMemoryStore()}
-			}
-			service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
+	pr := testPR(60, false)
+	backend := newFakeBackend()
+	backend.rollbackErr = errors.New("remove failed")
+	store := &commitFailStore{memoryStore: newMemoryStore()}
+	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, store)
 
-			_, err := service.Import(context.Background(), testProject(), itoa(tc.number))
+	_, err := service.Import(context.Background(), testProject(), "60")
 
-			assertErrorCode(t, err, CodeWorkspaceCreation)
-			assert.ErrorContains(t, err, "rollback failed")
-			require.Len(t, backend.workspaces, 1)
-			assert.Contains(t, err.Error(), backend.workspaces[0].Path)
-			assert.Contains(t, err.Error(), "branch \""+backend.workspaces[0].Branch+"\"")
-		})
-	}
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.ErrorContains(t, err, "rollback failed")
+	require.Len(t, backend.workspaces, 1)
+	assert.Contains(t, err.Error(), backend.workspaces[0].Path)
+	assert.Contains(t, err.Error(), "branch \""+backend.workspaces[0].Branch+"\"")
 }
 
 func assertErrorCode(t *testing.T, err error, want ErrorCode) {

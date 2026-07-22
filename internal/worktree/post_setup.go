@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
@@ -14,48 +13,32 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
-// runPostWorktreeSetupWithEnvironment runs file copy and setup commands for
-// the new worktree. branch is the raw {{.Branch}} template value.
-func (m *Manager) runPostWorktreeSetupWithEnvironment(ctx context.Context, branch, worktreePath string, environment []string) {
-	_, _ = m.runPostWorktreeSetupDetailed(ctx, command.NewStandardExecutor(), branch, worktreePath, environment)
-}
-
-func (m *Manager) runPostWorktreeSetupStrict(ctx context.Context, branch, worktreePath string, environment []string) error {
-	_, err := m.runPostWorktreeSetupDetailed(ctx, command.NewStandardExecutor(), branch, worktreePath, environment)
-	return err
+// runPostWorktreeSetup runs file copy and setup commands for the new worktree.
+// branch is used as the raw value for {{.Branch}} in templated setup commands.
+func (m *Manager) runPostWorktreeSetup(branch, worktreePath string) {
+	m.runPostWorktreeSetupWithExecutor(context.Background(), command.NewStandardExecutor(), branch, worktreePath)
 }
 
 // runPostWorktreeSetupWithExecutor is the test seam for runPostWorktreeSetup.
 // It returns the SetupResult slice so tests can assert on per-command outcomes.
 func (m *Manager) runPostWorktreeSetupWithExecutor(ctx context.Context, executor Executor, branch, worktreePath string) []SetupResult {
-	return m.runPostWorktreeSetupWithExecutorAndEnvironment(ctx, executor, branch, worktreePath, nil)
-}
-
-func (m *Manager) runPostWorktreeSetupWithExecutorAndEnvironment(ctx context.Context, executor Executor, branch, worktreePath string, environment []string) []SetupResult {
-	results, _ := m.runPostWorktreeSetupDetailed(ctx, executor, branch, worktreePath, environment)
-	return results
-}
-
-func (m *Manager) runPostWorktreeSetupDetailed(ctx context.Context, executor Executor, branch, worktreePath string, environment []string) ([]SetupResult, error) {
 	if len(m.config.RepositorySettings) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	repoRoot, err := m.git.GetMainRepositoryPath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[kwt] warning: failed to get repository path: %v\n", err)
-		return nil, fmt.Errorf("get repository path: %w", err)
+		return nil
 	}
 
 	repoSetting := findRepoSetting(m.config.RepositorySettings, repoRoot)
 	if repoSetting == nil {
-		return nil, nil
+		return nil
 	}
 
-	var setupErrs []error
 	for _, err := range CopyFilesWithGlob(filesystem.NewStandardFileSystem(), repoRoot, worktreePath, repoSetting.CopyFiles) {
 		fmt.Fprintf(os.Stderr, "[kwt] file copy error: %v\n", err)
-		setupErrs = append(setupErrs, fmt.Errorf("copy configured file: %w", err))
 	}
 
 	data := buildSetupTemplateData(m.git, branch, worktreePath)
@@ -65,24 +48,22 @@ func (m *Manager) runPostWorktreeSetupDetailed(ctx context.Context, executor Exe
 	for _, rc := range rendered {
 		if rc.Err != nil {
 			fmt.Fprintf(os.Stderr, "[kwt] setup command template error: %v\n", rc.Err)
-			setupErrs = append(setupErrs, fmt.Errorf("render setup command: %w", rc.Err))
 			continue
 		}
 		toRun = append(toRun, rc.Rendered)
 	}
 
-	results := RunSetupCommandsWithEnvironment(ctx, executor, worktreePath, toRun, environment)
+	results := RunSetupCommands(ctx, executor, worktreePath, toRun)
 	for _, r := range results {
 		if r.Output != "" {
 			fmt.Fprintf(os.Stderr, "[kwt] setup command output: %s\n", r.Output)
 		}
 		if r.Err != nil {
 			fmt.Fprintf(os.Stderr, "[kwt] setup command error: %s: %v\n", r.Command, r.Err)
-			setupErrs = append(setupErrs, fmt.Errorf("run setup command: %w", r.Err))
 		}
 	}
 
-	return results, errors.Join(setupErrs...)
+	return results
 }
 
 // buildSetupTemplateData assembles the data for rendering setup commands.
