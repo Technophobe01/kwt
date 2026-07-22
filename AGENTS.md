@@ -7,6 +7,7 @@
 - Do not commit rejected experiments. Revert them or ask before preserving them.
 - Test First: Write a failing test before implementation, then make it pass, then refactor. Do not add production code without a failing test that requires it.
 - No Unrequested GitHub Comments: Do not comment on GitHub issues or pull requests unless the user explicitly instructs you to post a comment.
+- No CI Polling: Do not poll GitHub or the `gh` API to watch jobs or workflow status unless the user explicitly instructs you to do so.
 - No Bash Content-Assertion Tests: Do not add shell tests that only grep scripts, workflows, or config files for implementation text. Prefer exercising behavior directly or documenting a manual check.
 - Documentation should move with behavior changes when practical: CLI flags, config keys, workflows, and user-facing contracts should be updated with the code.
 - Keep changes focused. Do not refactor unrelated code or rewrite user changes while completing a task.
