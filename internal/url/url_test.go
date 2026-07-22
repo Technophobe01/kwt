@@ -235,6 +235,11 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "remote-helper empty transport is rejected",
+			input:   "::--token=secret",
+			wantErr: true,
+		},
+		{
 			name:    "ssh scheme with user:token userinfo is rejected",
 			input:   "ssh://user:token@github.com/org/repo.git",
 			wantErr: true,

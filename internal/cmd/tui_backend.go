@@ -856,7 +856,9 @@ func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, bran
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).AddWithOptions(
+		branch, "", true, worktree.AddOptions{Context: ctx},
+	)
 	if err != nil {
 		return "", err
 	}

@@ -248,6 +248,29 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 	}
 }
 
+func TestManagerNonStrictSetupHonorsCanceledContext(t *testing.T) {
+	repoPath, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	worktreePath := filepath.Join(t.TempDir(), "canceled-setup")
+	git := &mockGit{repoPath: repoPath}
+	manager := New(git, &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: repoPath, SetupCommands: []string{"printf ran > setup-ran.txt"},
+		}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	path, err := manager.AddWithOptions("canceled-setup", worktreePath, false, AddOptions{Context: ctx})
+
+	require.ErrorIs(t, err, context.Canceled)
+	resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, resolvedWorktreePath, path)
+	assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
+}
+
 func TestManagerPreservesRealPartialWorktreeCreationFailure(t *testing.T) {
 	parent, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)

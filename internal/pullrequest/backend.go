@@ -96,6 +96,10 @@ func (b *GitBackend) validateImportConfigurationAt(ctx context.Context, worktree
 	if gitConfigHasEmbeddedRemoteCredentials(configOutput) {
 		return embeddedRemoteCredentialsError()
 	}
+	if gitConfigHasCustomReceivePack(configOutput) {
+		return NewError(CodeWorkspaceCreation,
+			"pull-request import does not allow custom Git receive-pack commands", false, nil)
+	}
 	remotes, err := b.runImportGitAt(ctx, worktreePath, "remote")
 	if err != nil {
 		return NewError(CodeWorkspaceCreation, "failed to enumerate effective Git remotes", false, err)
@@ -192,6 +196,17 @@ func gitConfigHasEmbeddedRemoteCredentials(output string) bool {
 	return false
 }
 
+func gitConfigHasCustomReceivePack(output string) bool {
+	for record := range strings.SplitSeq(output, "\x00") {
+		key, _, _ := strings.Cut(record, "\n")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(key, "remote.") && strings.HasSuffix(key, ".receivepack") {
+			return true
+		}
+	}
+	return false
+}
+
 func remoteURLListHasEmbeddedCredentials(output string) bool {
 	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		if remoteURLHasEmbeddedCredentials(strings.TrimSpace(line)) {
@@ -201,10 +216,8 @@ func remoteURLListHasEmbeddedCredentials(output string) bool {
 	return false
 }
 
-var remoteHelperURLPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
-
 func remoteURLHasEmbeddedCredentials(remoteURL string) bool {
-	if strings.ContainsAny(remoteURL, "?#") || remoteHelperURLPattern.MatchString(remoteURL) {
+	if strings.ContainsAny(remoteURL, "?#") || urlutil.IsRemoteHelperURL(remoteURL) {
 		return true
 	}
 	if strings.Contains(remoteURL, "://") {

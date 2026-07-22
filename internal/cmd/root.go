@@ -59,8 +59,17 @@ a fuzzy finder interface.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-signalCtx.Done()
+		stopSignals()
+		cancel()
+	}()
+	defer func() {
+		stopSignals()
+		cancel()
+	}()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		exitCode := 1
 		var coded interface{ ExitCode() int }

@@ -81,7 +81,11 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
 			}
 		} else {
-			m.runPostWorktreeSetup(branch, path)
+			setupCtx := addOptionsContext(opts)
+			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, nil)
+			if err := setupCtx.Err(); err != nil {
+				return path, err
+			}
 		}
 	}
 	return path, nil
@@ -144,7 +148,11 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 				return path, fmt.Errorf("post-worktree setup failed: %w", setupErr)
 			}
 		} else {
-			m.runPostWorktreeSetupWithEnvironment(branch, path, opts.SetupEnvironment)
+			setupCtx := addOptionsContext(opts)
+			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, opts.SetupEnvironment)
+			if err := setupCtx.Err(); err != nil {
+				return path, err
+			}
 		}
 	}
 	return path, nil

@@ -73,3 +73,71 @@ func TestExecuteCancelsCommandContextOnInterrupt(t *testing.T) {
 	}
 	assert.FileExists(t, canceledPath)
 }
+
+func TestExecuteRestoresDefaultSignalHandlingAfterCancel(t *testing.T) {
+	if os.Getenv("KWT_TEST_SECOND_SIGNAL") == "1" {
+		readyPath := os.Getenv("KWT_TEST_SIGNAL_READY")
+		canceledPath := os.Getenv("KWT_TEST_SIGNAL_CANCELED")
+		waitCmd := &cobra.Command{
+			Use: "wait-for-second-test-signal",
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
+					return err
+				}
+				<-cmd.Context().Done()
+				if err := os.WriteFile(canceledPath, []byte("canceled"), 0o600); err != nil {
+					return err
+				}
+				select {}
+			},
+		}
+		rootCmd.AddCommand(waitCmd)
+		rootCmd.SetArgs([]string{waitCmd.Use})
+		Execute()
+		return
+	}
+
+	tmp := t.TempDir()
+	readyPath := filepath.Join(tmp, "ready")
+	canceledPath := filepath.Join(tmp, "canceled")
+	command := exec.Command(os.Args[0], "-test.run=^TestExecuteRestoresDefaultSignalHandlingAfterCancel$")
+	command.Env = append(os.Environ(),
+		"KWT_TEST_SECOND_SIGNAL=1",
+		"KWT_TEST_SIGNAL_READY="+readyPath,
+		"KWT_TEST_SIGNAL_CANCELED="+canceledPath,
+		"KWT_HOME="+filepath.Join(tmp, "kwt-home"),
+	)
+	require.NoError(t, command.Start())
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+		}
+	})
+	waitForSignalTestFile(t, readyPath)
+	require.NoError(t, command.Process.Signal(os.Interrupt))
+	waitForSignalTestFile(t, canceledPath)
+	require.NoError(t, command.Process.Signal(os.Interrupt))
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		require.Error(t, err, "the restored default handler should terminate the process")
+	case <-time.After(2 * time.Second):
+		_ = command.Process.Kill()
+		require.FailNow(t, "second interrupt did not force command termination")
+	}
+}
+
+func waitForSignalTestFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.FailNow(t, "child command did not create expected file", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

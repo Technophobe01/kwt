@@ -139,7 +139,7 @@ func encodeFilesystemComponent(component string) string {
 // remotes fall through to the callers' local-path fallback handling instead
 // of minting bogus host/owner identities.
 func normalizeURL(repoURL string) (string, error) {
-	if isRemoteHelperURL(repoURL) {
+	if IsRemoteHelperURL(repoURL) {
 		return "", fmt.Errorf(
 			"unsupported remote-helper syntax in repository URL %s (git reads <transport>:: as a helper invocation, not a host)",
 			repoURL)
@@ -201,7 +201,7 @@ func normalizeExplicitNetworkURL(raw string) (string, error) {
 	return parsed.String(), nil
 }
 
-// isRemoteHelperURL reports whether repoURL uses git's remote-helper syntax
+// IsRemoteHelperURL reports whether repoURL uses git's remote-helper syntax
 // <transport>::<address> (gitremote-helpers(7)): URL-scheme characters from
 // the start of the string followed by "::", matching git's own
 // is_urlschemechar check in transport.c. Git dispatches these to a helper
@@ -211,7 +211,7 @@ func normalizeExplicitNetworkURL(raw string) (string, error) {
 // Bracketed IPv6 forms never match: their "::" is preceded by non-scheme
 // characters ("[", ":"). A leading "::" (empty transport) also matches and
 // fails closed, as git reads it as a helper invocation too.
-func isRemoteHelperURL(repoURL string) bool {
+func IsRemoteHelperURL(repoURL string) bool {
 	prefix, _, found := strings.Cut(repoURL, "::")
 	if !found {
 		return false

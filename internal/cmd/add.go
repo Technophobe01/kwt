@@ -153,7 +153,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		worktreePath, err := ctx.WorktreeManager.Add(branch, path, addBranch)
+		worktreePath, err := ctx.WorktreeManager.AddWithOptions(branch, path, addBranch, worktree.AddOptions{Context: cmd.Context()})
 		if err != nil {
 			return err
 		}

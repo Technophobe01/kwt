@@ -51,11 +51,12 @@ func (e *PartialWorktreeCreationError) RetryCleanup(ctx context.Context, g *Git,
 }
 
 type worktreeAddReservation struct {
-	path      string
-	pathInfo  os.FileInfo
-	branch    string
-	branchRef string
-	branchOID string
+	path        string
+	pathInfo    os.FileInfo
+	branch      string
+	branchRef   string
+	branchOID   string
+	branchOwned bool
 }
 
 // ListWorktrees returns a list of all worktrees in the repository.
@@ -310,6 +311,7 @@ func (g *Git) reserveWorktreeAdd(ctx context.Context, path, branch, baseBranch s
 		}
 		return nil, reserveErr
 	}
+	reservation.branchOwned = true
 	return reservation, nil
 }
 
@@ -326,7 +328,7 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 	var cleanupErrs []error
 	pathOwned := reservation.pathInfo != nil && sameFileAtPath(reservation.path, reservation.pathInfo)
 	registration, registrationErr := g.worktreeRegistrationWithEnvironment(ctx, reservation.path, environment)
-	ownedRegistration := registration != nil && registration.Branch == reservation.branch &&
+	ownedRegistration := reservation.branchOwned && registration != nil && registration.Branch == reservation.branch &&
 		strings.EqualFold(registration.CommitHash, reservation.branchOID)
 	if registrationErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect failed worktree registration: %w", registrationErr))
@@ -352,7 +354,7 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 	if branchUseErr != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect failed worktree branch registration: %w", branchUseErr))
 	}
-	if branchUseErr == nil && !pathOwned && registrationsBelongToReservation(branchRegistrations, reservation) {
+	if reservation.branchOwned && branchUseErr == nil && !pathOwned && registrationsBelongToReservation(branchRegistrations, reservation) {
 		_, _ = g.RunWithEnvironmentAndDisabledHooks(ctx, environment, "worktree", "prune", "--expire", "now")
 		branchRegistrations, branchUseErr = g.worktreeBranchRegistrationsWithEnvironment(ctx, reservation.branch, environment)
 		if branchUseErr != nil {
@@ -360,7 +362,7 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 		}
 	}
 	branchInUse := len(branchRegistrations) > 0
-	if reservation.branchOID != "" && !branchInUse && branchUseErr == nil {
+	if reservation.branchOwned && reservation.branchOID != "" && !branchInUse && branchUseErr == nil {
 		if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment,
 			"update-ref", "-d", reservation.branchRef, reservation.branchOID); err != nil {
 			if oid, exists, inspectErr := g.refOIDWithEnvironment(ctx, reservation.branchRef, environment); inspectErr != nil {
@@ -377,7 +379,7 @@ func (g *Git) cleanupFailedWorktreeAdd(ctx context.Context, reservation *worktre
 	remainingBranch := ""
 	if oid, exists, err := g.refOIDWithEnvironment(ctx, reservation.branchRef, environment); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("inspect reserved branch after cleanup: %w", err))
-	} else if exists && strings.EqualFold(oid, reservation.branchOID) &&
+	} else if reservation.branchOwned && exists && strings.EqualFold(oid, reservation.branchOID) &&
 		(!branchInUse || remainingPath != "" && ownedRegistration) {
 		remainingBranch = reservation.branch
 	}

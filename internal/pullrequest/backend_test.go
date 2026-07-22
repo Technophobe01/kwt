@@ -311,20 +311,22 @@ func TestGitBackendValidateImportRejectsQueryCredentialsFromURLRewrite(t *testin
 
 func TestGitBackendValidateImportRejectsRemoteHelperURLs(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		rewrite bool
+		name      string
+		remoteURL string
+		rewrite   bool
 	}{
-		{name: "direct"},
-		{name: "rewrite", rewrite: true},
+		{name: "direct", remoteURL: "corp::--token=never-log-helper"},
+		{name: "rewrite", remoteURL: "corp::--token=never-log-helper", rewrite: true},
+		{name: "empty transport direct", remoteURL: "::--token=never-log-helper"},
+		{name: "empty transport rewrite", remoteURL: "::--token=never-log-helper", rewrite: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, backend := newBackendRepo(t)
-			remoteURL := "corp::--token=never-log-helper"
 			if tc.rewrite {
 				runGit(t, repo, "remote", "add", "origin", "https://alias/acme/widget.git")
-				runGit(t, repo, "config", "url."+remoteURL+".insteadOf", "https://alias/")
+				runGit(t, repo, "config", "url."+tc.remoteURL+".insteadOf", "https://alias/")
 			} else {
-				runGit(t, repo, "remote", "add", "origin", remoteURL)
+				runGit(t, repo, "remote", "add", "origin", tc.remoteURL)
 			}
 
 			err := backend.ValidateImport(context.Background())
@@ -351,10 +353,22 @@ func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
 		{remoteURL: "https://github.com/%zz", want: true},
 		{remoteURL: "git@github.com:acme/widget.git?access_token=secret", want: true},
 		{remoteURL: "corp::--token=secret", want: true},
+		{remoteURL: "::--token=secret", want: true},
 		{remoteURL: "ssh://git@[2001:db8::1]/acme/widget.git"},
 	} {
 		assert.Equal(t, tc.want, remoteURLHasEmbeddedCredentials(tc.remoteURL), tc.remoteURL)
 	}
+}
+
+func TestGitBackendValidateImportRejectsCustomReceivePack(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	runGit(t, repo, "config", "remote.origin.receivepack", "sh -c 'redirect push'")
+
+	err := backend.ValidateImport(context.Background())
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.NotContains(t, err.Error(), "redirect push")
 }
 
 func TestSafeSetupEnvironmentRemovesConfiguredSecrets(t *testing.T) {
@@ -788,6 +802,21 @@ func TestGitBackendConfigurePushRejectsRemoteChangedAfterWorkspaceSetup(t *testi
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
 	runGit(t, workspace.Path, "remote", "set-url", "fork", "https://github.com/attacker/widget.git")
+
+	err = backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+}
+
+func TestGitBackendConfigurePushRejectsCustomReceivePackAfterSetup(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/17", head)
+	workspace, err := backend.Create(context.Background(), "pr-17-routing", "refs/kwt/pull-requests/acme/widget/17")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	runGit(t, workspace.Path, "config", "remote.fork.receivepack", "sh -c 'redirect push'")
 
 	err = backend.ConfigurePush(context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets")
 

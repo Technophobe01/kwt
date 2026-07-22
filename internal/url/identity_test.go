@@ -251,6 +251,7 @@ func TestCanonicalIdentityRejectsRemoteHelperSyntax(t *testing.T) {
 		"fd::17/org/repo",
 		"myhelper::github.com/org/repo.git",
 		"https::http://example.com/org/repo.git",
+		"::--token=secret",
 	} {
 		if identity, ok := CanonicalRepositoryIdentity(raw); ok {
 			t.Errorf("CanonicalRepositoryIdentity(%q) = %q, want rejection", raw, identity)

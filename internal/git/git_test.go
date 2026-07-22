@@ -279,7 +279,7 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
-	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", "exec sleep 3")
+	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", "exec sleep 10")
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
 	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
 	gitOutput(t, repo.Path, "commit", "-m", "Add slow checkout fixture")
@@ -294,7 +294,7 @@ func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Less(t, time.Since(started), 2*time.Second)
+	assert.Less(t, time.Since(started), 8*time.Second)
 	assert.NoDirExists(t, path)
 	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	cmd.Dir = repo.Path
@@ -338,6 +338,22 @@ func TestFailedWorktreeCleanupPreservesChangedReservedBranch(t *testing.T) {
 	require.NoError(t, err)
 	assert.NoDirExists(t, path)
 	assert.Equal(t, changedOID, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
+}
+
+func TestFailedWorktreeCleanupPreservesUnownedBranchAtReservedOID(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	branch := "review/preexisting-at-reserved-oid"
+	oid := gitOutput(t, repo.Path, "rev-parse", "main")
+	gitOutput(t, repo.Path, "branch", branch, oid)
+	reservation := &worktreeAddReservation{
+		branch: branch, branchRef: "refs/heads/" + branch, branchOID: oid,
+	}
+
+	_, _, err := g.cleanupFailedWorktreeAdd(context.Background(), reservation, NonInteractiveEnvironment(os.Environ()))
+
+	require.NoError(t, err)
+	assert.Equal(t, oid, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
 }
 
 func TestPartialWorktreeRetryCleanupPreservesChangedReservedBranch(t *testing.T) {

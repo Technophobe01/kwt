@@ -14,14 +14,10 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
-// runPostWorktreeSetup runs file copy and setup commands for the new worktree.
-// branch is used as the raw value for {{.Branch}} in templated setup commands.
-func (m *Manager) runPostWorktreeSetup(branch, worktreePath string) {
-	m.runPostWorktreeSetupWithEnvironment(branch, worktreePath, nil)
-}
-
-func (m *Manager) runPostWorktreeSetupWithEnvironment(branch, worktreePath string, environment []string) {
-	_, _ = m.runPostWorktreeSetupDetailed(context.Background(), command.NewStandardExecutor(), branch, worktreePath, environment)
+// runPostWorktreeSetupWithEnvironment runs file copy and setup commands for
+// the new worktree. branch is the raw {{.Branch}} template value.
+func (m *Manager) runPostWorktreeSetupWithEnvironment(ctx context.Context, branch, worktreePath string, environment []string) {
+	_, _ = m.runPostWorktreeSetupDetailed(ctx, command.NewStandardExecutor(), branch, worktreePath, environment)
 }
 
 func (m *Manager) runPostWorktreeSetupStrict(ctx context.Context, branch, worktreePath string, environment []string) error {
