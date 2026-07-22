@@ -1486,6 +1486,7 @@ func TestTUIBackendCreateWorktreeReportsCanceledSetupWithoutNameOnlyCleanup(t *t
 	repoPath := newTUITestRepo(t)
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Naming:   models.NamingConfig{Template: "{{.Branch}}"},
 		RepositorySettings: []models.RepositorySetting{{
 			Repository:    repoPath,
 			SetupCommands: []string{"printf ran > setup-ran.txt"},

@@ -105,8 +105,10 @@ func TestAddReportsCanceledSetupWithoutNameOnlyCleanup(t *testing.T) {
 	err := runAdd(cmd, []string{"feature/canceled-add", worktreePath})
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.ErrorContains(t, err, worktreePath)
 	assert.DirExists(t, worktreePath)
+	resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
+	require.NoError(t, resolveErr)
+	assert.ErrorContains(t, err, resolvedWorktreePath)
 	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-add")
 	branchCheck.Dir = repoPath
 	assert.NoError(t, branchCheck.Run(), "cancellation cleanup must not delete by branch name")

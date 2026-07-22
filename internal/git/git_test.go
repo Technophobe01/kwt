@@ -282,22 +282,34 @@ func TestConfiguredFilterDriversPreservesSubsectionCase(t *testing.T) {
 
 func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
 	repo := NewTestRepository(t)
+	filterStarted := filepath.Join(t.TempDir(), "filter-started")
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
-	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", "exec sleep 10")
+	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", fmt.Sprintf(
+		"printf started > \"%s\"; sleep 10; cat", filepath.ToSlash(filterStarted),
+	))
 	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
 	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
 	gitOutput(t, repo.Path, "commit", "-m", "Add slow checkout fixture")
 
 	path := filepath.Join(t.TempDir(), "canceled-worktree")
 	branch := "review/canceled-checkout"
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	started := time.Now()
-	err := New(repo.Path).AddWorktreeFromBaseWithEnvironmentAndContext(
-		ctx, path, branch, "main", NonInteractiveEnvironment(os.Environ()),
-	)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- New(repo.Path).AddWorktreeFromBaseWithEnvironmentAndContext(
+			ctx, path, branch, "main", NonInteractiveEnvironment(os.Environ()),
+		)
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filterStarted)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	err := <-errCh
 
 	require.Error(t, err)
 	assert.Less(t, time.Since(started), 8*time.Second)

@@ -162,7 +162,7 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 }
 
 func canceledAddError(cancelErr error, path, branch string, createdBranch bool) error {
-	message := fmt.Sprintf("canceled add left worktree at %q", path)
+	message := fmt.Sprintf("canceled add left worktree at %s", path)
 	if createdBranch {
 		message += fmt.Sprintf(" and created branch %q", branch)
 	}
