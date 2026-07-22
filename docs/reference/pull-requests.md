@@ -196,9 +196,10 @@ environment variables into workspace paths.
 
 Before materializing pull-request files, kwt creates a no-checkout worktree and
 verifies that branch- and worktree-conditional Git includes do not change its
-effective configuration. Push URLs and refspecs are validated again after
-setup and push configuration. Worktree paths are stored and matched in
-canonical form so symlinked base directories do not create duplicate imports.
+effective configuration, including record order and precedence. Push URLs and
+refspecs are validated again after setup and push configuration. Worktree paths
+are stored and matched in canonical form so symlinked base directories do not
+create duplicate imports.
 
 A new import returns:
 
@@ -280,12 +281,12 @@ worktree no longer exists. Existing imports require complete source provenance
 and have their push routing repaired before `already_imported` is returned. If
 an import fails after creating a workspace—including a configured file-copy or
 setup-command failure—kwt rolls it back even when the request context was
-canceled. Request cancellation terminates checkout filters and setup-command
-process trees; cleanup then runs without the canceled context. A rollback
-failure is reported with the surviving workspace path for manual cleanup. If
-the PR's recorded source repository or branch changed while its imported
-workspace is still present, another import returns `import_conflict` instead
-of reusing stale push configuration.
+canceled. Request cancellation, including `SIGINT` and `SIGTERM`, terminates
+checkout filters and setup-command process trees; cleanup then runs without the
+canceled context. A rollback failure is reported with the surviving workspace
+path and branch for manual cleanup. If the PR's recorded source repository or
+branch changed while its imported workspace is still present, another import
+returns `import_conflict` instead of reusing stale push configuration.
 
 ## Failure contract
 

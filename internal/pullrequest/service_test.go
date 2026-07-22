@@ -802,6 +802,7 @@ func TestImportReportsRollbackFailureAndPreservesWorkspace(t *testing.T) {
 			assert.ErrorContains(t, err, "rollback failed")
 			require.Len(t, backend.workspaces, 1)
 			assert.Contains(t, err.Error(), backend.workspaces[0].Path)
+			assert.Contains(t, err.Error(), "branch \""+backend.workspaces[0].Branch+"\"")
 		})
 	}
 }

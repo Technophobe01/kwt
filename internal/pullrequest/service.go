@@ -218,7 +218,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		if created != nil {
 			if rollbackErr := s.backend.Rollback(context.WithoutCancel(ctx), *created); rollbackErr != nil {
 				return ImportResult{}, NewError(CodeWorkspaceCreation,
-					fmt.Sprintf("%s and rollback failed; manual cleanup is required at %s", cleanupReason, created.Path),
+					fmt.Sprintf("%s and rollback failed; manual cleanup is required at %s for branch %q", cleanupReason, created.Path, created.Branch),
 					false, errors.Join(err, rollbackErr))
 			}
 			return ImportResult{}, NewError(CodeWorkspaceCreation, cleanupReason+"; rolled it back", false, err)

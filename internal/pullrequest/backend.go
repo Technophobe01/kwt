@@ -152,7 +152,6 @@ func (b *GitBackend) effectiveConfigRecords(ctx context.Context, worktreePath st
 		}
 		records = append(records, record)
 	}
-	slices.Sort(records)
 	return records, nil
 }
 

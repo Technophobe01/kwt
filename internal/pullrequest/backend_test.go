@@ -518,6 +518,42 @@ func TestPRImportValidatesBranchConditionalConfigBeforeCheckoutAndSetup(t *testi
 	assert.NoFileExists(t, marker)
 }
 
+func TestPRImportRejectsReorderedBranchConditionalConfiguration(t *testing.T) {
+	repo := t.TempDir()
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "initial")
+	mainConfig := filepath.Join(t.TempDir(), "main.gitconfig")
+	prConfig := filepath.Join(t.TempDir(), "pr.gitconfig")
+	require.NoError(t, os.WriteFile(mainConfig, []byte("[credential]\n\thelper = first\n\thelper = second\n"), 0o600))
+	require.NoError(t, os.WriteFile(prConfig, []byte("[credential]\n\thelper = second\n\thelper = first\n"), 0o600))
+	runGit(t, repo, "config", "includeIf.onbranch:main.path", mainConfig)
+	runGit(t, repo, "config", "includeIf.onbranch:pr-*.path", prConfig)
+	marker := filepath.Join(t.TempDir(), "setup-ran")
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: resolvedRepo, SetupCommands: []string{"touch '" + marker + "'"},
+		}},
+	}
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/15", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
+
+	workspace, err := backend.Create(context.Background(), "pr-15-order", "refs/kwt/pull-requests/acme/widget/15")
+	if workspace.Path != "" {
+		t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+	}
+
+	assertErrorCode(t, err, CodeAuthentication)
+	assert.NoFileExists(t, marker)
+}
+
 func TestPRCheckoutDisablesHooksAndSanitizesFilterEnvironment(t *testing.T) {
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-b", "main")

@@ -1,0 +1,73 @@
+package cmd
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestExecuteCancelsCommandContextOnInterrupt(t *testing.T) {
+	if os.Getenv("KWT_TEST_SIGNAL_CONTEXT") == "1" {
+		readyPath := os.Getenv("KWT_TEST_SIGNAL_READY")
+		canceledPath := os.Getenv("KWT_TEST_SIGNAL_CANCELED")
+		waitCmd := &cobra.Command{
+			Use: "wait-for-test-signal",
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
+					return err
+				}
+				<-cmd.Context().Done()
+				return os.WriteFile(canceledPath, []byte("canceled"), 0o600)
+			},
+		}
+		rootCmd.AddCommand(waitCmd)
+		rootCmd.SetArgs([]string{waitCmd.Use})
+		Execute()
+		return
+	}
+
+	tmp := t.TempDir()
+	readyPath := filepath.Join(tmp, "ready")
+	canceledPath := filepath.Join(tmp, "canceled")
+	command := exec.Command(os.Args[0], "-test.run=^TestExecuteCancelsCommandContextOnInterrupt$")
+	command.Env = append(os.Environ(),
+		"KWT_TEST_SIGNAL_CONTEXT=1",
+		"KWT_TEST_SIGNAL_READY="+readyPath,
+		"KWT_TEST_SIGNAL_CANCELED="+canceledPath,
+		"KWT_HOME="+filepath.Join(tmp, "kwt-home"),
+	)
+	require.NoError(t, command.Start())
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			require.FailNow(t, "child command did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, command.Process.Signal(os.Interrupt))
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		_ = command.Process.Kill()
+		require.FailNow(t, "command did not stop after interrupt")
+	}
+	assert.FileExists(t, canceledPath)
+}

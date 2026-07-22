@@ -3,6 +3,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,15 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
 	}
 	if addErr != nil {
+		var partial interface {
+			PartialWorktree() (string, string)
+		}
+		if errors.As(addErr, &partial) {
+			partialPath, partialBranch := partial.PartialWorktree()
+			if partialPath == path && partialBranch == branch {
+				return path, addErr
+			}
+		}
 		return "", addErr
 	}
 	if opts.BeforeCheckout != nil {
@@ -162,32 +172,37 @@ func (m *Manager) RemoveWithBranchWithEnvironment(path string, branch string, fo
 }
 
 func (m *Manager) removeWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
-	// First remove the worktree
 	var removeErr error
-	if environment == nil {
-		removeErr = m.git.RemoveWorktree(path, forceWorktree)
-	} else {
-		removeErr = m.git.RemoveWorktreeWithEnvironment(path, forceWorktree, environment)
+	removeWorktree := true
+	if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
+		if worktrees, listErr := m.git.ListWorktrees(); listErr == nil {
+			removeWorktree = false
+			canonicalPath := utils.CanonicalPath(path)
+			for _, candidate := range worktrees {
+				if utils.CanonicalPath(candidate.Path) == canonicalPath {
+					removeWorktree = true
+					break
+				}
+			}
+		}
 	}
-	if removeErr != nil {
-		return removeErr
+	if removeWorktree {
+		if environment == nil {
+			removeErr = m.git.RemoveWorktree(path, forceWorktree)
+		} else {
+			removeErr = m.git.RemoveWorktreeWithEnvironment(path, forceWorktree, environment)
+		}
 	}
 
-	// Then delete the branch if requested
+	var deleteErr error
 	if deleteBranch && branch != "" {
-		var deleteErr error
 		if environment == nil {
 			deleteErr = m.git.DeleteBranch(branch, forceBranch)
 		} else {
 			deleteErr = m.git.DeleteBranchWithEnvironment(branch, forceBranch, environment)
 		}
-		if deleteErr != nil {
-			// Return error but worktree is already removed
-			return fmt.Errorf("worktree removed but failed to delete branch: %w", deleteErr)
-		}
 	}
-
-	return nil
+	return errors.Join(removeErr, deleteErr)
 }
 
 // List returns all worktrees.

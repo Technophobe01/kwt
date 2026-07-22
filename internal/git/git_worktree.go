@@ -11,6 +11,20 @@ import (
 	"go.kenn.io/kwt/pkg/models"
 )
 
+// PartialWorktreeCreationError reports repository state that remained after a
+// failed worktree add and its internal cleanup attempt.
+type PartialWorktreeCreationError struct {
+	Path   string
+	Branch string
+	Err    error
+}
+
+func (e *PartialWorktreeCreationError) Error() string { return e.Err.Error() }
+func (e *PartialWorktreeCreationError) Unwrap() error { return e.Err }
+func (e *PartialWorktreeCreationError) PartialWorktree() (string, string) {
+	return e.Path, e.Branch
+}
+
 // ListWorktrees returns a list of all worktrees in the repository.
 func (g *Git) ListWorktrees() ([]models.Worktree, error) {
 	output, err := g.run("worktree", "list", "--porcelain")
@@ -201,7 +215,12 @@ func (g *Git) addWorktreeFromBase(ctx context.Context, path, branch, baseBranch 
 	if _, err := g.RunWithEnvironmentAndDisabledHooks(ctx, environment, args...); err != nil {
 		addErr := fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 		cleanupErr := g.cleanupFailedWorktreeAdd(context.WithoutCancel(ctx), path, branch, pathExisted, branchExisted, environment)
-		return errors.Join(addErr, cleanupErr)
+		if cleanupErr != nil {
+			return &PartialWorktreeCreationError{
+				Path: path, Branch: branch, Err: errors.Join(addErr, cleanupErr),
+			}
+		}
+		return addErr
 	}
 
 	return nil

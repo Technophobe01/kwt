@@ -31,6 +31,16 @@ type mockGit struct {
 	mainRepoPathError error
 }
 
+type partialWorktreeAddError struct {
+	path   string
+	branch string
+}
+
+func (e *partialWorktreeAddError) Error() string { return "worktree cleanup failed" }
+func (e *partialWorktreeAddError) PartialWorktree() (string, string) {
+	return e.path, e.branch
+}
+
 func (m *mockGit) ListWorktrees() ([]models.Worktree, error) {
 	if m.listError != nil {
 		return nil, m.listError
@@ -245,6 +255,22 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 			assert.DirExists(t, path)
 		})
 	}
+}
+
+func TestManagerPreservesPathForPartialWorktreeCreationFailure(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	path := filepath.Join(parent, "partial-worktree")
+	branch := "partial-branch"
+	git := &mockGit{addError: &partialWorktreeAddError{path: path, branch: branch}}
+	manager := New(git, &models.Config{Worktree: models.WorktreeConfig{AutoMkdir: true}})
+
+	gotPath, err := manager.AddFromBaseWithOptions(branch, "HEAD", path, AddOptions{
+		SetupEnvironment: []string{},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, path, gotPath)
 }
 
 func TestManagerReturnsCanonicalGeneratedPathThroughSymlinkedBase(t *testing.T) {
