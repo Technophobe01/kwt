@@ -2,6 +2,7 @@ package pullrequest
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -179,7 +180,7 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		if remoteErr != nil {
 			return AsError(remoteErr, CodeWorkspaceCreation, "failed to configure the pull-request Git remote")
 		}
-		fetchRef := fmt.Sprintf("refs/kwt/pull-requests/%s/%s/%d", pr.Repository.Owner, pr.Repository.Name, pr.Number)
+		fetchRef := pullRequestFetchRef(pr)
 		sha, fetchErr := s.backend.Fetch(ctx, remote, "refs/heads/"+pr.Source.Name, fetchRef)
 		if fetchErr != nil {
 			return AsError(fetchErr, CodeInaccessibleHead, "failed to fetch the pull-request head")
@@ -226,6 +227,11 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		return ImportResult{}, AsError(err, CodeWorkspaceCreation, "pull-request import failed")
 	}
 	return result, err
+}
+
+func pullRequestFetchRef(pr PullRequest) string {
+	repositoryHash := sha256.Sum256([]byte(NormalizeRepositoryIdentity(pr.Repository.Identity)))
+	return fmt.Sprintf("refs/kwt/pull-requests/repository-%x/%d", repositoryHash, pr.Number)
 }
 
 func findProvenance(records map[string]Provenance, pr PullRequest) (string, Provenance, bool) {

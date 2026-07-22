@@ -191,7 +191,7 @@ func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project,
 
 	for _, candidate := range cfg.Projects {
 		identity := publishableProjectRepository(candidate)
-		if pullrequest.EqualRepositoryIdentity(selector, identity) || samePRPath(selector, candidate.Path) {
+		if pullrequest.EqualRepositoryIdentity(selector, identity) {
 			candidate.Repository = identity
 			return prProjectFromModel(candidate)
 		}
@@ -212,8 +212,37 @@ func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project,
 			pullrequest.CodeRepositoryMismatch,
 			fmt.Sprintf("project name %q is ambiguous; select by repository identity or path", selector), false, nil)
 	}
+	if filepath.IsAbs(selector) {
+		canonicalSelector, canonicalErr := canonicalPRPathSelector(selector)
+		if canonicalErr != nil {
+			return pullrequest.Project{}, pullrequest.NewError(
+				pullrequest.CodeRepositoryMismatch,
+				"project path selectors must be absolute, canonical paths", false, canonicalErr)
+		}
+		for _, candidate := range cfg.Projects {
+			if samePRPath(canonicalSelector, candidate.Path) {
+				candidate.Repository = publishableProjectRepository(candidate)
+				return prProjectFromModel(candidate)
+			}
+		}
+	}
 	return pullrequest.Project{}, pullrequest.NewError(
 		pullrequest.CodeRepositoryMismatch, fmt.Sprintf("no kwt-managed project matches %q", selector), false, nil)
+}
+
+func canonicalPRPathSelector(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) || cleaned != path {
+		return "", fmt.Errorf("path is not absolute and clean")
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(resolved) != cleaned {
+		return "", fmt.Errorf("path contains symlink components")
+	}
+	return cleaned, nil
 }
 
 func prProjectFromModel(project models.Project) (pullrequest.Project, error) {

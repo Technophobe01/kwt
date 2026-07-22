@@ -15,8 +15,10 @@ kwt pr import github:github.com/acme/widget#17 \
 ```
 
 `--project` accepts a repository identity from `kwt projects --json`, a
-registered project name, or its main-repository path. It may be omitted when
-the command runs inside the desired repository. If a display name identifies
+registered project name, or its absolute canonical main-repository path.
+Identity and unique-name matching take precedence over path matching; relative
+and symlinked path selectors are rejected. `--project` may be omitted when the
+command runs inside the desired repository. If a display name identifies
 multiple projects, kwt returns `repository_mismatch`; callers must use the
 repository identity or path. `--state` accepts `open`, `closed`, or `all` and
 defaults to `open`.
@@ -170,11 +172,11 @@ workspace manager (including trusted repository setup commands), and
 configures plain `git push` to update exactly the PR's original head branch.
 When it creates a fork remote, kwt uses SSH when the project's effective push
 URL uses SSH and HTTPS otherwise, preserving the project's working push
-authentication transport. It reuses only remotes with exactly one effective
-push URL and no custom push refspec. Worktree-local `pushRemote` configuration
-takes precedence over global push defaults. Import reports the exact tmux
-session name a client can attach to; it does not launch or manipulate tmux
-panes.
+authentication transport, including SSH host aliases and explicit ports. It
+reuses only remotes with exactly one effective push URL and no custom push
+refspec. Worktree-local `pushRemote` configuration takes precedence over global
+push defaults. Import reports the exact tmux session name a client can attach
+to; it does not launch or manipulate tmux panes.
 
 Cross-project imports load the selected project's already trusted `.kwt.toml`
 in isolation. They never load configuration from the caller's working

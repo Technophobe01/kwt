@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -74,6 +75,21 @@ func TestImportBranchNameTruncatesAtUTF8Boundary(t *testing.T) {
 	assert.Equal(t, "a"+strings.Repeat("é", 39), slug)
 }
 
+func TestPullRequestFetchRefIsValidForRepositoryNamesInvalidInRefs(t *testing.T) {
+	for _, identity := range []string{
+		"github.com/.github/widget",
+		"github.com/acme/widget.lock",
+		"github.com/acme.lock/widget",
+	} {
+		pr := testPR(42, false)
+		pr.Repository.Identity = identity
+		ref := pullRequestFetchRef(pr)
+
+		cmd := exec.Command("git", "check-ref-format", ref)
+		require.NoError(t, cmd.Run(), "generated ref %q for %q must be valid", ref, identity)
+	}
+}
+
 type fakeProvider struct {
 	prs      []PullRequest
 	listErr  error
@@ -104,6 +120,7 @@ type fakeWorkspaceBackend struct {
 	remotes          map[string]string
 	fetchedRemote    string
 	fetchedRef       string
+	fetchedDest      string
 	fetchedSHA       string
 	createdBranch    string
 	createCalls      int
@@ -171,11 +188,12 @@ func (f *fakeWorkspaceBackend) EnsureRemote(_ context.Context, repo Repository) 
 	return name, nil
 }
 
-func (f *fakeWorkspaceBackend) Fetch(_ context.Context, remote, sourceRef, _ string) (string, error) {
+func (f *fakeWorkspaceBackend) Fetch(_ context.Context, remote, sourceRef, destinationRef string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchedRemote = remote
 	f.fetchedRef = sourceRef
+	f.fetchedDest = destinationRef
 	if f.fetchedSHA == "" {
 		return "", NewError(CodeInaccessibleHead, "head ref is unavailable", false, nil)
 	}
@@ -430,6 +448,7 @@ func TestImportSameRepositoryUsesMatchingRemoteAndCanonicalName(t *testing.T) {
 	assert.Equal(t, ImportCreated, result.Status)
 	assert.Equal(t, "origin", backend.fetchedRemote)
 	assert.Equal(t, "refs/heads/feature/widgets", backend.fetchedRef)
+	assert.Equal(t, pullRequestFetchRef(pr), backend.fetchedDest)
 	assert.Equal(t, "pr-31-feature-widgets", result.Workspace.Branch)
 	assert.Equal(t, testProject().Identity, result.Workspace.Repository)
 }

@@ -274,14 +274,18 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		return "", NewError(CodeWorkspaceCreation, "failed to list Git remotes", false, err)
 	}
 	existing := make(map[string]bool)
+	remoteNames := make([]string, 0)
 	matchingRemote := ""
-	projectUsesSSH := false
 	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
 		name := strings.TrimSpace(line)
 		if name == "" {
 			continue
 		}
 		existing[name] = true
+		remoteNames = append(remoteNames, name)
+	}
+	projectUsesSSH := b.projectPushUsesSSH(ctx, existing)
+	for _, name := range remoteNames {
 		fetchURLs, fetchErr := b.runImportGit(ctx, "remote", "get-url", "--all", name)
 		pushURLs, pushErr := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", name)
 		if fetchErr != nil || pushErr != nil {
@@ -292,11 +296,6 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		}
 		fetchURL, singleFetch := singleRemoteURL(fetchURLs)
 		fetchIdentity, fetchOK := urlutil.CanonicalRepositoryIdentityFromRemote(fetchURL)
-		if singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, b.project.Identity) {
-			if pushURL, single := singleRemoteURL(pushURLs); single && isSSHRemoteURL(pushURL) {
-				projectUsesSSH = true
-			}
-		}
 		if singleFetch && fetchOK && EqualRepositoryIdentity(fetchIdentity, repository.Identity) &&
 			matchingRemote == "" && singleRemoteURLMatches(pushURLs, repository.Identity) &&
 			!b.remoteHasCustomPushRefspec(ctx, name) {
@@ -331,6 +330,46 @@ func (b *GitBackend) EnsureRemote(ctx context.Context, repository Repository) (s
 		return "", validateErr
 	}
 	return name, nil
+}
+
+func (b *GitBackend) projectPushUsesSSH(ctx context.Context, remotes map[string]bool) bool {
+	selected := ""
+	branch, branchErr := b.runImportGit(ctx, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if branchErr == nil {
+		branch = strings.TrimSpace(branch)
+		selected = b.configuredRemote(ctx, "branch."+branch+".pushRemote")
+	}
+	if selected == "" {
+		selected = b.configuredRemote(ctx, "remote.pushDefault")
+	}
+	if selected == "" && branchErr == nil {
+		selected = b.configuredRemote(ctx, "branch."+strings.TrimSpace(branch)+".remote")
+	}
+	if selected == "" && remotes["origin"] {
+		selected = "origin"
+	}
+	if selected == "" && len(remotes) == 1 {
+		for remote := range remotes {
+			selected = remote
+		}
+	}
+	if !remotes[selected] {
+		return false
+	}
+	pushURLs, err := b.runImportGit(ctx, "remote", "get-url", "--all", "--push", selected)
+	if err != nil || remoteURLListHasEmbeddedCredentials(pushURLs) {
+		return false
+	}
+	pushURL, single := singleRemoteURL(pushURLs)
+	return single && isSSHRemoteURL(pushURL)
+}
+
+func (b *GitBackend) configuredRemote(ctx context.Context, key string) string {
+	output, err := b.runImportGit(ctx, "config", "--includes", "--get", key)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(output)
 }
 
 func (b *GitBackend) validateEffectiveRemote(ctx context.Context, remote, repositoryIdentity string) error {

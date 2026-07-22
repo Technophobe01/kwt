@@ -308,36 +308,87 @@ func TestPRFailureCategoriesHaveDistinctExitStatuses(t *testing.T) {
 }
 
 func TestResolvePRProjectSupportsStableIdentityNameAndPath(t *testing.T) {
+	otherPath, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	widgetPath, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	cfg := &models.Config{Projects: []models.Project{
-		{Repository: "github.com/acme/other", Name: "other", Path: "/repos/other"},
-		{Repository: "github.com/acme/widget", Name: "widget", Path: "/repos/widget"},
+		{Repository: "github.com/acme/other", Name: "other", Path: otherPath},
+		{Repository: "github.com/acme/widget", Name: "widget", Path: widgetPath},
 	}}
-	for _, selector := range []string{"github.com/acme/widget", "widget", "/repos/widget"} {
+	for _, selector := range []string{"github.com/acme/widget", "widget", widgetPath} {
 		t.Run(selector, func(t *testing.T) {
 			project, err := resolvePRProject(cfg, selector)
 			require.NoError(t, err)
 			assert.Equal(t, "github.com/acme/widget", project.Identity)
-			assert.Equal(t, "/repos/widget", project.Path)
+			assert.Equal(t, widgetPath, project.Path)
 		})
 	}
 }
 
 func TestResolvePRProjectRejectsAmbiguousProjectName(t *testing.T) {
+	acmePath, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	octocatPath, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	cfg := &models.Config{Projects: []models.Project{
-		{Repository: "github.com/acme/widget", Name: "widget", Path: "/repos/acme-widget"},
-		{Repository: "github.com/octocat/widget", Name: "Widget", Path: "/repos/octocat-widget"},
+		{Repository: "github.com/acme/widget", Name: "widget", Path: acmePath},
+		{Repository: "github.com/octocat/widget", Name: "Widget", Path: octocatPath},
 	}}
 
-	_, err := resolvePRProject(cfg, "widget")
+	_, err = resolvePRProject(cfg, "widget")
 
 	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
 	assert.Contains(t, err.Error(), "ambiguous")
 
-	for _, selector := range []string{"github.com/octocat/widget", "/repos/octocat-widget"} {
+	for _, selector := range []string{"github.com/octocat/widget", octocatPath} {
 		project, selectErr := resolvePRProject(cfg, selector)
 		require.NoError(t, selectErr)
 		assert.Equal(t, "github.com/octocat/widget", project.Identity)
 	}
+}
+
+func TestResolvePRProjectPrefersIdentityAndNameOverCallerRelativePaths(t *testing.T) {
+	caller := t.TempDir()
+	changeDir(t, caller)
+	identityCollision := filepath.Join(caller, "github.com", "acme", "widget")
+	nameCollision := filepath.Join(caller, "widget")
+	require.NoError(t, os.MkdirAll(identityCollision, 0o755))
+	require.NoError(t, os.MkdirAll(nameCollision, 0o755))
+	desiredPath := t.TempDir()
+	cfg := &models.Config{Projects: []models.Project{
+		{Repository: "github.com/attacker/identity-collision", Name: "identity-collision", Path: identityCollision},
+		{Repository: "github.com/attacker/name-collision", Name: "name-collision", Path: nameCollision},
+		{Repository: "github.com/acme/widget", Name: "widget", Path: desiredPath},
+	}}
+
+	for _, selector := range []string{"github.com/acme/widget", "widget"} {
+		project, err := resolvePRProject(cfg, selector)
+
+		require.NoError(t, err)
+		assert.Equal(t, "github.com/acme/widget", project.Identity)
+		assert.Equal(t, desiredPath, project.Path)
+	}
+}
+
+func TestResolvePRProjectRejectsRelativeAndSymlinkPathSelectors(t *testing.T) {
+	caller := t.TempDir()
+	changeDir(t, caller)
+	projectPath := filepath.Join(caller, "repos", "widget")
+	require.NoError(t, os.MkdirAll(projectPath, 0o755))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: "github.com/acme/widget", Name: "widget", Path: projectPath,
+	}}}
+
+	_, err := resolvePRProject(cfg, filepath.Join("repos", "widget"))
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
+
+	symlinkPath := filepath.Join(caller, "widget-link")
+	if symlinkErr := os.Symlink(projectPath, symlinkPath); symlinkErr != nil {
+		t.Skipf("symlinks unavailable: %v", symlinkErr)
+	}
+	_, err = resolvePRProject(cfg, symlinkPath)
+	assertPRCode(t, err, pullrequest.CodeRepositoryMismatch)
 }
 
 func TestValidatePRProjectNormalizesGitHubIdentityCase(t *testing.T) {
