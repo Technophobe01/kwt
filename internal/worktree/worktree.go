@@ -22,13 +22,9 @@ type GitInterface interface {
 	ListWorktrees() ([]models.Worktree, error)
 	AddWorktree(path, branch string, createBranch bool) error
 	AddWorktreeFromBase(path, branch, baseBranch string) error
-	AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, environment []string) error
-	AddWorktreeFromBaseWithEnvironmentAndContext(ctx context.Context, path, branch, baseBranch string, environment []string) error
 	CreateManagedWorktreeFromBaseWithEnvironment(ctx context.Context, path, branch, baseBranch string, environment []string, beforeCheckout func(context.Context, string) error) (managedworktree.CreateWorktreeResult, error)
 	RemoveWorktree(path string, force bool) error
-	RemoveWorktreeWithEnvironment(path string, force bool, environment []string) error
 	DeleteBranch(branch string, force bool) error
-	DeleteBranchWithEnvironment(branch string, force bool, environment []string) error
 	PruneWorktrees() error
 	GetRepositoryName() (string, error)
 	GetRecentCommits(path string, limit int) ([]models.CommitInfo, error)
@@ -121,10 +117,6 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 				return remaining.Path, remaining.Branch, cleanupErr
 			})
 		}
-	} else if opts.SetupEnvironment != nil {
-		addErr = m.git.AddWorktreeFromBaseWithEnvironmentAndContext(
-			addOptionsContext(opts), path, branch, baseBranch, opts.SetupEnvironment,
-		)
 	} else {
 		addErr = m.git.AddWorktreeFromBase(path, branch, baseBranch)
 	}
@@ -183,16 +175,6 @@ func (m *Manager) Remove(path string, force bool) error {
 
 // RemoveWithBranch deletes a worktree and optionally its branch.
 func (m *Manager) RemoveWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool) error {
-	return m.removeWithBranch(path, branch, forceWorktree, deleteBranch, forceBranch, nil)
-}
-
-// RemoveWithBranchWithEnvironment deletes a worktree and branch using an
-// explicit environment with repository hooks disabled.
-func (m *Manager) RemoveWithBranchWithEnvironment(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
-	return m.removeWithBranch(path, branch, forceWorktree, deleteBranch, forceBranch, environment)
-}
-
-func (m *Manager) removeWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool, environment []string) error {
 	var removeErr error
 	removeWorktree := path != ""
 	if removeWorktree {
@@ -211,20 +193,12 @@ func (m *Manager) removeWithBranch(path string, branch string, forceWorktree boo
 		}
 	}
 	if removeWorktree {
-		if environment == nil {
-			removeErr = m.git.RemoveWorktree(path, forceWorktree)
-		} else {
-			removeErr = m.git.RemoveWorktreeWithEnvironment(path, forceWorktree, environment)
-		}
+		removeErr = m.git.RemoveWorktree(path, forceWorktree)
 	}
 
 	var deleteErr error
 	if deleteBranch && branch != "" {
-		if environment == nil {
-			deleteErr = m.git.DeleteBranch(branch, forceBranch)
-		} else {
-			deleteErr = m.git.DeleteBranchWithEnvironment(branch, forceBranch, environment)
-		}
+		deleteErr = m.git.DeleteBranch(branch, forceBranch)
 	}
 	return errors.Join(removeErr, deleteErr)
 }

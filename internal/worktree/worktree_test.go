@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	managedworktree "go.kenn.io/kit/git/managed"
 	configpkg "go.kenn.io/kwt/internal/config"
-	gitadapter "go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -71,10 +70,6 @@ func (m *mockGit) RemoveWorktree(path string, force bool) error {
 	return nil
 }
 
-func (m *mockGit) RemoveWorktreeWithEnvironment(path string, force bool, _ []string) error {
-	return m.RemoveWorktree(path, force)
-}
-
 func (m *mockGit) PruneWorktrees() error {
 	return m.pruneError
 }
@@ -108,10 +103,6 @@ func (m *mockGit) DeleteBranch(branch string, force bool) error {
 	return nil
 }
 
-func (m *mockGit) DeleteBranchWithEnvironment(branch string, force bool, _ []string) error {
-	return m.DeleteBranch(branch, force)
-}
-
 func (m *mockGit) GetMainRepositoryPath() (string, error) {
 	if m.mainRepoPathError != nil {
 		return "", m.mainRepoPathError
@@ -136,21 +127,6 @@ func (m *mockGit) AddWorktreeFromBase(path, branch, baseBranch string) error {
 	return nil
 }
 
-func (m *mockGit) AddWorktreeFromBaseWithEnvironment(path, branch, baseBranch string, _ []string) error {
-	return m.AddWorktreeFromBase(path, branch, baseBranch)
-}
-
-func (m *mockGit) AddWorktreeFromBaseWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) error {
-	return m.AddWorktreeFromBase(path, branch, baseBranch)
-}
-
-func (m *mockGit) AddWorktreeFromBaseNoCheckoutWithEnvironmentAndContext(_ context.Context, path, branch, baseBranch string, _ []string) (func(context.Context) (string, string, error), error) {
-	if err := m.AddWorktreeFromBase(path, branch, baseBranch); err != nil {
-		return nil, err
-	}
-	return func(context.Context) (string, string, error) { return "", "", nil }, nil
-}
-
 func (m *mockGit) CreateManagedWorktreeFromBaseWithEnvironment(
 	ctx context.Context,
 	path, branch, baseBranch string,
@@ -166,10 +142,6 @@ func (m *mockGit) CreateManagedWorktreeFromBaseWithEnvironment(
 		}
 	}
 	return managedworktree.CreateWorktreeResult{Path: path, Branch: branch, BranchCreated: true}, nil
-}
-
-func (m *mockGit) CheckoutWorktreeWithEnvironmentAndContext(_ context.Context, _ string, _ []string) error {
-	return nil
 }
 
 func TestManagerAdd(t *testing.T) {
@@ -300,36 +272,6 @@ func TestManagerNonStrictSetupReportsCanceledAddWithoutDeleting(t *testing.T) {
 			assert.Empty(t, git.removedWorktrees)
 			assert.Empty(t, git.deletedBranches)
 			assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
-		})
-	}
-}
-
-func TestManagerPreservesRealPartialWorktreeCreationFailure(t *testing.T) {
-	parent, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	path := filepath.Join(parent, "partial-worktree")
-	branch := "partial-branch"
-	for _, tc := range []struct {
-		name          string
-		remainingPath string
-		remainingRef  string
-	}{
-		{name: "path only", remainingPath: path},
-		{name: "branch only", remainingRef: branch},
-		{name: "path and branch", remainingPath: path, remainingRef: branch},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			git := &mockGit{addError: &gitadapter.PartialWorktreeCreationError{
-				Path: tc.remainingPath, Branch: tc.remainingRef, Err: errors.New("cleanup failed"),
-			}}
-			manager := New(git, &models.Config{Worktree: models.WorktreeConfig{AutoMkdir: true}})
-
-			gotPath, err := manager.AddFromBaseWithOptions(branch, "HEAD", path, AddOptions{
-				SetupEnvironment: []string{},
-			})
-
-			require.Error(t, err)
-			assert.Equal(t, path, gotPath, "either remnant must signal the caller to roll back")
 		})
 	}
 }

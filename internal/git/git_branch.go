@@ -1,7 +1,6 @@
 package git
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -66,16 +65,6 @@ func (g *Git) ListBranches(includeRemote bool) ([]models.Branch, error) {
 
 // DeleteBranch deletes a branch.
 func (g *Git) DeleteBranch(branch string, force bool) error {
-	return g.deleteBranch(branch, force, nil)
-}
-
-// DeleteBranchWithEnvironment deletes a branch with an explicit environment
-// and repository hooks disabled.
-func (g *Git) DeleteBranchWithEnvironment(branch string, force bool, environment []string) error {
-	return g.deleteBranch(branch, force, environment)
-}
-
-func (g *Git) deleteBranch(branch string, force bool, environment []string) error {
 	args := []string{"branch"}
 	if force {
 		args = append(args, "-D")
@@ -84,12 +73,7 @@ func (g *Git) deleteBranch(branch string, force bool, environment []string) erro
 	}
 	args = append(args, branch)
 
-	var err error
-	if environment == nil {
-		_, err = g.run(args...)
-	} else {
-		_, err = g.RunWithEnvironmentAndDisabledHooks(context.Background(), environment, args...)
-	}
+	_, err := g.run(args...)
 	if err != nil {
 		return fmt.Errorf("failed to delete branch %s: %w", branch, err)
 	}

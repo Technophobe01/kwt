@@ -24,7 +24,7 @@ type WorkspaceBackend interface {
 	ListWorkspaces(context.Context) ([]Workspace, error)
 	BranchExists(context.Context, string) (bool, error)
 	EnsureRemote(context.Context, Repository) (string, error)
-	Fetch(context.Context, string, string, string) (string, error)
+	Fetch(context.Context, string, string, string, string) (string, error)
 	Create(context.Context, string, string) (Workspace, error)
 	ConfigurePush(context.Context, Workspace, string, string, string) error
 	Rollback(context.Context, Workspace) error
@@ -181,12 +181,9 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 			return AsError(remoteErr, CodeWorkspaceCreation, "failed to configure the pull-request Git remote")
 		}
 		fetchRef := pullRequestFetchRef(pr)
-		sha, fetchErr := s.backend.Fetch(ctx, remote, "refs/heads/"+pr.Source.Name, fetchRef)
+		_, fetchErr := s.backend.Fetch(ctx, remote, "refs/heads/"+pr.Source.Name, fetchRef, pr.HeadSHA)
 		if fetchErr != nil {
 			return AsError(fetchErr, CodeInaccessibleHead, "failed to fetch the pull-request head")
-		}
-		if !strings.EqualFold(strings.TrimSpace(sha), strings.TrimSpace(pr.HeadSHA)) {
-			return NewError(CodeConflict, "pull-request head changed while it was being imported; retry", true, nil)
 		}
 
 		workspace, createErr := s.backend.Create(ctx, branch, fetchRef)

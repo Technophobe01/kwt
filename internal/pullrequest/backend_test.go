@@ -167,7 +167,7 @@ func TestGitBackendFetchClassifiesHTTPAuthenticationFailures(t *testing.T) {
 			repo, backend := newBackendRepo(t)
 			runGit(t, repo, "remote", "add", "private", server.URL+"/repo.git")
 
-			_, err := backend.Fetch(context.Background(), "private", "refs/heads/topic", "refs/kwt/test")
+			_, err := backend.Fetch(context.Background(), "private", "refs/heads/topic", "refs/kwt/test", "")
 
 			assertErrorCode(t, err, CodeAuthentication)
 		})
@@ -192,24 +192,10 @@ func TestGitBackendFetchDisablesHooksAndSanitizesEnvironment(t *testing.T) {
 	}
 	require.NoError(t, os.Remove(leakPath))
 
-	_, err := backend.Fetch(context.Background(), "fork", "refs/heads/topic", "refs/kwt/test")
+	_, err := backend.Fetch(context.Background(), "fork", "refs/heads/topic", "refs/kwt/test", "")
 
 	require.NoError(t, err)
 	assert.NoFileExists(t, leakPath)
-}
-
-func TestParseGitVersionRequiresWorktreeConfigSupport(t *testing.T) {
-	for _, tc := range []struct {
-		output string
-		ok     bool
-	}{
-		{output: "git version 2.19.6", ok: false},
-		{output: "git version 2.20.0", ok: true},
-		{output: "git version 2.45.2 (Apple Git-145)", ok: true},
-		{output: "not git", ok: false},
-	} {
-		assert.Equal(t, tc.ok, supportsWorktreeConfig(tc.output), tc.output)
-	}
 }
 
 func TestGitBackendValidateImportRejectsCredentialBearingRemoteURLs(t *testing.T) {
@@ -334,29 +320,6 @@ func TestGitBackendValidateImportRejectsRemoteHelperURLs(t *testing.T) {
 			assertErrorCode(t, err, CodeAuthentication)
 			assert.NotContains(t, err.Error(), "never-log-helper")
 		})
-	}
-}
-
-func TestRemoteURLCredentialDetectionAllowsAgentBasedSSH(t *testing.T) {
-	for _, tc := range []struct {
-		remoteURL string
-		want      bool
-	}{
-		{remoteURL: "https://github.com/acme/widget.git"},
-		{remoteURL: "https://token@github.com/acme/widget.git", want: true},
-		{remoteURL: "git@github.com:acme/widget.git"},
-		{remoteURL: "ssh://git@github.com/acme/widget.git"},
-		{remoteURL: "ssh://git:secret@github.com/acme/widget.git", want: true},
-		{remoteURL: "git:secret@github.com:acme/widget.git", want: true},
-		{remoteURL: "https://github.com/acme/widget.git?access_token=secret", want: true},
-		{remoteURL: "https://github.com/acme/widget.git#token", want: true},
-		{remoteURL: "https://github.com/%zz", want: true},
-		{remoteURL: "git@github.com:acme/widget.git?access_token=secret", want: true},
-		{remoteURL: "corp::--token=secret", want: true},
-		{remoteURL: "::--token=secret", want: true},
-		{remoteURL: "ssh://git@[2001:db8::1]/acme/widget.git"},
-	} {
-		assert.Equal(t, tc.want, remoteURLHasEmbeddedCredentials(tc.remoteURL), tc.remoteURL)
 	}
 }
 
@@ -795,7 +758,7 @@ func TestGitBackendFetchReportsUnavailableHead(t *testing.T) {
 	runGit(t, repo, "init", "--bare", bare)
 	runGit(t, repo, "remote", "add", "fork", bare)
 
-	_, err := backend.Fetch(context.Background(), "fork", "refs/heads/deleted", "refs/kwt/pull-requests/acme/widget/1")
+	_, err := backend.Fetch(context.Background(), "fork", "refs/heads/deleted", "refs/kwt/pull-requests/acme/widget/1", "")
 
 	assertErrorCode(t, err, CodeInaccessibleHead)
 }

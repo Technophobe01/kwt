@@ -200,7 +200,7 @@ func (f *fakeWorkspaceBackend) EnsureRemote(_ context.Context, repo Repository) 
 	return name, nil
 }
 
-func (f *fakeWorkspaceBackend) Fetch(_ context.Context, remote, sourceRef, destinationRef string) (string, error) {
+func (f *fakeWorkspaceBackend) Fetch(_ context.Context, remote, sourceRef, destinationRef, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchedRemote = remote

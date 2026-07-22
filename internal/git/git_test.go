@@ -1,8 +1,6 @@
 package git
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -167,274 +163,6 @@ func TestNewFromCwd(t *testing.T) {
 	if resolvedWorkDir != resolvedRepoPath {
 		t.Errorf("NewFromCwd() workDir = %s, want %s", resolvedWorkDir, resolvedRepoPath)
 	}
-}
-
-func TestRunNonInteractiveWithContextDisablesTerminalPrompts(t *testing.T) {
-	repo := NewTestRepository(t)
-	t.Setenv("GIT_TERMINAL_PROMPT", "1")
-	gitOutput(t, repo.Path, "config", "alias.check-prompt", `!test "$GIT_TERMINAL_PROMPT" = 0 && test "$GCM_INTERACTIVE" = Never && test "$SSH_ASKPASS_REQUIRE" = never && case "$GIT_SSH_COMMAND" in *BatchMode=yes*) true;; *) false;; esac`)
-
-	_, err := New(repo.Path).RunNonInteractiveWithContext(context.Background(), "check-prompt")
-
-	if err != nil {
-		t.Fatalf("RunNonInteractiveWithContext() error = %v", err)
-	}
-}
-
-func TestNonInteractiveEnvironmentUsesSSHVariantBatchFlag(t *testing.T) {
-	tests := []struct {
-		name        string
-		environment []string
-		wantCommand string
-	}{
-		{
-			name:        "OpenSSH",
-			environment: []string{"GIT_SSH_COMMAND=ssh -i key"},
-			wantCommand: "ssh -i key -oBatchMode=yes",
-		},
-		{
-			name:        "explicit plink variant",
-			environment: []string{"GIT_SSH_COMMAND=C:\\PuTTY\\plink.exe", "GIT_SSH_VARIANT=plink"},
-			wantCommand: "C:\\PuTTY\\plink.exe -batch",
-		},
-		{
-			name:        "detected plink variant",
-			environment: []string{"GIT_SSH_COMMAND=/usr/local/bin/plink"},
-			wantCommand: "/usr/local/bin/plink -batch",
-		},
-		{
-			name:        "detected Windows plink path",
-			environment: []string{`GIT_SSH_COMMAND=C:\PuTTY\plink.exe`},
-			wantCommand: `C:\PuTTY\plink.exe -batch`,
-		},
-		{
-			name:        "quoted OpenSSH executable path",
-			environment: []string{"GIT_SSH_COMMAND='/opt/Open SSH/ssh' -i key"},
-			wantCommand: "'/opt/Open SSH/ssh' -i key -oBatchMode=yes",
-		},
-		{
-			name:        "quoted plink executable path",
-			environment: []string{`GIT_SSH_COMMAND="C:\Program Files\PuTTY\plink.exe" -ssh`},
-			wantCommand: `"C:\Program Files\PuTTY\plink.exe" -ssh -batch`,
-		},
-		{
-			name:        "OpenSSH from GIT_SSH",
-			environment: []string{"GIT_SSH=/usr/local/bin/ssh"},
-			wantCommand: "'/usr/local/bin/ssh' -oBatchMode=yes",
-		},
-		{
-			name:        "plink from GIT_SSH",
-			environment: []string{"GIT_SSH=C:\\PuTTY\\plink.exe", "GIT_SSH_VARIANT=plink"},
-			wantCommand: "'C:\\PuTTY\\plink.exe' -batch",
-		},
-		{
-			name:        "GIT_SSH path with spaces",
-			environment: []string{"GIT_SSH=C:\\Program Files\\PuTTY\\plink.exe"},
-			wantCommand: "'C:\\Program Files\\PuTTY\\plink.exe' -batch",
-		},
-		{
-			name:        "unknown implementation",
-			environment: []string{"GIT_SSH_COMMAND=custom-transport"},
-			wantCommand: "custom-transport",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := NonInteractiveEnvironment(tc.environment)
-			if command := environmentValue(got, "GIT_SSH_COMMAND"); command != tc.wantCommand {
-				t.Fatalf("GIT_SSH_COMMAND = %q, want %q", command, tc.wantCommand)
-			}
-		})
-	}
-}
-
-func TestAddWorktreeFromBaseWithEnvironmentCleansUpFailedCheckout(t *testing.T) {
-	repo := NewTestRepository(t)
-	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=reject-checkout\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
-	gitOutput(t, repo.Path, "config", "filter.reject-checkout.clean", "cat")
-	gitOutput(t, repo.Path, "config", "filter.reject-checkout.smudge", "sh -c 'echo checkout-failed >&2; exit 73'")
-	gitOutput(t, repo.Path, "config", "filter.reject-checkout.required", "true")
-	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
-	gitOutput(t, repo.Path, "commit", "-m", "Add checkout failure fixture")
-
-	path := filepath.Join(t.TempDir(), "failed-worktree")
-	branch := "review/failed-checkout"
-	err := New(repo.Path).AddWorktreeFromBaseWithEnvironment(
-		path, branch, "main", NonInteractiveEnvironment(os.Environ()),
-	)
-
-	require.Error(t, err)
-	assert.NoDirExists(t, path)
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	cmd.Dir = repo.Path
-	assert.Error(t, cmd.Run(), "failed checkout must not leave its newly created branch")
-	worktrees := gitOutput(t, repo.Path, "worktree", "list", "--porcelain")
-	assert.NotContains(t, worktrees, path)
-}
-
-func TestConfiguredFilterDriversPreservesSubsectionCase(t *testing.T) {
-	config := "filter.MixedCase.smudge\ncommand\x00filter.MixedCase.required\ntrue\x00core.bare\nfalse\x00"
-
-	assert.Equal(t, []string{"MixedCase"}, configuredFilterDrivers(config))
-}
-
-func TestAddWorktreeFromBaseWithEnvironmentHonorsCanceledContext(t *testing.T) {
-	repo := NewTestRepository(t)
-	filterStarted := filepath.Join(t.TempDir(), "filter-started")
-	filterRelease := filepath.Join(t.TempDir(), "filter-release")
-	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, ".gitattributes"), []byte("payload.txt filter=slow-checkout\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(repo.Path, "payload.txt"), []byte("payload\n"), 0o644))
-	gitOutput(t, repo.Path, "config", "filter.slow-checkout.clean", "cat")
-	gitOutput(t, repo.Path, "config", "filter.slow-checkout.smudge", fmt.Sprintf(
-		"printf started > \"%s\"; printf dirty > partial-marker.txt; while [ ! -f \"%s\" ]; do sleep 0.05; done; cat",
-		filepath.ToSlash(filterStarted), filepath.ToSlash(filterRelease),
-	))
-	gitOutput(t, repo.Path, "config", "filter.slow-checkout.required", "true")
-	gitOutput(t, repo.Path, "add", ".gitattributes", "payload.txt")
-	gitOutput(t, repo.Path, "commit", "-m", "Add slow checkout fixture")
-
-	path := filepath.Join(t.TempDir(), "canceled-worktree")
-	branch := "review/canceled-checkout"
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	started := time.Now()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- New(repo.Path).AddWorktreeFromBaseWithEnvironmentAndContext(
-			ctx, path, branch, "main", NonInteractiveEnvironment(os.Environ()),
-		)
-	}()
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(filterStarted)
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
-	cancel()
-	require.NoError(t, os.WriteFile(filterRelease, []byte("release\n"), 0o644))
-	err := <-errCh
-
-	require.Error(t, err)
-	assert.Less(t, time.Since(started), 8*time.Second)
-	var partial *PartialWorktreeCreationError
-	require.ErrorAs(t, err, &partial)
-	assert.Equal(t, path, partial.Path)
-	assert.Equal(t, branch, partial.Branch)
-	assert.DirExists(t, path, "a dirty partial checkout must be preserved for manual cleanup")
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	cmd.Dir = repo.Path
-	assert.NoError(t, cmd.Run(), "the branch for a preserved dirty checkout must remain; add error: %v; worktrees: %s",
-		err, gitOutput(t, repo.Path, "worktree", "list", "--porcelain"))
-}
-
-func TestFailedWorktreeCleanupPreservesArtifactsCreatedAfterSnapshot(t *testing.T) {
-	repo := NewTestRepository(t)
-	g := New(repo.Path)
-	path := filepath.Join(t.TempDir(), "concurrent-worktree")
-	branch := "review/concurrent-branch"
-	require.NoError(t, os.Mkdir(path, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(path, "owner.txt"), []byte("unrelated\n"), 0o644))
-	gitOutput(t, repo.Path, "branch", branch, "main")
-
-	_, _, err := g.cleanupFailedWorktreeAdd(context.Background(), &worktreeAddReservation{
-		path: path, branch: branch, branchRef: "refs/heads/" + branch,
-	}, NonInteractiveEnvironment(os.Environ()))
-
-	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(path, "owner.txt"))
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	cmd.Dir = repo.Path
-	assert.NoError(t, cmd.Run(), "cleanup must not delete a branch created by another operation")
-}
-
-func TestFailedWorktreeCleanupPreservesChangedReservedBranch(t *testing.T) {
-	repo := NewTestRepository(t)
-	g := New(repo.Path)
-	path := filepath.Join(t.TempDir(), "reserved-worktree")
-	branch := "review/changed-reserved-branch"
-	environment := NonInteractiveEnvironment(os.Environ())
-	reservation, err := g.reserveWorktreeAdd(context.Background(), path, branch, "main", environment)
-	require.NoError(t, err)
-	changedOID := gitOutput(t, repo.Path, "commit-tree", reservation.branchOID+"^{tree}", "-p", reservation.branchOID, "-m", "concurrent update")
-	gitOutput(t, repo.Path, "update-ref", reservation.branchRef, changedOID, reservation.branchOID)
-
-	_, _, err = g.cleanupFailedWorktreeAdd(context.Background(), reservation, environment)
-
-	require.NoError(t, err)
-	assert.NoDirExists(t, path)
-	assert.Equal(t, changedOID, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
-}
-
-func TestFailedWorktreeCleanupPreservesUnownedBranchAtReservedOID(t *testing.T) {
-	repo := NewTestRepository(t)
-	g := New(repo.Path)
-	branch := "review/preexisting-at-reserved-oid"
-	oid := gitOutput(t, repo.Path, "rev-parse", "main")
-	gitOutput(t, repo.Path, "branch", branch, oid)
-	reservation := &worktreeAddReservation{
-		branch: branch, branchRef: "refs/heads/" + branch, branchOID: oid,
-	}
-
-	_, _, err := g.cleanupFailedWorktreeAdd(context.Background(), reservation, NonInteractiveEnvironment(os.Environ()))
-
-	require.NoError(t, err)
-	assert.Equal(t, oid, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
-}
-
-func TestPartialWorktreeRetryCleanupPreservesChangedReservedBranch(t *testing.T) {
-	repo := NewTestRepository(t)
-	g := New(repo.Path)
-	path := filepath.Join(t.TempDir(), "partial-worktree")
-	branch := "review/retry-changed-branch"
-	environment := NonInteractiveEnvironment(os.Environ())
-	reservation, err := g.reserveWorktreeAdd(context.Background(), path, branch, "main", environment)
-	require.NoError(t, err)
-	changedOID := gitOutput(t, repo.Path, "commit-tree", reservation.branchOID+"^{tree}", "-p", reservation.branchOID, "-m", "concurrent update")
-	gitOutput(t, repo.Path, "update-ref", reservation.branchRef, changedOID, reservation.branchOID)
-	partial := &PartialWorktreeCreationError{
-		Path: path, Branch: branch, Err: errors.New("initial cleanup failed"), reservation: reservation,
-	}
-
-	err = partial.RetryCleanup(context.Background(), g, environment)
-
-	require.NoError(t, err)
-	assert.NoDirExists(t, path)
-	assert.Equal(t, changedOID, gitOutput(t, repo.Path, "rev-parse", reservation.branchRef))
-}
-
-func TestAddWorktreeReservationPreservesExistingArtifacts(t *testing.T) {
-	repo := NewTestRepository(t)
-	g := New(repo.Path)
-	environment := NonInteractiveEnvironment(os.Environ())
-
-	t.Run("path", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "existing-worktree")
-		require.NoError(t, os.Mkdir(path, 0o755))
-		ownerPath := filepath.Join(path, "owner.txt")
-		require.NoError(t, os.WriteFile(ownerPath, []byte("unrelated\n"), 0o644))
-
-		err := g.AddWorktreeFromBaseWithEnvironment(path, "review/path-race", "main", environment)
-
-		require.Error(t, err)
-		assert.FileExists(t, ownerPath)
-		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/review/path-race")
-		cmd.Dir = repo.Path
-		assert.Error(t, cmd.Run())
-	})
-
-	t.Run("branch", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "reserved-worktree")
-		branch := "review/branch-race"
-		gitOutput(t, repo.Path, "branch", branch, "main")
-
-		err := g.AddWorktreeFromBaseWithEnvironment(path, branch, "main", environment)
-
-		require.Error(t, err)
-		assert.NoDirExists(t, path)
-		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-		cmd.Dir = repo.Path
-		assert.NoError(t, cmd.Run())
-	})
 }
 
 func TestListWorktrees(t *testing.T) {
@@ -827,6 +555,7 @@ func TestPruneWorktrees(t *testing.T) {
 	if err := os.RemoveAll(worktreePath); err != nil {
 		t.Fatalf("Failed to remove worktree directory: %v", err)
 	}
+
 	// Prune worktrees
 	err := g.PruneWorktrees()
 	if err != nil {
@@ -839,14 +568,6 @@ func TestPruneWorktrees(t *testing.T) {
 		if wt.Path == worktreePath {
 			t.Error("Deleted worktree still exists after prune")
 		}
-	}
-}
-
-func TestParseWorktreePorcelainMarksPrunable(t *testing.T) {
-	worktrees := parseWorktreePorcelain("worktree /tmp/stale\nHEAD abc123\nbranch refs/heads/topic\nprunable gitdir file points to non-existent location\n")
-
-	if len(worktrees) != 1 || !worktrees[0].Prunable {
-		t.Fatalf("parseWorktreePorcelain() = %+v, want one prunable worktree", worktrees)
 	}
 }
 

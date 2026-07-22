@@ -203,10 +203,10 @@ environment variables into workspace paths.
 Before materializing pull-request files, kwt creates a no-checkout worktree and
 verifies that branch- and worktree-conditional Git includes do not change its
 effective configuration, including record order and precedence. Push URLs and
-refspecs are validated against the PR source repository again after setup and
-push configuration, and import fails if setup moved `HEAD` away from the
-generated workspace branch. Worktree paths are stored and matched in canonical
-form so symlinked base directories do not create duplicate imports.
+refspecs are validated against the PR source repository again after push
+configuration, and import fails if `HEAD` no longer names the generated
+workspace branch. Worktree paths are stored and matched in canonical form so
+symlinked base directories do not create duplicate imports.
 
 A new import returns:
 
