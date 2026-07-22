@@ -860,7 +860,7 @@ func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, bran
 		branch, "", true, worktree.AddOptions{Context: ctx},
 	)
 	if err != nil {
-		return "", err
+		return path, err
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil

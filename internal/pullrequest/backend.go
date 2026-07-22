@@ -6,6 +6,7 @@ import (
 	"fmt"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -70,7 +71,8 @@ func SafeSetupEnvironment(environment []string, fleetTokenEnvironment ...string)
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if !blocked[strings.ToLower(name)] {
+		normalizedName := strings.ToLower(name)
+		if !strings.HasPrefix(normalizedName, "kwt_") && !blocked[normalizedName] {
 			result = append(result, entry)
 		}
 	}
@@ -665,8 +667,14 @@ func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, rem
 	if err := b.validateEffectiveRemoteAt(ctx, workspace.Path, remote, sourceRepository); err != nil {
 		return err
 	}
+	if _, err := b.runImportGit(ctx, "config", "extensions.worktreeConfig", "true"); err != nil {
+		return err
+	}
+	hooksPath, err := b.configureDisabledHooks(ctx, workspace.Path)
+	if err != nil {
+		return err
+	}
 	commands := [][]string{
-		{"config", "extensions.worktreeConfig", "true"},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".remote", remote},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".pushRemote", remote},
 		{"-C", workspace.Path, "config", "--worktree", "branch." + workspace.Branch + ".merge", "refs/heads/" + sourceBranch},
@@ -680,7 +688,54 @@ func (b *GitBackend) ConfigurePush(ctx context.Context, workspace Workspace, rem
 			return err
 		}
 	}
-	return b.validateWorkspacePushRouting(ctx, workspace, remote, sourceRepository, sourceBranch)
+	return b.validateWorkspacePushRouting(ctx, workspace, remote, sourceRepository, sourceBranch, hooksPath)
+}
+
+func (b *GitBackend) configureDisabledHooks(ctx context.Context, worktreePath string) (string, error) {
+	output, err := b.runImportGitAt(ctx, worktreePath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", NewError(CodeWorkspaceCreation, "failed to locate Git metadata for hook isolation", false, err)
+	}
+	commonDir := strings.TrimSpace(output)
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreePath, commonDir)
+	}
+	commonDir, err = filepath.Abs(commonDir)
+	if err != nil {
+		return "", NewError(CodeWorkspaceCreation, "failed to resolve Git metadata for hook isolation", false, err)
+	}
+	hooksPath := filepath.Join(filepath.Clean(commonDir), "kwt", "disabled-hooks")
+	for _, directory := range []string{filepath.Dir(hooksPath), hooksPath} {
+		if err := ensurePrivateDirectory(directory); err != nil {
+			return "", NewError(CodeWorkspaceCreation, "failed to prepare persistent hook isolation", false, err)
+		}
+	}
+	entries, err := os.ReadDir(hooksPath)
+	if err != nil {
+		return "", NewError(CodeWorkspaceCreation, "failed to inspect persistent hook isolation", false, err)
+	}
+	if len(entries) != 0 {
+		return "", NewError(CodeWorkspaceCreation, "persistent hook isolation directory is not empty", false, nil)
+	}
+	if _, err := b.runImportGitAt(ctx, worktreePath,
+		"config", "--worktree", "core.hooksPath", hooksPath); err != nil {
+		return "", NewError(CodeWorkspaceCreation, "failed to persist hook isolation", false, err)
+	}
+	return hooksPath, nil
+}
+
+func ensurePrivateDirectory(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a trusted directory", path)
+	}
+	return os.Chmod(path, 0o700)
 }
 
 func (b *GitBackend) validateWorkspaceHead(ctx context.Context, workspace Workspace) error {
@@ -693,7 +748,11 @@ func (b *GitBackend) validateWorkspaceHead(ctx context.Context, workspace Worksp
 	return nil
 }
 
-func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace Workspace, remote, sourceRepository, sourceBranch string) error {
+func (b *GitBackend) validateWorkspacePushRouting(
+	ctx context.Context,
+	workspace Workspace,
+	remote, sourceRepository, sourceBranch, expectedHooksPath string,
+) error {
 	if err := b.validateImportConfigurationAt(ctx, workspace.Path); err != nil {
 		return err
 	}
@@ -702,6 +761,12 @@ func (b *GitBackend) validateWorkspacePushRouting(ctx context.Context, workspace
 	}
 	if err := b.validateEffectiveRemoteAt(ctx, workspace.Path, remote, sourceRepository); err != nil {
 		return err
+	}
+	hooksOutput, err := b.git.RunWithContext(ctx,
+		"-C", workspace.Path, "config", "--includes", "--path", "--get", "core.hooksPath")
+	if err != nil || filepath.Clean(strings.TrimSpace(hooksOutput)) != filepath.Clean(expectedHooksPath) {
+		return NewError(CodeWorkspaceCreation,
+			"pull-request worktree does not retain persistent hook isolation", false, err)
 	}
 
 	pushKey := "remote." + remote + ".push"

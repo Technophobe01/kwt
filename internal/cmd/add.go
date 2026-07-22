@@ -155,6 +155,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 		worktreePath, err := ctx.WorktreeManager.AddWithOptions(branch, path, addBranch, worktree.AddOptions{Context: cmd.Context()})
 		if err != nil {
+			if worktreePath != "" {
+				return fmt.Errorf("%w; worktree may still require cleanup at %s", err, worktreePath)
+			}
 			return err
 		}
 

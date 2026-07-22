@@ -1482,6 +1482,31 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	assert.Equal(t, 1, published)
 }
 
+func TestTUIBackendCreateWorktreeRollsBackCanceledSetup(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository:    repoPath,
+			SetupCommands: []string{"printf ran > setup-ran.txt"},
+		}},
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{Branch: "main", Path: repoPath}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	path, err := backend.CreateWorktree(ctx, row, "feature/canceled-tui-add")
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, path)
+	worktrees := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
+	assert.NotContains(t, worktrees, "feature/canceled-tui-add")
+	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-tui-add")
+	branchCheck.Dir = repoPath
+	assert.Error(t, branchCheck.Run(), "the operation-owned branch must be deleted")
+}
+
 func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {
 	resetFleetCommandDeps(t)
 	t.Setenv("HOME", t.TempDir())

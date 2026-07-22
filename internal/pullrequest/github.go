@@ -79,6 +79,10 @@ func (p *GitHubProvider) List(ctx context.Context, repository Repository, state 
 		for _, githubPR := range prs {
 			pr, mapErr := mapGitHubPullRequest(githubPR)
 			if mapErr != nil {
+				var typed *Error
+				if errors.As(mapErr, &typed) && typed.Code == CodeInaccessibleHead {
+					continue
+				}
 				return nil, mapErr
 			}
 			result = append(result, pr)

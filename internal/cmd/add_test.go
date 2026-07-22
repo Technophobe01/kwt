@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -80,6 +81,34 @@ func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory is not empty")
 	assert.Zero(t, calls)
+}
+
+func TestAddRollsBackCanceledSetup(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "canceled-add")
+	initCommandTestConfig(t, t.TempDir())
+	viper.Set("repository_settings", []models.RepositorySetting{{
+		Repository:    repoPath,
+		SetupCommands: []string{"printf ran > setup-ran.txt"},
+	}})
+	t.Chdir(repoPath)
+	addBranch = true
+	addNoLaunch = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd, _, _ := fleetTestCommand()
+	cmd.SetContext(ctx)
+
+	err := runAdd(cmd, []string{"feature/canceled-add", worktreePath})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NoDirExists(t, worktreePath)
+	branchCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/feature/canceled-add")
+	branchCheck.Dir = repoPath
+	assert.Error(t, branchCheck.Run(), "the operation-owned branch must be deleted")
 }
 
 func TestShouldLaunch(t *testing.T) {

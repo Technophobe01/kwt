@@ -84,7 +84,7 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 			setupCtx := addOptionsContext(opts)
 			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, nil)
 			if err := setupCtx.Err(); err != nil {
-				return path, err
+				return m.rollbackCanceledAdd(path, branch, createBranch, nil, err)
 			}
 		}
 	}
@@ -151,11 +151,25 @@ func (m *Manager) AddFromBaseWithOptions(branch string, baseBranch string, custo
 			setupCtx := addOptionsContext(opts)
 			m.runPostWorktreeSetupWithEnvironment(setupCtx, branch, path, opts.SetupEnvironment)
 			if err := setupCtx.Err(); err != nil {
-				return path, err
+				return m.rollbackCanceledAdd(path, branch, true, opts.SetupEnvironment, err)
 			}
 		}
 	}
 	return path, nil
+}
+
+func (m *Manager) rollbackCanceledAdd(
+	path, branch string,
+	createdBranch bool,
+	environment []string,
+	cancelErr error,
+) (string, error) {
+	cleanupErr := m.removeWithBranch(path, branch, true, createdBranch, true, environment)
+	if cleanupErr == nil {
+		return "", cancelErr
+	}
+	return path, errors.Join(cancelErr,
+		fmt.Errorf("canceled add cleanup failed for worktree %q and branch %q: %w", path, branch, cleanupErr))
 }
 
 func addOptionsContext(opts AddOptions) context.Context {

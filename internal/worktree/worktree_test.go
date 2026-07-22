@@ -28,6 +28,8 @@ type mockGit struct {
 	listError         error
 	pruneError        error
 	deleteBranchError error
+	removedWorktrees  []string
+	deletedBranches   []string
 	recentCommits     []models.CommitInfo
 	mainRepoPathError error
 }
@@ -54,6 +56,7 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 }
 
 func (m *mockGit) RemoveWorktree(path string, force bool) error {
+	m.removedWorktrees = append(m.removedWorktrees, path)
 	if m.removeError != nil {
 		return m.removeError
 	}
@@ -97,6 +100,7 @@ func (m *mockGit) GetRepositoryURL() (string, error) {
 }
 
 func (m *mockGit) DeleteBranch(branch string, force bool) error {
+	m.deletedBranches = append(m.deletedBranches, branch)
 	if m.deleteBranchError != nil {
 		return m.deleteBranchError
 	}
@@ -248,27 +252,37 @@ func TestManagerStrictSetupPropagatesPostCreationFailures(t *testing.T) {
 	}
 }
 
-func TestManagerNonStrictSetupHonorsCanceledContext(t *testing.T) {
-	repoPath, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	worktreePath := filepath.Join(t.TempDir(), "canceled-setup")
-	git := &mockGit{repoPath: repoPath}
-	manager := New(git, &models.Config{
-		Worktree: models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
-		RepositorySettings: []models.RepositorySetting{{
-			Repository: repoPath, SetupCommands: []string{"printf ran > setup-ran.txt"},
-		}},
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+func TestManagerNonStrictSetupRollsBackCanceledAdd(t *testing.T) {
+	for _, createBranch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "existing branch", true: "created branch"}[createBranch], func(t *testing.T) {
+			repoPath, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
+			worktreePath := filepath.Join(t.TempDir(), "canceled-setup")
+			git := &mockGit{repoPath: repoPath}
+			manager := New(git, &models.Config{
+				Worktree: models.WorktreeConfig{BaseDir: t.TempDir(), AutoMkdir: true},
+				RepositorySettings: []models.RepositorySetting{{
+					Repository: repoPath, SetupCommands: []string{"printf ran > setup-ran.txt"},
+				}},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
 
-	path, err := manager.AddWithOptions("canceled-setup", worktreePath, false, AddOptions{Context: ctx})
+			path, err := manager.AddWithOptions("canceled-setup", worktreePath, createBranch, AddOptions{Context: ctx})
 
-	require.ErrorIs(t, err, context.Canceled)
-	resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
-	require.NoError(t, resolveErr)
-	assert.Equal(t, resolvedWorktreePath, path)
-	assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Empty(t, path, "successful rollback must not report a surviving worktree")
+			resolvedWorktreePath, resolveErr := filepath.EvalSymlinks(worktreePath)
+			require.NoError(t, resolveErr)
+			assert.Equal(t, []string{resolvedWorktreePath}, git.removedWorktrees)
+			if createBranch {
+				assert.Equal(t, []string{"canceled-setup"}, git.deletedBranches)
+			} else {
+				assert.Empty(t, git.deletedBranches, "an existing branch is not operation-owned")
+			}
+			assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran.txt"))
+		})
+	}
 }
 
 func TestManagerPreservesRealPartialWorktreeCreationFailure(t *testing.T) {

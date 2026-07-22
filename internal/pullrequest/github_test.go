@@ -139,11 +139,15 @@ func TestGitHubProviderClassifiesFailures(t *testing.T) {
 	}
 }
 
-func TestGitHubProviderReportsDeletedHeadRepository(t *testing.T) {
+func TestGitHubProviderListSkipsDeletedHeadRepository(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `[{"number":1,"html_url":"https://github.com/acme/widget/pull/1","title":"gone",`+
 			`"user":{"login":"octocat"},"state":"open","head":{"ref":"gone","sha":"abc","repo":null},`+
+			`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}},`+
+			`{"number":2,"html_url":"https://github.com/acme/widget/pull/2","title":"available",`+
+			`"user":{"login":"hubot"},"state":"closed","head":{"ref":"topic","sha":"def",`+
+			`"repo":{"name":"widget","full_name":"hubot/widget","clone_url":"https://github.com/hubot/widget.git"}},`+
 			`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}}]`)
 	}))
 	defer server.Close()
@@ -152,9 +156,11 @@ func TestGitHubProviderReportsDeletedHeadRepository(t *testing.T) {
 	require.NoError(t, err)
 	provider := NewGitHubProvider(client)
 
-	_, err = provider.List(context.Background(), Repository{Owner: "acme", Name: "widget", Identity: "github.com/acme/widget"}, "open")
+	prs, err := provider.List(context.Background(), Repository{Owner: "acme", Name: "widget", Identity: "github.com/acme/widget"}, "all")
 
-	assertErrorCode(t, err, CodeInaccessibleHead)
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.Equal(t, 2, prs[0].Number)
 }
 
 func TestGitHubProviderRejectsMalformedSuccessfulResponse(t *testing.T) {

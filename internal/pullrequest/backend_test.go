@@ -372,7 +372,10 @@ func TestGitBackendValidateImportRejectsCustomReceivePack(t *testing.T) {
 }
 
 func TestSafeSetupEnvironmentRemovesConfiguredSecrets(t *testing.T) {
-	environment := []string{"PATH=/bin", "KWT_GITHUB_TOKEN=secret", "KWT_FLEET_TOKEN=fleet", "CUSTOM_TOKEN=custom", "VISIBLE=yes"}
+	environment := []string{
+		"PATH=/bin", "KWT_GITHUB_TOKEN=secret", "KWT_FLEET_TOKEN=fleet",
+		"KWT_HOME=/private/kwt", "KWT_SHELL_DEPTH=1", "CUSTOM_TOKEN=custom", "VISIBLE=yes",
+	}
 
 	got := SafeSetupEnvironment(environment, "CUSTOM_TOKEN", "KWT_FLEET_TOKEN_FILE")
 
@@ -438,6 +441,43 @@ func TestPRImportSetupCommandsDoNotReceiveKWTSecrets(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join(workspace.Path, "setup-env.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "||||visible", string(contents))
+}
+
+func TestPRImportSetupCannotDiscoverFleetTokenThroughKWTHome(t *testing.T) {
+	repo := t.TempDir()
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644))
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "initial")
+
+	tokenFile := filepath.Join(t.TempDir(), "fleet.token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("fleet-bearer-secret"), 0o600))
+	kwtHome := t.TempDir()
+	configText := "[fleet]\ntoken_file = \"" + filepath.ToSlash(tokenFile) + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(kwtHome, "config.toml"), []byte(configText), 0o600))
+	t.Setenv("KWT_HOME", kwtHome)
+
+	g := gitadapter.New(repo)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Projects: []models.Project{{Repository: testProject().Identity, Name: testProject().Name, Path: resolvedRepo}},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: resolvedRepo,
+			SetupCommands: []string{
+				`if test -n "$KWT_HOME"; then token_file=$(sed -n 's/^token_file = "\(.*\)"$/\1/p' "$KWT_HOME/config.toml"); cat "$token_file" > stolen-token.txt; fi`,
+			},
+		}},
+	}
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/91", head)
+	backend := NewGitBackend(g, worktree.New(g, cfg), testProject())
+
+	workspace, err := backend.Create(context.Background(), "pr-91-safe-home", "refs/kwt/pull-requests/acme/widget/91")
+
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(workspace.Path, "stolen-token.txt"))
 }
 
 func TestPRImportCreatePropagatesStrictSetupFailure(t *testing.T) {
@@ -772,6 +812,40 @@ func TestGitBackendConfiguresPlainPushToOriginalHeadBranch(t *testing.T) {
 	cmd.Dir = repo
 	output, configErr := cmd.CombinedOutput()
 	assert.Error(t, configErr, "remote.fork.push unexpectedly visible in main checkout: %s", output)
+}
+
+func TestGitBackendConfigurePushPersistsDisabledHooksForNormalPush(t *testing.T) {
+	repo, backend := newBackendRepo(t)
+	leakPath := filepath.Join(t.TempDir(), "pre-push-ran")
+	hooksDir := filepath.Join(repo, ".githooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	quotedLeakPath := "'" + strings.ReplaceAll(filepath.ToSlash(leakPath), "'", "'\\''") + "'"
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"),
+		[]byte("#!/bin/sh\nprintf ran > "+quotedLeakPath+"\n"), 0o755))
+	runGit(t, repo, "add", ".githooks/pre-push")
+	runGit(t, repo, "commit", "-m", "add contributor hook")
+	runGit(t, repo, "config", "core.hooksPath", ".githooks")
+	runGit(t, repo, "remote", "add", "fork", "https://github.com/octocat/widget.git")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "update-ref", "refs/kwt/pull-requests/acme/widget/92", head)
+	workspace, err := backend.Create(context.Background(), "pr-92-safe-push", "refs/kwt/pull-requests/acme/widget/92")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Rollback(context.Background(), workspace) })
+
+	require.NoError(t, backend.ConfigurePush(
+		context.Background(), workspace, "fork", "github.com/octocat/widget", "feature/widgets",
+	))
+	effectiveHooksPath := runGit(t, workspace.Path, "config", "--path", "--get", "core.hooksPath")
+	assert.True(t, filepath.IsAbs(effectiveHooksPath), effectiveHooksPath)
+	assert.NotEqual(t, filepath.Join(workspace.Path, ".githooks"), effectiveHooksPath)
+	assert.DirExists(t, effectiveHooksPath)
+
+	bare := filepath.Join(t.TempDir(), "fork.git")
+	runGit(t, repo, "init", "--bare", bare)
+	runGit(t, repo, "remote", "set-url", "fork", bare)
+	runGit(t, workspace.Path, "push", "fork")
+
+	assert.NoFileExists(t, leakPath)
 }
 
 func TestGitBackendConfigurePushRejectsConditionalRemoteRedirect(t *testing.T) {
