@@ -14,7 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	go.kenn.io/kit v0.11.1-0.20260722232645-88fc63f1a55d
+	go.kenn.io/kit v0.11.1-0.20260722235114-89a0284057ad
 	golang.org/x/term v0.45.0
 )
 
