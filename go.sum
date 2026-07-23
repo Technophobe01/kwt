@@ -110,6 +110,8 @@ go.kenn.io/kit v0.11.1-0.20260722235114-89a0284057ad h1:5hu5/pp0G8nXCFgGjAsbPeMU
 go.kenn.io/kit v0.11.1-0.20260722235114-89a0284057ad/go.mod h1:dComZhFNb4LR+Tj4ZD0slEDMkPJk0gGd8q/HEHXTGSM=
 go.kenn.io/kit v0.11.1-0.20260723001823-60f44195a02a h1:twnylIW6WlbOalcIYj5M6ujNGXe4DyCDmoUWfUhfX9Y=
 go.kenn.io/kit v0.11.1-0.20260723001823-60f44195a02a/go.mod h1:dComZhFNb4LR+Tj4ZD0slEDMkPJk0gGd8q/HEHXTGSM=
+go.kenn.io/kit v0.11.1-0.20260723005408-7d6abedaca04 h1:eE5GJ1oNkMeDPF5+6ko990//FKMMUJ37LvWauqgzYUM=
+go.kenn.io/kit v0.11.1-0.20260723005408-7d6abedaca04/go.mod h1:dComZhFNb4LR+Tj4ZD0slEDMkPJk0gGd8q/HEHXTGSM=
 go.yaml.in/yaml/v3 v3.0.4 h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
