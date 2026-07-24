@@ -85,6 +85,9 @@ func (p *GitHubProvider) List(ctx context.Context, repository Repository, state 
 				}
 				return nil, mapErr
 			}
+			if validateErr := validateGitHubPullRequest(pr, repository, 0); validateErr != nil {
+				return nil, validateErr
+			}
 			result = append(result, pr)
 		}
 		if response == nil || response.NextPage == 0 {
@@ -103,7 +106,40 @@ func (p *GitHubProvider) Get(ctx context.Context, repository Repository, number 
 	if err != nil {
 		return PullRequest{}, classifyGitHubError(err, "get pull request")
 	}
-	return mapGitHubPullRequest(githubPR)
+	pr, err := mapGitHubPullRequest(githubPR)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	if err := validateGitHubPullRequest(pr, repository, number); err != nil {
+		return PullRequest{}, err
+	}
+	return pr, nil
+}
+
+func validateGitHubPullRequest(
+	pr PullRequest, requested Repository, requestedNumber int,
+) error {
+	expectedIdentity := NormalizeRepositoryIdentity(requested.Identity)
+	if expectedIdentity == "" {
+		expectedIdentity = NormalizeRepositoryIdentity(
+			"github.com/" + requested.Owner + "/" + requested.Name,
+		)
+	}
+	if !EqualRepositoryIdentity(pr.Repository.Identity, expectedIdentity) {
+		return NewError(
+			CodeMalformedResponse,
+			"GitHub returned a pull request for a different repository",
+			false, nil,
+		)
+	}
+	if requestedNumber > 0 && pr.Number != requestedNumber {
+		return NewError(
+			CodeMalformedResponse,
+			"GitHub returned a different pull request number",
+			false, nil,
+		)
+	}
+	return nil
 }
 
 func mapGitHubPullRequest(value *github.PullRequest) (PullRequest, error) {

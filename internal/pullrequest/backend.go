@@ -188,22 +188,7 @@ func ensureForkPushSafety(
 	case err != nil && !gitcmd.IsExitCode(err, 1):
 		return fmt.Errorf("inspect fork push remote: %w", err)
 	}
-
-	if _, _, err := runner.Run(
-		ctx, path, nil, "config", "--worktree", "push.default", "nothing",
-	); err != nil {
-		return fmt.Errorf("disable implicit fork pushes: %w", err)
-	}
-	stdout, _, err = runner.Run(
-		ctx, path, nil, "config", "--worktree", "--get", "push.default",
-	)
-	if err != nil {
-		return fmt.Errorf("verify disabled implicit fork pushes: %w", err)
-	}
-	if strings.TrimSpace(string(stdout)) != "nothing" {
-		return fmt.Errorf("verify disabled implicit fork pushes: unexpected push.default")
-	}
-	return nil
+	return errors.New("kit did not establish fork push tracking")
 }
 
 func mapSharedChangeRequestError(err error) error {

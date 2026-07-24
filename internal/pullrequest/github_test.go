@@ -179,3 +179,61 @@ func TestGitHubProviderRejectsMalformedSuccessfulResponse(t *testing.T) {
 	assertErrorCode(t, err, CodeMalformedResponse)
 	assert.True(t, strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "malformed"))
 }
+
+func TestGitHubProviderRejectsMismatchedSuccessfulResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		get  bool
+	}{
+		{
+			name: "list repository",
+			body: `[{"number":17,"html_url":"https://github.com/other/widget/pull/17","title":"wrong repo",` +
+				`"user":{"login":"octocat"},"state":"open",` +
+				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"base":{"ref":"main","repo":{"name":"widget","full_name":"other/widget","clone_url":"https://github.com/other/widget.git"}}}]`,
+		},
+		{
+			name: "get repository",
+			get:  true,
+			body: `{"number":17,"html_url":"https://github.com/other/widget/pull/17","title":"wrong repo",` +
+				`"user":{"login":"octocat"},"state":"open",` +
+				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"base":{"ref":"main","repo":{"name":"widget","full_name":"other/widget","clone_url":"https://github.com/other/widget.git"}}}`,
+		},
+		{
+			name: "get number",
+			get:  true,
+			body: `{"number":18,"html_url":"https://github.com/acme/widget/pull/18","title":"wrong number",` +
+				`"user":{"login":"octocat"},"state":"open",` +
+				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, tc.body)
+				},
+			))
+			defer server.Close()
+			baseURL := server.URL + "/"
+			client, err := github.NewClient(github.WithURLs(&baseURL, nil))
+			require.NoError(t, err)
+			provider := NewGitHubProvider(client)
+			repository := Repository{
+				Owner: "acme", Name: "widget",
+				Identity: "github.com/acme/widget",
+			}
+
+			if tc.get {
+				_, err = provider.Get(context.Background(), repository, 17)
+			} else {
+				_, err = provider.List(context.Background(), repository, "open")
+			}
+
+			assertErrorCode(t, err, CodeMalformedResponse)
+		})
+	}
+}

@@ -40,7 +40,9 @@ Threat model for pull-request discovery and import:
 - The existing project repository, its remotes, and its Git configuration are
   trusted local user state. Contributor metadata cannot set `pushurl`, custom
   refspecs, mirror mode, receive-pack commands, or URL rewrites there. Do not
-  treat those settings as an attacker-controlled PR-import boundary.
+  treat those settings as attacker-controlled. They still affect Git behavior:
+  when Kit cannot establish fork tracking, KWT must reject and roll back the
+  import rather than relying on `push.default` to override explicit refspecs.
 - Import is an explicit mutation initiated by the local user, but PR imports
   do not run repository `copy_files` or `setup_commands`. Git remote handling,
   fetch, isolated checkout, push routing, and ownership-aware rollback are one

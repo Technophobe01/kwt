@@ -90,7 +90,7 @@ func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	assert.NotEmpty(t, workspace.SessionName)
 }
 
-func TestGitBackendForkImportWithoutTrackingDisablesPlainPush(t *testing.T) {
+func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing.T) {
 	_, backend := newBackendRepo(t)
 	original := createMergeRequestWorktree
 	createMergeRequestWorktree = func(
@@ -99,6 +99,8 @@ func TestGitBackendForkImportWithoutTrackingDisablesPlainPush(t *testing.T) {
 		require.NoError(t, os.MkdirAll(opts.Path, 0o755))
 		runGit(t, opts.Path, "init", "-b", opts.Branch)
 		runGit(t, opts.Path, "config", "push.default", "current")
+		runGit(t, opts.Path, "config", "remote.origin.push",
+			"HEAD:refs/heads/main")
 		runGit(t, opts.Path, "config", "extensions.worktreeConfig", "true")
 		return managedworktree.CreateWorktreeResult{
 			Path: opts.Path, Branch: opts.Branch, BranchCreated: true,
@@ -110,9 +112,8 @@ func TestGitBackendForkImportWithoutTrackingDisablesPlainPush(t *testing.T) {
 		context.Background(), testPR(17, true), "pr-17-feature-widgets",
 	)
 
-	require.NoError(t, err)
-	assert.Equal(t, "nothing",
-		runGit(t, workspace.Path, "config", "--worktree", "--get", "push.default"))
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.NotEmpty(t, workspace.Path)
 }
 
 func TestGitBackendMapsSharedLifecycleErrors(t *testing.T) {
