@@ -1241,6 +1241,9 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 	if row.Entry == nil && row.Workspace == nil {
 		return fmt.Errorf("no worktree selected")
 	}
+	if err := rejectProtectedWorkspaceOpen(ctx, rowPaneRoot(row)); err != nil {
+		return err
+	}
 	sessionName, err := b.sessionName(row)
 	if err != nil {
 		return err

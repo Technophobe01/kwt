@@ -274,6 +274,39 @@ func importedWorkspaceProvenance(
 	return record, nil
 }
 
+func rejectProtectedWorkspaceOpen(
+	ctx context.Context,
+	workspacePath string,
+) error {
+	path := utils.CanonicalPath(workspacePath)
+	protected := false
+	err := pullrequest.NewFileStore(prStorePath()).View(
+		ctx,
+		func(records map[string]pullrequest.Provenance) error {
+			for _, record := range records {
+				if utils.CanonicalPath(record.Workspace.Path) == path {
+					protected = true
+					break
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to verify pull-request protection for workspace: %w",
+			err,
+		)
+	}
+	if protected {
+		return fmt.Errorf(
+			"protected pull-request workspaces must be opened with kwt pr attach %s",
+			workspacePath,
+		)
+	}
+	return nil
+}
+
 func defaultInspectPRProjectClone(
 	ctx context.Context,
 	recorded pullrequest.Project,
@@ -295,18 +328,23 @@ func defaultInspectPRProjectClone(
 	registered := make([]models.Project, 0, 1)
 	for _, candidate := range cfg.Projects {
 		if utils.CanonicalPath(candidate.Path) !=
-			utils.CanonicalPath(recorded.Path) ||
-			!pullrequest.EqualRepositoryIdentity(
-				publishableProjectRepository(candidate),
-				recorded.Identity,
-			) {
+			utils.CanonicalPath(recorded.Path) {
 			continue
 		}
 		registered = append(registered, candidate)
 	}
-	if len(registered) != 1 {
+	if len(registered) > 1 {
 		return pullrequest.Project{}, nil, fmt.Errorf(
 			"recorded project is not uniquely registered",
+		)
+	}
+	if len(registered) == 1 &&
+		!pullrequest.EqualRepositoryIdentity(
+			publishableProjectRepository(registered[0]),
+			recorded.Identity,
+		) {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"registered project conflicts with recorded identity",
 		)
 	}
 	g := gitadapter.New(project.Path)

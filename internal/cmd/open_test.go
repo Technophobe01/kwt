@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 func TestFindEntryByPath(t *testing.T) {
@@ -40,6 +43,37 @@ func TestShouldLoadTargetDefault(t *testing.T) {
 			assert.Equal(t, tc.want, shouldLoadTargetDefault(tc.layoutFlag, tc.selectLayout))
 		})
 	}
+}
+
+func TestOpenSelectedWorktreeRefusesProtectedPullRequestWorkspace(
+	t *testing.T,
+) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	workspacePath := t.TempDir()
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-32"] = pullrequest.Provenance{
+				Workspace: pullrequest.Workspace{Path: workspacePath},
+			}
+			return nil
+		},
+	))
+
+	err := openSelectedWorktree(
+		context.Background(),
+		&CommandContext{Config: &models.Config{}},
+		&discovery.GlobalWorktreeEntry{
+			Path: workspacePath,
+			RepositoryInfo: &url.RepositoryInfo{
+				FullPath: "github.com/acme/widget",
+			},
+		},
+		nil,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kwt pr attach")
 }
 
 // TestOpenCmdIsolatesFromCwdConfig guards the config-isolation invariant:

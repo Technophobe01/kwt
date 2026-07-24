@@ -492,6 +492,103 @@ func TestInspectPRProjectCloneUsesRegisteredIdentityOverForkOrigin(
 	assert.Equal(t, recorded.Identity, workspaces[0].Repository)
 }
 
+func TestInspectPRProjectCloneUsesLiveIdentityWithoutRegistration(
+	t *testing.T,
+) {
+	repo := newPRInspectionRepo(t)
+	runPRInspectionGit(
+		t,
+		repo,
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/acme/widget.git",
+	)
+	recorded := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Name:     "widget",
+		Path:     repo,
+	}
+	oldLoad := loadPRConfig
+	t.Cleanup(func() { loadPRConfig = oldLoad })
+	loadPRConfig = func() (*models.Config, error) {
+		return &models.Config{}, nil
+	}
+
+	project, workspaces, err := defaultInspectPRProjectClone(
+		context.Background(),
+		recorded,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, recorded.Identity, project.Identity)
+	require.NotEmpty(t, workspaces)
+	assert.Equal(t, recorded.Identity, workspaces[0].Repository)
+}
+
+func TestInspectPRProjectCloneRejectsConflictingRegistration(
+	t *testing.T,
+) {
+	repo := newPRInspectionRepo(t)
+	recorded := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Name:     "widget",
+		Path:     repo,
+	}
+	oldLoad := loadPRConfig
+	t.Cleanup(func() { loadPRConfig = oldLoad })
+	loadPRConfig = func() (*models.Config, error) {
+		return &models.Config{Projects: []models.Project{{
+			Repository: "github.com/other/widget",
+			Name:       recorded.Name,
+			Path:       recorded.Path,
+		}}}, nil
+	}
+
+	_, _, err := defaultInspectPRProjectClone(
+		context.Background(),
+		recorded,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts with recorded identity")
+}
+
+func TestInspectPRProjectCloneRejectsAmbiguousRegistrations(
+	t *testing.T,
+) {
+	repo := newPRInspectionRepo(t)
+	recorded := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Name:     "widget",
+		Path:     repo,
+	}
+	oldLoad := loadPRConfig
+	t.Cleanup(func() { loadPRConfig = oldLoad })
+	loadPRConfig = func() (*models.Config, error) {
+		return &models.Config{Projects: []models.Project{
+			{
+				Repository: recorded.Identity,
+				Name:       recorded.Name,
+				Path:       recorded.Path,
+			},
+			{
+				Repository: recorded.Identity,
+				Name:       "widget-copy",
+				Path:       recorded.Path,
+			},
+		}}, nil
+	}
+
+	_, _, err := defaultInspectPRProjectClone(
+		context.Background(),
+		recorded,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not uniquely registered")
+}
+
 func TestLivePRWorkspacesExcludePrunableAndMissingPaths(
 	t *testing.T,
 ) {

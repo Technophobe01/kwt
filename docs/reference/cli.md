@@ -57,6 +57,8 @@ attach-session -t <session_name>` on the normal server, or `kwt pr attach
 <path>` when `tmux_socket_name` is present — so you never create the session
 bare or bypass its protected attach policy. See [Attaching from other
 tools](#attaching-from-other-tools) before using `new-session`.
+`kwt open` and dashboard open actions refuse protected pull-request imports
+and direct the user through `kwt pr attach`.
 `created_at` is populated in both local and `-g` mode.
 
 ## `kwt projects`

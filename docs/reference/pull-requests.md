@@ -41,11 +41,16 @@ deleted project, reused path, or branch, repository, or session-name mismatch
 fails closed. Prunable entries and paths without a live Git worktree are not
 accepted. The registered project's canonical identity remains authoritative
 when its checkout's origin points to a fork, matching kwt's other inventory
-surfaces. It is idempotent for an already imported worktree or a verified
-session that kwt created for the same workspace. Kwt validates layout and
-agent configuration before import mutation. If runtime session establishment
-fails after the import becomes durable, the command still exits successfully
-and returns the imported workspace with an explicit
+surfaces. An import created from an unregistered repository remains attachable
+when its live Git identity matches the recorded repository; ambiguous or
+conflicting registrations fail closed. Ordinary `kwt open` and dashboard open
+actions refuse imported workspaces because they use the normal tmux server;
+use `kwt pr attach <workspace.path>` instead. The protected attach path is
+idempotent for an already imported worktree or a verified session that kwt
+created for the same workspace. Kwt validates layout and agent configuration
+before import mutation. If runtime session establishment fails after the
+import becomes durable, the command still exits successfully and returns the
+imported workspace with an explicit
 `session_start_error`:
 
 ```json
