@@ -57,14 +57,14 @@ var prListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List importable pull requests as JSON",
 	Args:  prNoArgs,
-	RunE:  runPRList,
+	RunE:  withGracefulSignals(runPRList),
 }
 
 var prImportCmd = &cobra.Command{
 	Use:   "import <pull-request>",
 	Short: "Import a pull request as a configured kwt workspace",
 	Args:  prExactArgs(1),
-	RunE:  runPRImport,
+	RunE:  withGracefulSignals(runPRImport),
 }
 
 func init() {

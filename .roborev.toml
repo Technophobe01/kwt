@@ -37,6 +37,10 @@ Threat model for pull-request discovery and import:
   fetched PR checkout are contributor-controlled and untrusted. API
   authentication proves the kwt user's access; it does not make a PR trusted.
   Apply this equally to same-repository and fork PRs.
+- The existing project repository, its remotes, and its Git configuration are
+  trusted local user state. Contributor metadata cannot set `pushurl`, custom
+  refspecs, mirror mode, receive-pack commands, or URL rewrites there. Do not
+  treat those settings as an attacker-controlled PR-import boundary.
 - Import is an explicit mutation initiated by the local user, but PR imports
   do not run repository `copy_files` or `setup_commands`. Git remote handling,
   fetch, isolated checkout, push routing, and ownership-aware rollback are one

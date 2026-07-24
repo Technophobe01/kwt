@@ -52,6 +52,8 @@ func newBackendRepo(t *testing.T) (string, *GitBackend) {
 
 func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	repo, backend := newBackendRepo(t)
+	runGit(t, repo, "remote", "set-url", "origin",
+		"https://github.com/octocat/widget.git")
 	var got managedworktree.MergeRequestWorktreeOptions
 	original := createMergeRequestWorktree
 	createMergeRequestWorktree = func(

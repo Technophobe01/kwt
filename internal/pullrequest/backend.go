@@ -96,7 +96,9 @@ func (b *GitBackend) ImportPullRequest(
 	if err != nil {
 		return Workspace{}, err
 	}
-	path, err := b.manager.PreparePath("", branch)
+	path, err := b.manager.PreparePathForRepository(
+		"", branch, b.project.Identity,
+	)
 	if err != nil {
 		return Workspace{}, err
 	}
@@ -144,6 +146,9 @@ func (b *GitBackend) ImportPullRequest(
 		return nil
 	}}
 	if createErr != nil {
+		workspace.preserveOnImportError = errors.Is(
+			createErr, managedworktree.ErrWorktreeCleanupIncomplete,
+		)
 		return workspace, mapSharedChangeRequestError(createErr)
 	}
 	if err := ensureForkPushSafety(

@@ -153,14 +153,18 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		workspace, createErr := s.backend.ImportPullRequest(ctx, pr, branch)
 		if createErr != nil {
 			if workspace.Path != "" || workspace.Branch != "" {
-				return NewError(
-					CodeWorkspaceCreation,
-					fmt.Sprintf(
-						"pull-request lifecycle preserved path %q and branch %q; manual cleanup is required",
-						workspace.Path, workspace.Branch,
-					),
-					false, createErr,
-				)
+				if workspace.preserveOnImportError {
+					return NewError(
+						CodeWorkspaceCreation,
+						fmt.Sprintf(
+							"pull-request lifecycle preserved path %q and branch %q; manual cleanup is required",
+							workspace.Path, workspace.Branch,
+						),
+						false, createErr,
+					)
+				}
+				created = &workspace
+				cleanupReason = "workspace setup failed"
 			}
 			return AsError(createErr, CodeWorkspaceCreation, "failed to create pull-request workspace")
 		}

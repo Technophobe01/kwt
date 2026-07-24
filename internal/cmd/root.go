@@ -60,31 +60,7 @@ a fuzzy finder interface.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	var signalExitCode atomic.Int32
-	go func() {
-		select {
-		case received := <-signals:
-			switch received {
-			case os.Interrupt:
-				signalExitCode.Store(130)
-			case syscall.SIGTERM:
-				signalExitCode.Store(143)
-			}
-			signal.Stop(signals)
-			cancel()
-		case <-done:
-		}
-	}()
-	defer func() {
-		close(done)
-		signal.Stop(signals)
-		cancel()
-	}()
-	err := rootCmd.ExecuteContext(ctx)
+	err := rootCmd.Execute()
 	exitCode := 0
 	if err != nil {
 		exitCode = 1
@@ -93,11 +69,65 @@ func Execute() {
 			exitCode = coded.ExitCode()
 		}
 	}
-	if code := signalExitCode.Load(); code != 0 {
-		exitCode = int(code)
-	}
 	if exitCode != 0 {
 		os.Exit(exitCode)
+	}
+}
+
+type signalExitError struct {
+	code  int
+	cause error
+}
+
+func (e *signalExitError) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
+	return "command interrupted"
+}
+
+func (e *signalExitError) Unwrap() error { return e.cause }
+func (e *signalExitError) ExitCode() int { return e.code }
+
+func withGracefulSignals(
+	run func(*cobra.Command, []string) error,
+) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		parent := cmd.Context()
+		ctx, cancel := context.WithCancel(parent)
+		cmd.SetContext(ctx)
+
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+		done := make(chan struct{})
+		handlerDone := make(chan struct{})
+		var signalExitCode atomic.Int32
+		go func() {
+			defer close(handlerDone)
+			select {
+			case received := <-signals:
+				switch received {
+				case os.Interrupt:
+					signalExitCode.Store(130)
+				case syscall.SIGTERM:
+					signalExitCode.Store(143)
+				}
+				signal.Stop(signals)
+				cancel()
+			case <-done:
+			}
+		}()
+
+		err := run(cmd, args)
+		signal.Stop(signals)
+		close(done)
+		<-handlerDone
+		cancel()
+		cmd.SetContext(parent)
+		if code := signalExitCode.Load(); code != 0 {
+			return &signalExitError{code: int(code), cause: err}
+		}
+		return err
 	}
 }
 

@@ -101,6 +101,9 @@ type Workspace struct {
 	State          string `json:"state"`
 	SessionName    string `json:"session_name"`
 	partialCleanup *workspacePartialCleanup
+	// preserveOnImportError means Kit could not prove that cleanup was safe.
+	// Other post-creation failures retain rollback metadata and are cleaned up.
+	preserveOnImportError bool
 }
 
 type workspacePartialCleanup struct {

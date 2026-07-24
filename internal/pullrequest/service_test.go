@@ -141,6 +141,9 @@ func (f *fakeWorkspaceBackend) ImportPullRequest(
 	f.importedPR = pr
 	f.createCalls++
 	if f.createErr != nil {
+		if f.createErrWorkspace.Path != "" {
+			f.workspaces = append(f.workspaces, f.createErrWorkspace)
+		}
 		return f.createErrWorkspace, f.createErr
 	}
 	workspace := Workspace{
@@ -641,8 +644,9 @@ func TestImportReportsArtifactsPreservedBySharedLifecycle(t *testing.T) {
 	backend := newFakeBackend()
 	backend.createErr = managedworktree.ErrWorktreeCleanupIncomplete
 	backend.createErrWorkspace = Workspace{
-		Path:   "/worktrees/widget/pr-63-feature-widgets",
-		Branch: "pr-63-feature-widgets",
+		Path:                  "/worktrees/widget/pr-63-feature-widgets",
+		Branch:                "pr-63-feature-widgets",
+		preserveOnImportError: true,
 	}
 	service := newTestService(&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore())
 
@@ -652,6 +656,25 @@ func TestImportReportsArtifactsPreservedBySharedLifecycle(t *testing.T) {
 	assert.ErrorContains(t, err, backend.createErrWorkspace.Path)
 	assert.ErrorContains(t, err, backend.createErrWorkspace.Branch)
 	assert.ErrorContains(t, err, "manual cleanup")
+}
+
+func TestImportRollsBackPostCreationFailure(t *testing.T) {
+	pr := testPR(64, true)
+	backend := newFakeBackend()
+	backend.createErr = errors.New("configure fork push safety")
+	backend.createErrWorkspace = Workspace{
+		Path:   "/worktrees/widget/pr-64-feature-widgets",
+		Branch: "pr-64-feature-widgets",
+	}
+	service := newTestService(
+		&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore(),
+	)
+
+	_, err := service.Import(context.Background(), testProject(), "64")
+
+	assertErrorCode(t, err, CodeWorkspaceCreation)
+	assert.Empty(t, backend.workspaces)
+	assert.NotContains(t, err.Error(), "manual cleanup")
 }
 
 func TestImportPreservesTypedNamingFailureFromWorkspaceCreation(t *testing.T) {
