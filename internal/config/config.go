@@ -154,9 +154,13 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 // - Same repository: local overrides global
 // - Different repository: both are kept
 func mergeRepositorySettings(localViper *viper.Viper) {
+	mergeRepositorySettingsInto(viper.GetViper(), localViper)
+}
+
+func mergeRepositorySettingsInto(targetViper, localViper *viper.Viper) {
 	var globalSettings, localSettings []models.RepositorySetting
 
-	if err := viper.UnmarshalKey("repository_settings", &globalSettings); err != nil {
+	if err := targetViper.UnmarshalKey("repository_settings", &globalSettings); err != nil {
 		globalSettings = nil
 	}
 
@@ -166,28 +170,45 @@ func mergeRepositorySettings(localViper *viper.Viper) {
 
 	localMap := make(map[string]models.RepositorySetting, len(localSettings))
 	for _, ls := range localSettings {
-		localMap[ls.Repository] = ls
+		localMap[repositorySettingMergeKey(ls.Repository)] = ls
 	}
 
 	merged := make([]models.RepositorySetting, 0, len(globalSettings)+len(localSettings))
 	overridden := make(map[string]bool, len(localSettings))
 
 	for _, gs := range globalSettings {
-		if ls, exists := localMap[gs.Repository]; exists {
-			merged = append(merged, ls)
-			overridden[gs.Repository] = true
+		key := repositorySettingMergeKey(gs.Repository)
+		if ls, exists := localMap[key]; exists {
+			if !overridden[key] {
+				merged = append(merged, ls)
+				overridden[key] = true
+			}
 		} else {
 			merged = append(merged, gs)
 		}
 	}
 
 	for _, ls := range localSettings {
-		if !overridden[ls.Repository] {
+		key := repositorySettingMergeKey(ls.Repository)
+		if !overridden[key] {
 			merged = append(merged, ls)
+			overridden[key] = true
 		}
 	}
 
-	viper.Set("repository_settings", merged)
+	targetViper.Set("repository_settings", merged)
+}
+
+func repositorySettingMergeKey(repository string) string {
+	repository = strings.TrimSpace(repository)
+	if repository == "" || strings.ContainsAny(repository, "*?[") {
+		return repository
+	}
+	expanded, err := utils.ExpandPath(repository)
+	if err != nil {
+		return filepath.Clean(repository)
+	}
+	return utils.CanonicalPath(expanded)
 }
 
 // Init initializes the configuration system, creating default config if needed.
@@ -203,7 +224,7 @@ func Init() error {
 	viper.AddConfigPath(configDir)
 
 	viper.SetDefault("cd.launch_shell", true)
-	viper.SetDefault("worktree.basedir", "~/worktrees")
+	viper.SetDefault("worktree.basedir", "~/.kwt/worktrees")
 	viper.SetDefault("worktree.auto_mkdir", true)
 	viper.SetDefault("finder.preview", true)
 	viper.SetDefault("ui.icons", true)
@@ -300,7 +321,7 @@ func writeDefaultConfig(configPath string) (err error) {
 
 func defaultConfigTOML() string {
 	return fmt.Sprintf(`[worktree]
-basedir = "~/worktrees"
+basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
 [cd]
@@ -416,6 +437,198 @@ func LoadRepoLayoutDefault(repoRoot string, interactive bool) (string, error) {
 		return "", fmt.Errorf("parse target config %s: %w", absPath, err)
 	}
 	return lv.GetString("layouts.default"), nil
+}
+
+// LoadForTarget returns global configuration merged with the selected
+// repository's trust-gated local configuration. It never consults the
+// caller's working directory and does not prompt when interactive is false.
+func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
+	target := viper.New()
+	if err := target.MergeConfigMap(viper.AllSettings()); err != nil {
+		return nil, fmt.Errorf("copy global config: %w", err)
+	}
+	repositoryLocalNaming := false
+
+	path := filepath.Join(repoRoot, localConfigName+"."+configType)
+	if _, err := os.Lstat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat target config %s: %w", path, err)
+		}
+	} else {
+		absPath, normalizeErr := normalizeTargetConfigPath(path)
+		if normalizeErr != nil {
+			fmt.Fprintf(os.Stderr, "kwt: skipping target config: %v\n", normalizeErr)
+		} else {
+			data, readErr := os.ReadFile(absPath)
+			if readErr != nil {
+				return nil, fmt.Errorf("read target config %s: %w", absPath, readErr)
+			}
+			store, storeErr := LoadTrustStore(defaultTrustStorePath())
+			if storeErr != nil {
+				fmt.Fprintf(os.Stderr, "kwt: failed to load trust store (continuing empty): %v\n", storeErr)
+				store = &TrustStore{path: defaultTrustStorePath()}
+			}
+			trusted := store.IsTrusted(absPath, computeSHA256(data))
+			if !trusted && interactive {
+				trusted, storeErr = newStdioPrompter().PromptTrust(absPath, data)
+				if storeErr != nil {
+					fmt.Fprintf(os.Stderr, "kwt: trust prompt failed, skipping target config: %v\n", storeErr)
+					trusted = false
+				} else if trusted {
+					if storeErr = store.Add(absPath, computeSHA256(data)); storeErr != nil {
+						fmt.Fprintf(os.Stderr, "kwt: failed to persist trust decision (continuing): %v\n", storeErr)
+					}
+				}
+			}
+			if !trusted {
+				fmt.Fprintf(os.Stderr, "kwt: skipping untrusted target config %s (non-interactive)\n", absPath)
+			} else {
+				local := viper.New()
+				local.SetConfigType(configType)
+				if parseErr := local.ReadConfig(bytes.NewReader(data)); parseErr != nil {
+					return nil, fmt.Errorf("parse target config %s: %w", absPath, parseErr)
+				}
+				if pathErr := resolveTargetLocalPaths(local, repoRoot); pathErr != nil {
+					return nil, fmt.Errorf("resolve target config paths %s: %w", absPath, pathErr)
+				}
+				repositoryLocalNaming = local.IsSet("naming.template") ||
+					local.IsSet("naming.sanitize_chars")
+				for _, key := range local.AllKeys() {
+					switch {
+					case key == "repository_settings":
+						mergeRepositorySettingsInto(target, local)
+					case key == "projects" || key == "workspaces" || strings.HasPrefix(key, "workspaces."),
+						key == "fleet" || strings.HasPrefix(key, "fleet."):
+						continue
+					default:
+						target.Set(key, local.Get(key))
+					}
+				}
+			}
+		}
+	}
+
+	var cfg models.Config
+	if err := target.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal target config: %w", err)
+	}
+	if err := expandConfigPaths(&cfg); err != nil {
+		return nil, err
+	}
+	cfg.Naming.RepositoryLocal = repositoryLocalNaming
+	return &cfg, nil
+}
+
+// normalizeTargetConfigPath returns a canonical lexical path for a target
+// repository's config while rejecting a final-component symlink. Keeping the
+// lexical filename, rather than resolving it to another repository's config,
+// prevents one repository from reusing another repository's trust entry.
+func normalizeTargetConfigPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("abs path %s: %w", path, err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("resolve parent symlinks %s: %w", abs, err)
+	}
+	lexicalPath := filepath.Join(parent, filepath.Base(abs))
+	info, err := os.Lstat(lexicalPath)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", lexicalPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%s is a symlink", lexicalPath)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file (mode %s)", lexicalPath, info.Mode())
+	}
+	return lexicalPath, nil
+}
+
+func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
+	repoRoot = utils.CanonicalPath(repoRoot)
+	if local.IsSet("naming.template") &&
+		targetPathHasEnvironmentReference(local.GetString("naming.template")) {
+		return fmt.Errorf(
+			"environment variable references are not allowed in repository-local naming templates",
+		)
+	}
+	for _, replacement := range local.GetStringMapString(
+		"naming.sanitize_chars",
+	) {
+		if targetPathHasEnvironmentReference(replacement) {
+			return fmt.Errorf(
+				"environment variable references are not allowed in repository-local naming replacements",
+			)
+		}
+	}
+	if local.IsSet("worktree.basedir") {
+		baseDir := local.GetString("worktree.basedir")
+		if strings.TrimSpace(baseDir) == "" {
+			return fmt.Errorf("repository-local worktree base directory must not be empty")
+		}
+		resolved, err := resolveTargetRelativePath(repoRoot, baseDir)
+		if err != nil {
+			return fmt.Errorf("resolve target worktree base directory: %w", err)
+		}
+		local.Set("worktree.basedir", resolved)
+	}
+
+	var settings []models.RepositorySetting
+	if err := local.UnmarshalKey("repository_settings", &settings); err != nil {
+		return err
+	}
+	for i := range settings {
+		resolvedRepository, err := resolveTargetRepositorySelector(repoRoot, settings[i].Repository)
+		if err != nil {
+			return fmt.Errorf("resolve target repository setting %d repository: %w", i, err)
+		}
+		resolvedBaseDir, err := resolveTargetRelativePath(repoRoot, settings[i].BaseDir)
+		if err != nil {
+			return fmt.Errorf("resolve target repository setting %d base directory: %w", i, err)
+		}
+		settings[i].Repository = resolvedRepository
+		settings[i].BaseDir = resolvedBaseDir
+	}
+	if len(settings) > 0 {
+		local.Set("repository_settings", settings)
+	}
+	return nil
+}
+
+func resolveTargetRepositorySelector(repoRoot, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if targetPathHasEnvironmentReference(value) {
+		return "", fmt.Errorf("environment variable references are not allowed in repository-local paths")
+	}
+	if strings.ContainsAny(value, "*?[") {
+		return value, nil
+	}
+	return resolveTargetRelativePath(repoRoot, value)
+}
+
+func resolveTargetRelativePath(repoRoot, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if targetPathHasEnvironmentReference(value) {
+		return "", fmt.Errorf("environment variable references are not allowed in repository-local paths")
+	}
+	if value == "" || value == "~" || strings.HasPrefix(value, "~/") {
+		return value, nil
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value), nil
+	}
+	return filepath.Join(repoRoot, value), nil
+}
+
+func targetPathHasEnvironmentReference(value string) bool {
+	found := false
+	_ = os.Expand(value, func(string) string {
+		found = true
+		return ""
+	})
+	return found
 }
 
 // StdinInteractive reports whether stdin is a terminal (exported for callers

@@ -9,7 +9,7 @@ commands, repository setup rules, and the known project registry.
 
 ```toml
 [worktree]
-basedir = "~/worktrees"
+basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
 [naming]
@@ -38,6 +38,16 @@ name = "stack"
 arrange = "even-vertical"
 panes = ["agent:codex", "agent:claude", "agent:roborev", ""]
 ```
+
+The default places newly created worktrees under `~/.kwt/worktrees`. Relative
+paths in a trusted repository-local `.kwt.toml` are resolved from that
+repository's root; a repository-local `worktree.basedir` cannot be empty.
+Repository-local path fields cannot reference environment variables, including
+`naming.template` and `naming.sanitize_chars` replacements. Generated paths
+influenced by repository-local naming are not environment-expanded after
+rendering, so a template cannot synthesize a reference. Environment expansion
+remains available for paths in the global configuration and for explicit
+command-line paths.
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
 table before tmux starts, so command flags live in one local config file.
@@ -100,7 +110,9 @@ setup_commands = [
 
 Template variables include `Host`, `Owner`, `Repository`, `FullPath`, `Branch`,
 `Hash`, and `Path`. Quote variables in shell commands when values may contain
-spaces.
+spaces. `repository` may also be a glob such as `**/acme/widget`; trusted
+repository-local glob selectors remain repository selectors rather than being
+resolved as paths beneath that repository.
 
 Remote-only multi-machine sync skips repository setup (`copy_files` and
 `setup_commands`) because the branch name is reported by another host. Run any

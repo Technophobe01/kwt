@@ -17,7 +17,7 @@ var tuiCmd = &cobra.Command{
 	Short: "Open the cross-repo worktree dashboard",
 	// Isolation: tui must not merge the caller's cwd .kwt.toml. The dashboard
 	// is global, and target repo layout defaults are read separately at attach.
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return requireConfigInitialization() },
 	RunE:              runTUI,
 }
 

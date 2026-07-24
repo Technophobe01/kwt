@@ -3,9 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -52,7 +49,7 @@ for managing multiple AI coding agents working in parallel across different work
   
   # Global status from anywhere
   kwt status --global`,
-	RunE: runStatus,
+	RunE: withGracefulSignals(runStatus),
 }
 
 func init() {
@@ -85,7 +82,7 @@ func runStatusOnce(cmd *cobra.Command) error {
 	}
 
 	printer := ui.New(&cfg.UI)
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	statuses, err := collectWorktreeStatuses(ctx, cfg, printer)
 	if err != nil {
@@ -107,7 +104,7 @@ func runStatusWatch(cmd *cobra.Command, interval time.Duration) error {
 	printer := ui.New(&cfg.UI)
 
 	// Setup watch mode (cursor control and cancellation)
-	cleanup, ctx := setupWatchMode()
+	cleanup, ctx := setupWatchMode(cmd.Context())
 	defer cleanup()
 
 	// Create refresh function for status updates
@@ -118,22 +115,13 @@ func runStatusWatch(cmd *cobra.Command, interval time.Duration) error {
 }
 
 // setupWatchMode initializes cursor control and cancellation handling
-func setupWatchMode() (func(), context.Context) {
+func setupWatchMode(parent context.Context) (func(), context.Context) {
 	hideCursor := "\033[?25l"
 	showCursor := "\033[?25h"
 
 	fmt.Print(hideCursor)
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Setup interrupt signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		cancel()
-	}()
+	ctx, cancel := context.WithCancel(parent)
 
 	cleanup := func() {
 		fmt.Print(showCursor)

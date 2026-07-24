@@ -32,9 +32,10 @@ resolved layout if it does not yet exist.`,
 
   # Fuzzy-pick the layout too
   kwt open --select-layout`,
-	// Isolation: open must not merge the caller's cwd .kwt.toml. Overriding the
-	// root PersistentPreRunE with a no-op keeps the global config pristine.
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	// Isolation: open must not merge the caller's cwd .kwt.toml. Skipping the
+	// root cwd merge keeps the global config pristine while still
+	// propagating global config initialization failures.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return requireConfigInitialization() },
 	RunE:              runOpen,
 }
 

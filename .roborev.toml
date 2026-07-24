@@ -30,4 +30,62 @@ Threat model for local execution:
 - Repository *contents* remain untrusted for machine-level configuration
   (the `.kwt.toml` rule above), but command resolution through the
   user's PATH is the user's domain, not the repository's.
+
+Threat model for pull-request discovery and import:
+
+- Pull-request metadata, Git refs, fork repositories, and every file in a
+  fetched PR checkout are contributor-controlled and untrusted. API
+  authentication proves the kwt user's access; it does not make a PR trusted.
+  Apply this equally to same-repository and fork PRs.
+- The existing project repository, its remotes, and its Git configuration are
+  trusted local user state. Contributor metadata cannot set `pushurl`, custom
+  refspecs, mirror mode, receive-pack commands, or URL rewrites there. Do not
+  treat those settings as attacker-controlled. They still affect Git behavior:
+  when Kit cannot establish fork tracking, KWT must reject and roll back the
+  import rather than relying on `push.default` to override explicit refspecs.
+- Import is an explicit mutation initiated by the local user, but PR imports
+  do not run repository `copy_files` or `setup_commands`. Git remote handling,
+  fetch, isolated checkout, push routing, and ownership-aware rollback are one
+  operation delegated to `go.kenn.io/kit/git/managed`; do not require a second
+  KWT-local implementation of those mechanics. Review the KWT adapter for
+  correct trusted project identity, provider head metadata, exact expected
+  OID, destination path, error mapping, and preservation reporting.
+- `KWT_GITHUB_TOKEN`, fleet bearer tokens and token-file locations, and
+  credential-bearing remote URLs remain sensitive. Flag persistence, output,
+  transmission, or unnecessary environment inheritance that exposes them to
+  contributor-controlled processes. Ordinary developer credentials and
+  environment outside kwt's own token/config surfaces remain the user's
+  responsibility under the local-execution model above.
+- Cross-project and SSH invocation must resolve configuration from the
+  selected target project, never from the caller's current repository. In
+  noninteractive mode kwt may load only global config and an already trusted
+  target config; it must not prompt, auto-trust, or silently accept a new
+  repository-local policy.
+- A successful import may fetch contributor refs, create a local branch and
+  worktree, add a clean credential-free remote, and configure pushes to the
+  PR's head branch. It must not push during import or redirect a later plain
+  `git push` to the base repository when the PR came from a fork.
+- Kit owns selection and configuration of pull-request push routing. KWT does
+  not recreate those mechanics, but it validates the successful-import
+  postcondition for same-repository and fork requests: the effective push
+  repository path and upstream must be exactly the PR source repository and
+  branch, without broader remote push behavior. SSH aliases and explicit ports
+  are valid only when their authority matches the trusted project remote. If
+  that postcondition is absent, KWT rejects and rolls back the import.
+- Repeating an import validates KWT's persisted provenance, canonical project
+  clone path, and live worktree path and branch. A record for another clone is
+  an explicit conflict, not stale state to overwrite. The check does not push
+  or rewrite Git remotes or routing changed by the same local user; those
+  remain trusted user-owned configuration under the local-execution model
+  above.
+- GitHub owner/repository identity is case-insensitive. Ref names, local paths,
+  opaque IDs, and provenance keys remain exact data and require their own
+  validation; do not transfer GitHub's case-folding rule to arbitrary Git or
+  filesystem values.
+- Keep severity tied to consequence. Credential disclosure, trust bypass,
+  unexpected code execution, ref/path injection, or pushing to the wrong
+  repository are security findings. JSON/exit-status ordering, Git-version
+  compatibility, stale-state handling, and error classification are important
+  correctness or compatibility findings unless they create one of those
+  concrete security consequences.
 """

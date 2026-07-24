@@ -54,7 +54,7 @@ func (m *Manager) Add(branch string, customPath string, createBranch bool) (stri
 
 // AddWithOptions creates a new worktree and returns the path of the created worktree.
 func (m *Manager) AddWithOptions(branch string, customPath string, createBranch bool, opts AddOptions) (string, error) {
-	path, err := m.preparePath(customPath, branch)
+	path, err := m.preparePath(customPath, branch, nil)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +72,7 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 // AddFromBase creates a new worktree with a branch from a specific base branch
 // and returns the path of the created worktree.
 func (m *Manager) AddFromBase(branch string, baseBranch string, customPath string) (string, error) {
-	path, err := m.preparePath(customPath, branch)
+	path, err := m.preparePath(customPath, branch, nil)
 	if err != nil {
 		return "", err
 	}
@@ -177,22 +177,47 @@ func (m *Manager) ValidateWorktreePath(path string) error {
 	return nil
 }
 
+// PreparePath applies KWT's configured naming and destination policy without
+// creating a worktree. Callers can then hand the resolved path to a shared
+// lifecycle implementation.
+func (m *Manager) PreparePath(customPath, branch string) (string, error) {
+	return m.preparePath(customPath, branch, nil)
+}
+
+// PreparePathForRepository applies KWT's destination policy using an explicit
+// registered repository identity rather than inferring it from the origin
+// remote.
+func (m *Manager) PreparePathForRepository(
+	customPath, branch, repository string,
+) (string, error) {
+	repoInfo, ok := url.CanonicalRepositoryInfo(repository)
+	if !ok {
+		return "", fmt.Errorf("invalid repository identity %q", repository)
+	}
+	return m.preparePath(customPath, branch, repoInfo)
+}
+
 // preparePath resolves and prepares the worktree path, creating parent directories if needed.
-func (m *Manager) preparePath(customPath, branch string) (string, error) {
+func (m *Manager) preparePath(
+	customPath, branch string, repoInfo *url.RepositoryInfo,
+) (string, error) {
 	path := customPath
-	if path == "" {
-		generatedPath, err := m.generateWorktreePath(branch)
+	generated := path == ""
+	if generated {
+		generatedPath, err := m.generateWorktreePathForRepository(branch, repoInfo)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate worktree path: %w", err)
 		}
 		path = generatedPath
 	}
 
-	expandedPath, err := utils.ExpandPath(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to expand path: %w", err)
+	if !generated || !m.config.Naming.RepositoryLocal {
+		expandedPath, err := utils.ExpandPath(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to expand path: %w", err)
+		}
+		path = expandedPath
 	}
-	path = expandedPath
 
 	if m.config.Worktree.AutoMkdir {
 		dir := filepath.Dir(path)
@@ -206,9 +231,18 @@ func (m *Manager) preparePath(customPath, branch string) (string, error) {
 
 // generateWorktreePath generates a path for a new worktree using template configuration.
 func (m *Manager) generateWorktreePath(branch string) (string, error) {
-	repoInfo, err := m.repositoryInfo()
-	if err != nil {
-		return "", err
+	return m.generateWorktreePathForRepository(branch, nil)
+}
+
+func (m *Manager) generateWorktreePathForRepository(
+	branch string, repoInfo *url.RepositoryInfo,
+) (string, error) {
+	if repoInfo == nil {
+		var err error
+		repoInfo, err = m.repositoryInfo()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Determine effective base directory: per-repo setting overrides global
@@ -372,7 +406,6 @@ func registeredProjectIdentity(
 	}
 	return nil, false
 }
-
 
 // RepositoryInfoFromLocalPath builds the path-safe local identity ("local/..."
 // full path) for a repository root that has no usable remote. It is the raw-path

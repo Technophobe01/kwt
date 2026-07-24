@@ -33,7 +33,7 @@ var configSetCmd = &cobra.Command{
 
 Configuration keys follow a dot notation format (e.g., worktree.basedir).`,
 	Example: `  # Set worktree base directory
-  kwt config set worktree.basedir ~/worktrees
+  kwt config set worktree.basedir ~/.kwt/worktrees
 
   # Set naming template
   kwt config set naming.template "{{.Repository}}-{{.Branch}}"

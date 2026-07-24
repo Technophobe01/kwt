@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
+	gitworktree "go.kenn.io/kit/git/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -17,47 +17,20 @@ func (g *Git) ListWorktrees() ([]models.Worktree, error) {
 		return nil, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
-	var worktrees []models.Worktree
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-
-	for i := 0; i < len(lines); i++ {
-		if after, ok := strings.CutPrefix(lines[i], "worktree "); ok {
-			path := after
-
-			var branch, commitHash string
-			isMain := false
-
-			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "worktree "); j++ {
-				if after, ok := strings.CutPrefix(lines[j], "branch "); ok {
-					branch = after
-					// Remove refs/heads/ prefix if present
-					branch = strings.TrimPrefix(branch, "refs/heads/")
-				} else if after, ok := strings.CutPrefix(lines[j], "HEAD "); ok {
-					commitHash = after
-				} else if strings.HasPrefix(lines[j], "bare") {
-					continue
-				}
-				i = j
-			}
-
-			if branch == "" {
-				branch = g.getCurrentBranch(path)
-			}
-
-			info, err := os.Stat(path)
-			var createdAt time.Time
-			if err == nil {
-				createdAt = info.ModTime()
-			}
-
-			worktrees = append(worktrees, models.Worktree{
-				Path:       path,
-				Branch:     branch,
-				CommitHash: commitHash,
-				IsMain:     isMain,
-				CreatedAt:  createdAt,
-			})
+	entries := gitworktree.ParsePorcelain(output)
+	worktrees := make([]models.Worktree, 0, len(entries))
+	for _, entry := range entries {
+		worktree := models.Worktree{
+			Path: entry.Path, Branch: entry.Branch, CommitHash: entry.Head,
+			Prunable: entry.Prunable,
 		}
+		if worktree.Branch == "" {
+			worktree.Branch = g.getCurrentBranch(worktree.Path)
+		}
+		if info, statErr := os.Stat(worktree.Path); statErr == nil {
+			worktree.CreatedAt = info.ModTime()
+		}
+		worktrees = append(worktrees, worktree)
 	}
 
 	if len(worktrees) > 0 {
@@ -82,7 +55,6 @@ func (g *Git) ListWorktrees() ([]models.Worktree, error) {
 // AddWorktree creates a new worktree.
 func (g *Git) AddWorktree(path, branch string, createBranch bool) error {
 	args := []string{"worktree", "add"}
-
 	if createBranch {
 		base, err := g.defaultWorktreeBase()
 		if err != nil {
@@ -92,11 +64,9 @@ func (g *Git) AddWorktree(path, branch string, createBranch bool) error {
 	} else {
 		args = append(args, path, branch)
 	}
-
 	if _, err := g.run(args...); err != nil {
 		return fmt.Errorf("failed to add worktree: %w", err)
 	}
-
 	return nil
 }
 
@@ -105,17 +75,17 @@ func (g *Git) defaultWorktreeBase() (string, error) {
 	if remoteErr == nil {
 		return remoteBase, nil
 	}
-
 	for _, branch := range []string{"main", "master"} {
 		ref := "refs/heads/" + branch
 		if g.refExists(ref) {
 			return ref, nil
 		}
 	}
-
 	root, rootErr := g.getMainRepoRoot()
 	if rootErr == nil {
-		output, branchErr := g.run("-C", root, "symbolic-ref", "--quiet", "--short", "HEAD")
+		output, branchErr := g.run(
+			"-C", root, "symbolic-ref", "--quiet", "--short", "HEAD",
+		)
 		if branchErr == nil {
 			ref := "refs/heads/" + strings.TrimSpace(output)
 			if g.refExists(ref) {
@@ -123,7 +93,6 @@ func (g *Git) defaultWorktreeBase() (string, error) {
 			}
 		}
 	}
-
 	return "", fmt.Errorf(
 		"could not resolve default worktree base: remote default unavailable (%v); no local main, master, or primary worktree branch",
 		remoteErr,
@@ -135,7 +104,6 @@ func (g *Git) remoteDefaultWorktreeBase() (string, error) {
 	if _, err := g.run("fetch", "origin", "+HEAD:"+ref); err != nil {
 		return "", fmt.Errorf("fetch origin default branch: %w", err)
 	}
-
 	if !g.refExists(ref) {
 		return "", fmt.Errorf("fetched origin default ref does not exist")
 	}
@@ -150,15 +118,12 @@ func (g *Git) refExists(ref string) bool {
 // AddWorktreeFromBase creates a new worktree with a branch from a specific base branch.
 func (g *Git) AddWorktreeFromBase(path, branch, baseBranch string) error {
 	args := []string{"worktree", "add", "-b", branch, path}
-
 	if baseBranch != "" {
 		args = append(args, baseBranch)
 	}
-
 	if _, err := g.run(args...); err != nil {
 		return fmt.Errorf("failed to add worktree from base branch %s: %w", baseBranch, err)
 	}
-
 	return nil
 }
 
@@ -169,11 +134,9 @@ func (g *Git) RemoveWorktree(path string, force bool) error {
 		args = append(args, "--force")
 	}
 	args = append(args, path)
-
 	if _, err := g.run(args...); err != nil {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
-
 	return nil
 }
 

@@ -29,9 +29,9 @@ configured worktree base directory. Use --json for a machine-readable surface
 that external automation can consume without parsing the config file.`,
 	Args: cobra.NoArgs,
 	// Isolation: projects is a global registry surface and must not merge the
-	// caller's cwd .kwt.toml. Overriding the root PersistentPreRunE with a
-	// no-op keeps the global config pristine.
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+	// caller's cwd .kwt.toml. The command still propagates global config
+	// initialization failures through Cobra.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return requireConfigInitialization() },
 	RunE:              runProjects,
 }
 

@@ -12,6 +12,7 @@ type Worktree struct {
 	CreatedAt   time.Time `json:"created_at"`   // Worktree directory modification time
 	Repository  string    `json:"repository"`   // Repository slug, e.g. github.com/owner/name
 	SessionName string    `json:"session_name"` // Computed tmux workspace session name
+	Prunable    bool      `json:"-"`            // Git reports this worktree entry as stale/prunable
 }
 
 // Branch represents a Git branch with its metadata.
@@ -123,8 +124,9 @@ type UIConfig struct {
 
 // NamingConfig contains directory naming and template configuration options.
 type NamingConfig struct {
-	Template      string            `mapstructure:"template"`       // Directory name template
-	SanitizeChars map[string]string `mapstructure:"sanitize_chars"` // Character replacement for branch names
+	Template        string            `mapstructure:"template"`            // Directory name template
+	SanitizeChars   map[string]string `mapstructure:"sanitize_chars"`      // Character replacement for branch names
+	RepositoryLocal bool              `mapstructure:"-" toml:"-" json:"-"` // Generated paths include repository-local naming input
 }
 
 // WorktreeStatus represents the current status of a worktree.

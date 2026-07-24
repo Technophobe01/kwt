@@ -3,12 +3,14 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -256,7 +258,7 @@ func TestInit(t *testing.T) {
 	}
 
 	// Verify defaults are set
-	if viper.GetString("worktree.basedir") != "~/worktrees" {
+	if viper.GetString("worktree.basedir") != "~/.kwt/worktrees" {
 		t.Errorf("Default worktree.basedir not set correctly")
 	}
 	if !viper.GetBool("worktree.auto_mkdir") {
@@ -1601,6 +1603,255 @@ func TestLoadRepoLayoutDefaultTrustedReturnsDefault(t *testing.T) {
 	got, err := LoadRepoLayoutDefault(repo, false)
 	require.NoError(t, err)
 	assert.Equal(t, "focus", got)
+}
+
+func TestLoadForTargetMergesTrustedRepositorySettings(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	viper.Set("fleet.token_env", "GLOBAL_FLEET_TOKEN")
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	targetWorktrees := filepath.Join(target, "target-worktrees")
+	local := []byte("[worktree]\nbasedir = '" + targetWorktrees + "'\n[fleet]\ntoken_env = 'ATTACKER_TOKEN'\n[[repository_settings]]\nrepository = '" + target + "'\nsetup_commands = ['echo trusted']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, targetWorktrees, cfg.Worktree.BaseDir)
+	assert.Equal(t, "GLOBAL_FLEET_TOKEN", cfg.Fleet.TokenEnv)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, []string{"echo trusted"}, cfg.RepositorySettings[0].SetupCommands)
+}
+
+func TestLoadForTargetResolvesRelativePathsAgainstSelectedRepository(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := t.TempDir()
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	require.NoError(t, err)
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[worktree]\nbasedir = 'target-worktrees'\n[[repository_settings]]\nrepository = '.'\nbasedir = 'repo-worktrees'\nsetup_commands = ['echo trusted']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+	caller := t.TempDir()
+	changeDir(t, caller)
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(resolvedTarget, "target-worktrees"), cfg.Worktree.BaseDir)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, resolvedTarget, cfg.RepositorySettings[0].Repository)
+	assert.Equal(t, filepath.Join(resolvedTarget, "repo-worktrees"), cfg.RepositorySettings[0].BaseDir)
+}
+
+func TestLoadForTargetRejectsEmptyRepositoryLocalBaseDir(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	viper.Set("worktree.basedir", t.TempDir())
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[worktree]\nbasedir = ''\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	_, err = LoadForTarget(target, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree base directory must not be empty")
+}
+
+func TestLoadForTargetPreservesRepositoryGlobSelectors(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := filepath.Join(t.TempDir(), "acme", "widget")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[[repository_settings]]\nrepository = '**/acme/widget'\nsetup_commands = ['echo trusted']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, "**/acme/widget", cfg.RepositorySettings[0].Repository)
+	assert.True(t, utils.MatchPath(cfg.RepositorySettings[0].Repository, utils.CanonicalPath(target)))
+	assert.Equal(t, []string{"echo trusted"}, cfg.RepositorySettings[0].SetupCommands)
+}
+
+func TestLoadForTargetRejectsEnvironmentReferencesInRepositoryLocalPaths(t *testing.T) {
+	secret := "credential-must-not-appear-in-a-workspace-path"
+	for _, tc := range []struct {
+		name  string
+		local string
+	}{
+		{name: "worktree base directory", local: "[worktree]\nbasedir = '$KWT_GITHUB_TOKEN'\n"},
+		{name: "naming template", local: "[naming]\ntemplate = '$KWT_GITHUB_TOKEN/{{.Branch}}'\n"},
+		{name: "naming replacement", local: "[naming.sanitize_chars]\n'/' = '$KWT_GITHUB_TOKEN'\n"},
+		{name: "repository selector", local: "[[repository_settings]]\nrepository = '$KWT_GITHUB_TOKEN'\nsetup_commands = ['echo trusted']\n"},
+		{name: "repository base directory", local: "[[repository_settings]]\nrepository = '.'\nbasedir = '${KWT_GITHUB_TOKEN}'\nsetup_commands = ['echo trusted']\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kwtHome := t.TempDir()
+			t.Setenv("KWT_HOME", kwtHome)
+			t.Setenv("KWT_GITHUB_TOKEN", secret)
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			require.NoError(t, Init())
+
+			target := t.TempDir()
+			localPath := filepath.Join(target, ".kwt.toml")
+			local := []byte(tc.local)
+			require.NoError(t, os.WriteFile(localPath, local, 0o600))
+			absPath, err := normalizeConfigPath(localPath)
+			require.NoError(t, err)
+			store := &TrustStore{path: defaultTrustStorePath()}
+			require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+			_, err = LoadForTarget(target, false)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "environment variable")
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
+func TestLoadForTargetMarksRepositoryLocalNaming(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte(`[naming]
+template = '{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}'
+`)
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.True(t, cfg.Naming.RepositoryLocal)
+}
+
+func TestLoadForTargetMergesEquivalentGlobalAndLocalRepositoryPaths(t *testing.T) {
+	kwtHome := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := filepath.Join(home, "src", "widget")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	viper.Set("repository_settings", []models.RepositorySetting{{
+		Repository: "~/src/widget", SetupCommands: []string{"echo global"},
+	}})
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[[repository_settings]]\nrepository = '.'\nsetup_commands = ['echo local']\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.RepositorySettings, 1)
+	assert.Equal(t, utils.CanonicalPath(target), cfg.RepositorySettings[0].Repository)
+	assert.Equal(t, []string{"echo local"}, cfg.RepositorySettings[0].SetupCommands)
+}
+
+func TestLoadForTargetSkipsUntrustedConfigurationNoninteractively(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	globalBase := filepath.Join(t.TempDir(), "global-worktrees")
+	viper.Set("worktree.basedir", globalBase)
+
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".kwt.toml"), []byte(
+		"[worktree]\nbasedir = '/attacker/worktrees'\n[[repository_settings]]\nrepository = '"+target+"'\nsetup_commands = ['echo untrusted']\n"), 0o600))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, globalBase, cfg.Worktree.BaseDir)
+	assert.Empty(t, cfg.RepositorySettings)
+}
+
+func TestLoadForTargetRejectsSymlinkToTrustedConfiguration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test not reliable on Windows")
+	}
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	globalBase := filepath.Join(t.TempDir(), "global-worktrees")
+	viper.Set("worktree.basedir", globalBase)
+
+	trustedRepo := t.TempDir()
+	trustedPath := filepath.Join(trustedRepo, ".kwt.toml")
+	trustedConfig := []byte("[worktree]\nbasedir = '/attacker/worktrees'\n[[repository_settings]]\nrepository = '.'\nsetup_commands = ['echo trusted-elsewhere']\n")
+	require.NoError(t, os.WriteFile(trustedPath, trustedConfig, 0o600))
+	canonicalTrustedPath, err := normalizeConfigPath(trustedPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(canonicalTrustedPath, computeSHA256(trustedConfig)))
+
+	target := t.TempDir()
+	require.NoError(t, os.Symlink(trustedPath, filepath.Join(target, ".kwt.toml")))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, globalBase, cfg.Worktree.BaseDir)
+	assert.Empty(t, cfg.RepositorySettings)
 }
 
 func TestLoadExpandsWorkspacePaths(t *testing.T) {
