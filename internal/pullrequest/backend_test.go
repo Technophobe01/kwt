@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	gitcmd "go.kenn.io/kit/git/cmd"
 	managedworktree "go.kenn.io/kit/git/managed"
 	gitadapter "go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/worktree"
@@ -114,6 +115,34 @@ func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing
 
 	assertErrorCode(t, err, CodeWorkspaceCreation)
 	assert.NotEmpty(t, workspace.Path)
+}
+
+func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "pr-17-feature-widgets")
+	runGit(t, repo, "remote", "add", "fork",
+		"https://github.com/octocat/widget.git")
+	runGit(t, repo, "config",
+		"branch.pr-17-feature-widgets.remote", "fork")
+	runGit(t, repo, "config",
+		"branch.pr-17-feature-widgets.merge", "refs/heads/feature/widgets")
+	runGit(t, repo, "config",
+		"branch.pr-17-feature-widgets.pushRemote", "fork")
+	runGit(t, repo, "config", "push.default", "upstream")
+
+	err := ensureForkPushSafety(
+		t.Context(), gitcmd.New(), repo, "pr-17-feature-widgets",
+		"github.com/octocat/widget", "feature/widgets", true,
+	)
+	require.NoError(t, err)
+
+	runGit(t, repo, "config", "remote.fork.pushurl",
+		"https://github.com/acme/widget.git")
+	err = ensureForkPushSafety(
+		t.Context(), gitcmd.New(), repo, "pr-17-feature-widgets",
+		"github.com/octocat/widget", "feature/widgets", true,
+	)
+	require.Error(t, err)
 }
 
 func TestGitBackendMapsSharedLifecycleErrors(t *testing.T) {

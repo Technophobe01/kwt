@@ -294,6 +294,9 @@ func importBranchName(pr PullRequest) string {
 			end--
 		}
 		slug = strings.TrimRight(slug[:end], "-.")
+		if strings.HasSuffix(strings.ToLower(slug), ".lock") {
+			slug = slug[:len(slug)-len(".lock")] + "-lock"
+		}
 	}
 	return fmt.Sprintf("pr-%d-%s", pr.Number, slug)
 }

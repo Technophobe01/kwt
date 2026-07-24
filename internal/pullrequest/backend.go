@@ -153,6 +153,7 @@ func (b *GitBackend) ImportPullRequest(
 	}
 	if err := ensureForkPushSafety(
 		ctx, runner, created.Path, branch,
+		pr.Source.Repository.Identity, pr.Source.Name,
 		!EqualRepositoryIdentity(
 			pr.Source.Repository.Identity, pr.Repository.Identity,
 		),
@@ -170,25 +171,152 @@ func ensureForkPushSafety(
 	ctx context.Context,
 	runner gitcmd.Runner,
 	path, branch string,
+	sourceRepository, sourceBranch string,
 	fork bool,
 ) error {
 	if !fork {
 		return nil
 	}
-	pushRemoteKey := "branch." + branch + ".pushRemote"
-	stdout, _, err := runner.Run(
-		ctx, path, nil, "config", "--worktree", "--get", pushRemoteKey,
+
+	pushRemote, err := effectiveGitConfig(
+		ctx, runner, path, "branch."+branch+".pushRemote",
 	)
-	switch {
-	case err == nil && strings.TrimSpace(string(stdout)) != "":
-		// Kit established and validated the fork remote before configuring it.
-		return nil
-	case ctx.Err() != nil:
-		return ctx.Err()
-	case err != nil && !gitcmd.IsExitCode(err, 1):
-		return fmt.Errorf("inspect fork push remote: %w", err)
+	if err != nil {
+		return err
 	}
-	return errors.New("kit did not establish fork push tracking")
+	trackingRemote, err := effectiveGitConfig(
+		ctx, runner, path, "branch."+branch+".remote",
+	)
+	if err != nil {
+		return err
+	}
+	mergeRef, err := effectiveGitConfig(
+		ctx, runner, path, "branch."+branch+".merge",
+	)
+	if err != nil {
+		return err
+	}
+	pushDefault, err := effectiveGitConfig(
+		ctx, runner, path, "push.default",
+	)
+	if err != nil {
+		return err
+	}
+	if pushRemote == "" ||
+		trackingRemote != pushRemote ||
+		mergeRef != "refs/heads/"+sourceBranch ||
+		pushDefault != "upstream" {
+		return errors.New("kit did not establish exact fork push tracking")
+	}
+	if strings.HasPrefix(pushRemote, "-") ||
+		strings.ContainsAny(pushRemote, " \t\r\n") {
+		return errors.New("kit configured an invalid fork push remote")
+	}
+
+	pushURLs, err := effectivePushURLs(ctx, runner, path, pushRemote)
+	if err != nil {
+		return err
+	}
+	if len(pushURLs) != 1 {
+		return errors.New("fork push remote does not have exactly one destination")
+	}
+	pushIdentity, ok := urlutil.CanonicalRepositoryIdentityFromRemote(pushURLs[0])
+	if !ok || !EqualRepositoryIdentity(pushIdentity, sourceRepository) {
+		return errors.New("fork push remote does not target the pull-request repository")
+	}
+
+	for _, key := range []string{
+		"remote." + pushRemote + ".push",
+		"remote." + pushRemote + ".receivepack",
+	} {
+		values, configErr := gitConfigValues(ctx, runner, path, key, true)
+		if configErr != nil {
+			return configErr
+		}
+		if len(values) != 0 {
+			return fmt.Errorf("fork push remote has unsupported %s configuration", key)
+		}
+	}
+	mirror, err := effectiveGitConfig(
+		ctx, runner, path, "remote."+pushRemote+".mirror",
+	)
+	if err != nil {
+		return err
+	}
+	if mirror != "" && !strings.EqualFold(mirror, "false") {
+		return errors.New("fork push remote is configured as a mirror")
+	}
+	return nil
+}
+
+func effectiveGitConfig(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, key string,
+) (string, error) {
+	values, err := gitConfigValues(ctx, runner, path, key, false)
+	if err != nil || len(values) == 0 {
+		return "", err
+	}
+	value := values[0]
+	if value == "" || value != strings.TrimSpace(value) ||
+		strings.ContainsAny(value, "\r\n") {
+		return "", fmt.Errorf("git configuration %s has an invalid value", key)
+	}
+	return value, nil
+}
+
+func gitConfigValues(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, key string,
+	all bool,
+) ([]string, error) {
+	operation := "--get"
+	if all {
+		operation = "--get-all"
+	}
+	stdout, _, err := runner.Run(
+		ctx, path, nil, "config", "--null", operation, key,
+	)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		if gitcmd.IsExitCode(err, 1) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("inspect git configuration %s: %w", key, err)
+	}
+	encoded := strings.TrimSuffix(string(stdout), "\x00")
+	if encoded == "" {
+		return []string{""}, nil
+	}
+	return strings.Split(encoded, "\x00"), nil
+}
+
+func effectivePushURLs(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, remote string,
+) ([]string, error) {
+	stdout, _, err := runner.Run(
+		ctx, path, nil, "remote", "get-url", "--push", "--all", remote,
+	)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect fork push destination: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(stdout), "\n"), "\n")
+	for _, line := range lines {
+		if line == "" || line != strings.TrimSpace(line) ||
+			strings.ContainsRune(line, '\r') {
+			return nil, errors.New("fork push remote has an invalid destination")
+		}
+	}
+	return lines, nil
 }
 
 func mapSharedChangeRequestError(err error) error {

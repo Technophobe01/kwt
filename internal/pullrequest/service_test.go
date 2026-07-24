@@ -87,6 +87,17 @@ func TestImportBranchNamePreservesCaseNeededForValidRef(t *testing.T) {
 	require.NoError(t, cmd.Run(), "generated branch %q must be a valid Git ref", branch)
 }
 
+func TestImportBranchNameTruncationDoesNotCreateLockSuffix(t *testing.T) {
+	pr := testPR(18, false)
+	pr.Source.Name = strings.Repeat("a", 75) + ".lockx"
+
+	branch := importBranchName(pr)
+
+	assert.False(t, strings.HasSuffix(strings.ToLower(branch), ".lock"))
+	cmd := exec.Command("git", "check-ref-format", "--branch", branch)
+	require.NoError(t, cmd.Run(), "generated branch %q must be a valid Git ref", branch)
+}
+
 type fakeProvider struct {
 	prs      []PullRequest
 	listErr  error
