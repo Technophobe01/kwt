@@ -63,7 +63,7 @@ func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 		}, nil
 	}
 	t.Cleanup(func() { createMergeRequestWorktree = original })
-	pr := testPR(17, true)
+	pr := testPR(17, false)
 
 	workspace, err := backend.ImportPullRequest(
 		context.Background(), pr, "pr-17-feature-widgets",
@@ -86,6 +86,31 @@ func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	assert.Equal(t, "pr-17-feature-widgets", workspace.Branch)
 	assert.NotEmpty(t, workspace.ID)
 	assert.NotEmpty(t, workspace.SessionName)
+}
+
+func TestGitBackendForkImportWithoutTrackingDisablesPlainPush(t *testing.T) {
+	_, backend := newBackendRepo(t)
+	original := createMergeRequestWorktree
+	createMergeRequestWorktree = func(
+		_ context.Context, opts managedworktree.MergeRequestWorktreeOptions,
+	) (managedworktree.CreateWorktreeResult, error) {
+		require.NoError(t, os.MkdirAll(opts.Path, 0o755))
+		runGit(t, opts.Path, "init", "-b", opts.Branch)
+		runGit(t, opts.Path, "config", "push.default", "current")
+		runGit(t, opts.Path, "config", "extensions.worktreeConfig", "true")
+		return managedworktree.CreateWorktreeResult{
+			Path: opts.Path, Branch: opts.Branch, BranchCreated: true,
+		}, nil
+	}
+	t.Cleanup(func() { createMergeRequestWorktree = original })
+
+	workspace, err := backend.ImportPullRequest(
+		context.Background(), testPR(17, true), "pr-17-feature-widgets",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "nothing",
+		runGit(t, workspace.Path, "config", "--worktree", "--get", "push.default"))
 }
 
 func TestGitBackendMapsSharedLifecycleErrors(t *testing.T) {

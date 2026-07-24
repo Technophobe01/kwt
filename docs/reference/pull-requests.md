@@ -169,10 +169,13 @@ An imported list result adds the canonical workspace record:
 
 ## Import contract
 
-kwt chooses the deterministic local branch name, selects or creates a clean
-source remote, fetches the head, creates a no-checkout worktree, materializes
-it with external filters disabled, and configures plain `git push` to update
-exactly the PR's original head branch. Unlike an ordinary `kwt add`, PR import
+kwt chooses the deterministic local branch name and delegates remote
+selection, fetch, no-checkout worktree creation, materialization, and push
+routing to Kit. When the source branch is reachable, plain `git push` updates
+exactly the PR's original head branch. If a fork branch is unavailable but the
+provider's pull-request ref remains fetchable, import persists
+`push.default=nothing` in that worktree so a plain push fails instead of
+falling back to the base repository. Unlike an ordinary `kwt add`, PR import
 does not apply `copy_files` or `setup_commands`; run any desired project setup
 explicitly after reviewing the imported files.
 When it creates a fork remote, kwt uses SSH when the project's effective push
@@ -198,7 +201,8 @@ in the destination path, preventing contributor-controlled checkout entries
 from redirecting writes outside the new worktree. Relative paths in a trusted
 target `.kwt.toml` are resolved against that target repository, never the
 caller's working directory, and target-local path fields cannot expand
-environment variables into workspace paths.
+environment variables into workspace paths. Naming output influenced by
+target-local configuration is not environment-expanded after rendering.
 
 Before materializing pull-request files, kwt creates a no-checkout worktree and
 verifies that branch- and worktree-conditional Git includes do not change its

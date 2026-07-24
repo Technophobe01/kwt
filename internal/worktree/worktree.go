@@ -187,7 +187,8 @@ func (m *Manager) PreparePath(customPath, branch string) (string, error) {
 // preparePath resolves and prepares the worktree path, creating parent directories if needed.
 func (m *Manager) preparePath(customPath, branch string) (string, error) {
 	path := customPath
-	if path == "" {
+	generated := path == ""
+	if generated {
 		generatedPath, err := m.generateWorktreePath(branch)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate worktree path: %w", err)
@@ -195,11 +196,13 @@ func (m *Manager) preparePath(customPath, branch string) (string, error) {
 		path = generatedPath
 	}
 
-	expandedPath, err := utils.ExpandPath(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to expand path: %w", err)
+	if !generated || !m.config.Naming.RepositoryLocal {
+		expandedPath, err := utils.ExpandPath(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to expand path: %w", err)
+		}
+		path = expandedPath
 	}
-	path = expandedPath
 
 	if m.config.Worktree.AutoMkdir {
 		dir := filepath.Dir(path)

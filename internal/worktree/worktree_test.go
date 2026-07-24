@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	configpkg "go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -899,6 +901,27 @@ func TestGenerateWorktreePathRejectsPathOutsideBaseDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPreparePathDoesNotExpandRepositoryLocalTemplateOutput(t *testing.T) {
+	t.Setenv("KWT_GITHUB_TOKEN", "credential-must-not-appear-in-path")
+	baseDir := t.TempDir()
+	manager := New(
+		&mockGit{repoURL: "https://github.com/acme/widget.git"},
+		&models.Config{
+			Worktree: models.WorktreeConfig{BaseDir: baseDir},
+			Naming: models.NamingConfig{
+				Template:        `{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}`,
+				RepositoryLocal: true,
+			},
+		},
+	)
+
+	path, err := manager.PreparePath("", "feature/widgets")
+
+	require.NoError(t, err)
+	assert.NotContains(t, path, "credential-must-not-appear-in-path")
+	assert.Contains(t, path, "$KWT_GITHUB_TOKEN")
 }
 
 func TestGenerateWorktreePathRejectsSymlinkEscapeFromBaseDir(t *testing.T) {

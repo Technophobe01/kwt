@@ -1725,6 +1725,30 @@ func TestLoadForTargetRejectsEnvironmentReferencesInRepositoryLocalPaths(t *test
 	}
 }
 
+func TestLoadForTargetMarksRepositoryLocalNaming(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte(`[naming]
+template = '{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}'
+`)
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	cfg, err := LoadForTarget(target, false)
+
+	require.NoError(t, err)
+	assert.True(t, cfg.Naming.RepositoryLocal)
+}
+
 func TestLoadForTargetMergesEquivalentGlobalAndLocalRepositoryPaths(t *testing.T) {
 	kwtHome := t.TempDir()
 	home := t.TempDir()

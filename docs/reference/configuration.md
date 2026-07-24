@@ -43,8 +43,10 @@ The default places newly created worktrees under `~/.kwt/worktrees`. Relative
 paths in a trusted repository-local `.kwt.toml` are resolved from that
 repository's root. Repository-local path fields cannot reference environment
 variables, including `naming.template` and `naming.sanitize_chars`
-replacements. Environment expansion remains available for paths in the global
-configuration.
+replacements. Generated paths influenced by repository-local naming are not
+environment-expanded after rendering, so a template cannot synthesize a
+reference. Environment expansion remains available for paths in the global
+configuration and for explicit command-line paths.
 
 Pane entries are shell commands. `agent:<name>` expands through the `[agents]`
 table before tmux starts, so command flags live in one local config file.

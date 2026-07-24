@@ -447,6 +447,7 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 	if err := target.MergeConfigMap(viper.AllSettings()); err != nil {
 		return nil, fmt.Errorf("copy global config: %w", err)
 	}
+	repositoryLocalNaming := false
 
 	path := filepath.Join(repoRoot, localConfigName+"."+configType)
 	if _, err := os.Lstat(path); err != nil {
@@ -490,6 +491,8 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 				if pathErr := resolveTargetLocalPaths(local, repoRoot); pathErr != nil {
 					return nil, fmt.Errorf("resolve target config paths %s: %w", absPath, pathErr)
 				}
+				repositoryLocalNaming = local.IsSet("naming.template") ||
+					local.IsSet("naming.sanitize_chars")
 				for _, key := range local.AllKeys() {
 					switch {
 					case key == "repository_settings":
@@ -512,6 +515,7 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 	if err := expandConfigPaths(&cfg); err != nil {
 		return nil, err
 	}
+	cfg.Naming.RepositoryLocal = repositoryLocalNaming
 	return &cfg, nil
 }
 

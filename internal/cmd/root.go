@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -59,23 +60,43 @@ a fuzzy finder interface.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var signalExitCode atomic.Int32
 	go func() {
-		<-signalCtx.Done()
-		stopSignals()
-		cancel()
+		select {
+		case received := <-signals:
+			switch received {
+			case os.Interrupt:
+				signalExitCode.Store(130)
+			case syscall.SIGTERM:
+				signalExitCode.Store(143)
+			}
+			signal.Stop(signals)
+			cancel()
+		case <-done:
+		}
 	}()
 	defer func() {
-		stopSignals()
+		close(done)
+		signal.Stop(signals)
 		cancel()
 	}()
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		exitCode := 1
+	err := rootCmd.ExecuteContext(ctx)
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
 		var coded interface{ ExitCode() int }
 		if errors.As(err, &coded) {
 			exitCode = coded.ExitCode()
 		}
+	}
+	if code := signalExitCode.Load(); code != 0 {
+		exitCode = int(code)
+	}
+	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
 }

@@ -146,7 +146,59 @@ func (b *GitBackend) ImportPullRequest(
 	if createErr != nil {
 		return workspace, mapSharedChangeRequestError(createErr)
 	}
+	if err := ensureForkPushSafety(
+		ctx, runner, created.Path, branch,
+		!EqualRepositoryIdentity(
+			pr.Source.Repository.Identity, pr.Repository.Identity,
+		),
+	); err != nil {
+		return workspace, NewError(
+			CodeWorkspaceCreation,
+			"failed to make fork push routing safe",
+			false, err,
+		)
+	}
 	return workspace, nil
+}
+
+func ensureForkPushSafety(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, branch string,
+	fork bool,
+) error {
+	if !fork {
+		return nil
+	}
+	pushRemoteKey := "branch." + branch + ".pushRemote"
+	stdout, _, err := runner.Run(
+		ctx, path, nil, "config", "--worktree", "--get", pushRemoteKey,
+	)
+	switch {
+	case err == nil && strings.TrimSpace(string(stdout)) != "":
+		// Kit established and validated the fork remote before configuring it.
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil && !gitcmd.IsExitCode(err, 1):
+		return fmt.Errorf("inspect fork push remote: %w", err)
+	}
+
+	if _, _, err := runner.Run(
+		ctx, path, nil, "config", "--worktree", "push.default", "nothing",
+	); err != nil {
+		return fmt.Errorf("disable implicit fork pushes: %w", err)
+	}
+	stdout, _, err = runner.Run(
+		ctx, path, nil, "config", "--worktree", "--get", "push.default",
+	)
+	if err != nil {
+		return fmt.Errorf("verify disabled implicit fork pushes: %w", err)
+	}
+	if strings.TrimSpace(string(stdout)) != "nothing" {
+		return fmt.Errorf("verify disabled implicit fork pushes: unexpected push.default")
+	}
+	return nil
 }
 
 func mapSharedChangeRequestError(err error) error {

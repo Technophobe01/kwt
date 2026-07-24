@@ -66,7 +66,9 @@ func TestExecuteCancelsCommandContextOnInterrupt(t *testing.T) {
 	go func() { done <- command.Wait() }()
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		assert.Equal(t, 130, exitErr.ExitCode())
 	case <-time.After(2 * time.Second):
 		_ = command.Process.Kill()
 		require.FailNow(t, "command did not stop after interrupt")
