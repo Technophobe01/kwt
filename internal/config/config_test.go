@@ -1661,6 +1661,29 @@ func TestLoadForTargetResolvesRelativePathsAgainstSelectedRepository(t *testing.
 	assert.Equal(t, filepath.Join(resolvedTarget, "repo-worktrees"), cfg.RepositorySettings[0].BaseDir)
 }
 
+func TestLoadForTargetRejectsEmptyRepositoryLocalBaseDir(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	require.NoError(t, Init())
+	viper.Set("worktree.basedir", t.TempDir())
+
+	target := t.TempDir()
+	localPath := filepath.Join(target, ".kwt.toml")
+	local := []byte("[worktree]\nbasedir = ''\n")
+	require.NoError(t, os.WriteFile(localPath, local, 0o600))
+	absPath, err := normalizeConfigPath(localPath)
+	require.NoError(t, err)
+	store := &TrustStore{path: defaultTrustStorePath()}
+	require.NoError(t, store.Add(absPath, computeSHA256(local)))
+
+	_, err = LoadForTarget(target, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree base directory must not be empty")
+}
+
 func TestLoadForTargetPreservesRepositoryGlobSelectors(t *testing.T) {
 	kwtHome := t.TempDir()
 	t.Setenv("KWT_HOME", kwtHome)

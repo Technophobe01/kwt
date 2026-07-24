@@ -564,7 +564,11 @@ func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 		}
 	}
 	if local.IsSet("worktree.basedir") {
-		resolved, err := resolveTargetRelativePath(repoRoot, local.GetString("worktree.basedir"))
+		baseDir := local.GetString("worktree.basedir")
+		if strings.TrimSpace(baseDir) == "" {
+			return fmt.Errorf("repository-local worktree base directory must not be empty")
+		}
+		resolved, err := resolveTargetRelativePath(repoRoot, baseDir)
 		if err != nil {
 			return fmt.Errorf("resolve target worktree base directory: %w", err)
 		}
