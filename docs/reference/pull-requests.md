@@ -172,19 +172,17 @@ An imported list result adds the canonical workspace record:
 kwt chooses the deterministic local branch name and delegates remote
 selection, fetch, no-checkout worktree creation, materialization, and push
 routing to Kit. When the source branch is reachable, plain `git push` updates
-exactly the PR's original head branch. If a fork branch is unavailable but the
-provider's pull-request ref remains fetchable, import persists
-`push.default=nothing` in that worktree so a plain push fails instead of
-falling back to the base repository. Unlike an ordinary `kwt add`, PR import
-does not apply `copy_files` or `setup_commands`; run any desired project setup
-explicitly after reviewing the imported files.
-When it creates a fork remote, kwt uses SSH when the project's effective push
-URL uses SSH and HTTPS otherwise, preserving the project's working push
-authentication transport, including SSH host aliases and explicit ports. It
-reuses only remotes with exactly one effective push URL and no custom push
-refspec. Worktree-local `pushRemote` configuration takes precedence over global
-push defaults. Import reports the exact tmux session name a client can attach
-to; it does not launch or manipulate tmux panes.
+exactly the PR's original head branch. If Kit cannot establish that exact fork
+tracking, or KWT cannot validate it, import fails and rolls back the worktree
+instead of leaving a checkout whose plain push could fall back to the base
+repository. Unlike an ordinary `kwt add`, PR import does not apply
+`copy_files` or `setup_commands`; run any desired project setup explicitly
+after reviewing the imported files.
+When Kit creates a fork remote, it preserves the project's working push
+authentication transport, including SSH host aliases and explicit ports. KWT
+then verifies the effective push destination and rejects broader push behavior
+before reporting success. Import reports the exact tmux session name a client
+can attach to; it does not launch or manipulate tmux panes.
 
 Cross-project imports load the selected project's already trusted `.kwt.toml`
 in isolation. They never load configuration from the caller's working

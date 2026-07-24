@@ -178,6 +178,11 @@ func ensureForkPushSafety(
 		return nil
 	}
 
+	// Checkout isolation hides ambient configuration. Push validation models
+	// the ordinary Git commands the user will run after import instead.
+	runner.NullGlobalConfig = false
+	runner.NoSystemConfig = false
+
 	pushRemote, err := effectiveGitConfig(
 		ctx, runner, path, "branch."+branch+".pushRemote",
 	)
@@ -246,7 +251,43 @@ func ensureForkPushSafety(
 	if mirror != "" && !strings.EqualFold(mirror, "false") {
 		return errors.New("fork push remote is configured as a mirror")
 	}
+	followTags, err := effectiveGitBoolean(
+		ctx, runner, path, "push.followTags",
+	)
+	if err != nil {
+		return err
+	}
+	if followTags {
+		return errors.New("push.followTags would publish tags with the pull-request branch")
+	}
 	return nil
+}
+
+func effectiveGitBoolean(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, key string,
+) (bool, error) {
+	stdout, _, err := runner.Run(
+		ctx, path, nil, "config", "--bool", "--get", key,
+	)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		if gitcmd.IsExitCode(err, 1) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect git configuration %s: %w", key, err)
+	}
+	switch strings.TrimSpace(string(stdout)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("git configuration %s is not boolean", key)
+	}
 }
 
 func effectiveGitConfig(

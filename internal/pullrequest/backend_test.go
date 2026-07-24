@@ -119,6 +119,7 @@ func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing
 
 func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
 	repo := t.TempDir()
+	home := t.TempDir()
 	runGit(t, repo, "init", "-b", "pr-17-feature-widgets")
 	runGit(t, repo, "remote", "add", "fork",
 		"https://github.com/octocat/widget.git")
@@ -129,9 +130,19 @@ func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
 	runGit(t, repo, "config",
 		"branch.pr-17-feature-widgets.pushRemote", "fork")
 	runGit(t, repo, "config", "push.default", "upstream")
+	runner := gitcmd.New()
+	runner.StripEnv = false
+	runner.Env = append(
+		runner.Env,
+		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(home, "system.gitconfig"),
+	)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, "system.gitconfig"), nil, 0o600,
+	))
 
 	err := ensureForkPushSafety(
-		t.Context(), gitcmd.New(), repo, "pr-17-feature-widgets",
+		t.Context(), runner, repo, "pr-17-feature-widgets",
 		"github.com/octocat/widget", "feature/widgets", true,
 	)
 	require.NoError(t, err)
@@ -139,7 +150,19 @@ func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
 	runGit(t, repo, "config", "remote.fork.pushurl",
 		"https://github.com/acme/widget.git")
 	err = ensureForkPushSafety(
-		t.Context(), gitcmd.New(), repo, "pr-17-feature-widgets",
+		t.Context(), runner, repo, "pr-17-feature-widgets",
+		"github.com/octocat/widget", "feature/widgets", true,
+	)
+	require.Error(t, err)
+
+	runGit(t, repo, "config", "--unset", "remote.fork.pushurl")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, ".gitconfig"),
+		[]byte("[push]\n\tfollowTags = true\n"),
+		0o600,
+	))
+	err = ensureForkPushSafety(
+		t.Context(), runner, repo, "pr-17-feature-widgets",
 		"github.com/octocat/widget", "feature/widgets", true,
 	)
 	require.Error(t, err)
