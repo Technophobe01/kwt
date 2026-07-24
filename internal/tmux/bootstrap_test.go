@@ -44,6 +44,7 @@ func TestStripEnvNamesSelectsExactAndPrefix(t *testing.T) {
 func TestStripEnvNamesCoversFullCanonicalSet(t *testing.T) {
 	env := []string{
 		"__CFBundleIdentifier=com.example.Terminal",
+		"KWT_GITHUB_TOKEN=secret",
 		"OLDPWD=/old",
 		"PROMPT=$ ",
 		"PROMPT_COMMAND=update_prompt",
@@ -69,6 +70,7 @@ func TestStripEnvNamesCoversFullCanonicalSet(t *testing.T) {
 
 	want := []string{
 		"__CFBundleIdentifier",
+		"KWT_GITHUB_TOKEN",
 		"OLDPWD",
 		"PROMPT",
 		"PROMPT_COMMAND",
@@ -96,8 +98,8 @@ func TestCanonicalStripExactNamesIsSortedAndComplete(t *testing.T) {
 	got := CanonicalStripExactNames()
 
 	want := []string{
-		"EDITOR", "OLDPWD", "PROMPT", "PROMPT_COMMAND", "PWD", "RPROMPT",
-		"SHLVL", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "VISUAL",
+		"EDITOR", "KWT_GITHUB_TOKEN", "OLDPWD", "PROMPT", "PROMPT_COMMAND",
+		"PWD", "RPROMPT", "SHLVL", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "VISUAL",
 		"WINDOWID", "_", "__CFBundleIdentifier",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -128,6 +130,17 @@ func TestParseServerEnvNamesHandlesSetAndRemovedEntries(t *testing.T) {
 	}
 }
 
+func TestSetServerEnvNamesIgnoresRemovalMarkers(t *testing.T) {
+	output := "KWT_GITHUB_TOKEN=secret\n-CUSTOM_FLEET_TOKEN\nPATH=/usr/bin\n"
+
+	got := setServerEnvNames(output)
+
+	want := []string{"KWT_GITHUB_TOKEN", "PATH"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("setServerEnvNames() = %v, want %v", got, want)
+	}
+}
+
 func TestMergeStripNamesUnionsPreservingFirstSeenOrder(t *testing.T) {
 	got := MergeStripNames(
 		[]string{"EDITOR", "PWD"},
@@ -155,7 +168,7 @@ func TestStripEnvNamesIgnoresUnmatchedAndMalformed(t *testing.T) {
 // them (serverStartExclusions); see TestSanitizedEnvironPreservesEditorAndVisual.
 func TestSanitizedEnvironDropsExactKeys(t *testing.T) {
 	exactKeys := []string{
-		"__CFBundleIdentifier", "OLDPWD", "PROMPT", "PROMPT_COMMAND",
+		"__CFBundleIdentifier", "KWT_GITHUB_TOKEN", "OLDPWD", "PROMPT", "PROMPT_COMMAND",
 		"PWD", "RPROMPT", "SHLVL", "TERM_PROGRAM",
 		"TERM_PROGRAM_VERSION", "WINDOWID", "_",
 	}
@@ -174,7 +187,7 @@ func TestSanitizedEnvironDropsExactKeys(t *testing.T) {
 // set (canonicalStripPrefixes) exhaustively, one prefix at a time.
 func TestSanitizedEnvironDropsPrefixedKeys(t *testing.T) {
 	prefixes := []string{
-		"ALACRITTY_", "CONDA_", "FZF_", "ITERM", "KITTY_", "KWT_", "NVM_",
+		"ALACRITTY_", "CONDA_", "FZF_", "ITERM", "KITTY_", "NVM_",
 		"PYENV_", "STARSHIP_", "VIRTUAL_ENV", "WEZTERM_", "WT_", "VSCODE_",
 	}
 	for _, prefix := range prefixes {
@@ -186,6 +199,16 @@ func TestSanitizedEnvironDropsPrefixedKeys(t *testing.T) {
 				t.Errorf("SanitizedEnviron(%q) = %v, want %v", entry, got, want)
 			}
 		})
+	}
+}
+
+func TestSanitizedEnvironPreservesKwtOperationalVariables(t *testing.T) {
+	env := []string{"KWT_HOME=/tmp/kwt", "KWT_LOG_LEVEL=debug", "PATH=/usr/bin"}
+
+	got := SanitizedEnviron(env)
+
+	if !reflect.DeepEqual(got, env) {
+		t.Errorf("SanitizedEnviron() = %v, want %v", got, env)
 	}
 }
 

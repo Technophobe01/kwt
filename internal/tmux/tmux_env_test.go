@@ -17,7 +17,7 @@ import (
 func TestNewCmdSanitizesEnvironment(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
 	t.Setenv("KWT_GITHUB_TOKEN", "secret")
-	t.Setenv("KWT_TEST_OTHER", "secret")
+	t.Setenv("KWT_HOME", "/tmp/kwt")
 	t.Setenv("UNRELATED_VAR", "keep-me")
 
 	tc := NewTmuxCommand("tmux")
@@ -27,19 +27,24 @@ func TestNewCmdSanitizesEnvironment(t *testing.T) {
 		if hasEnvName(entry, "TERM_PROGRAM") {
 			t.Errorf("newCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
 		}
-		if hasEnvName(entry, "KWT_GITHUB_TOKEN") ||
-			hasEnvName(entry, "KWT_TEST_OTHER") {
-			t.Errorf("newCmd().Env leaked KWT-owned credentials: %v", cmd.Env)
+		if hasEnvName(entry, "KWT_GITHUB_TOKEN") {
+			t.Errorf("newCmd().Env leaked GitHub credential: %v", cmd.Env)
 		}
 	}
-	found := false
+	foundUnrelated, foundKwtHome := false, false
 	for _, entry := range cmd.Env {
 		if hasEnvName(entry, "UNRELATED_VAR") {
-			found = true
+			foundUnrelated = true
+		}
+		if hasEnvName(entry, "KWT_HOME") {
+			foundKwtHome = true
 		}
 	}
-	if !found {
+	if !foundUnrelated {
 		t.Errorf("newCmd().Env dropped unrelated var: %v", cmd.Env)
+	}
+	if !foundKwtHome {
+		t.Errorf("newCmd().Env dropped KWT_HOME: %v", cmd.Env)
 	}
 }
 

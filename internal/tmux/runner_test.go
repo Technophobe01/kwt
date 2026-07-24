@@ -43,6 +43,8 @@ type mockWorkspaceTmux struct {
 	sessionEnv          string
 	sessionEnvErr       error
 	sessionEnvQueried   bool
+	sessionWorkspace    string
+	sessionOptionErr    error
 }
 
 func (m *mockWorkspaceTmux) HasSession(string) bool {
@@ -56,6 +58,10 @@ func (m *mockWorkspaceTmux) GlobalEnvironment() (string, error) {
 func (m *mockWorkspaceTmux) SessionEnvironment(string) (string, error) {
 	m.sessionEnvQueried = true
 	return m.sessionEnv, m.sessionEnvErr
+}
+
+func (m *mockWorkspaceTmux) sessionOption(string, string) (string, error) {
+	return m.sessionWorkspace, m.sessionOptionErr
 }
 
 // expectedBootstrapCommand derives the bootstrap invocation a test should
@@ -227,12 +233,84 @@ func TestEnsureAndAttachPrefersSessionDefaultShell(t *testing.T) {
 		})
 }
 
-func TestEnsureAddsCredentialRemovalMarkers(t *testing.T) {
-	t.Setenv("KWT_GITHUB_TOKEN", "provider-secret")
-	m := &mockWorkspaceTmux{hasSession: false}
-	r := NewWorkspaceRunnerWithStripNames(
+func TestProtectedEnsureRejectsSensitiveServerEnvironment(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		globalEnv: "KWT_GITHUB_TOKEN=secret\nKWT_HOME=/tmp/kwt\n",
+	}
+	r := NewProtectedWorkspaceRunner(
 		m,
-		[]string{"CUSTOM_FLEET_TOKEN"},
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KWT_GITHUB_TOKEN")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRejectsUnverifiedExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession: true,
+		globalEnv:  "PATH=/bin\n",
+		sessionEnv: "PATH=/bin\n",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not verified")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRejectsSensitiveExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "CUSTOM_FLEET_TOKEN=secret\n",
+		sessionWorkspace: "/wt",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CUSTOM_FLEET_TOKEN")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRepairsVerifiedExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "PATH=/bin\n",
+		sessionWorkspace: "/wt",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
 	)
 
 	err := r.Ensure(
@@ -243,15 +321,33 @@ func TestEnsureAddsCredentialRemovalMarkers(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	expected := BuildSessionBootstrapCommand(
+	assert.Equal(t, [][]string{expectedBootstrapCommand("workspace")}, m.calls)
+}
+
+func TestProtectedEnsureMarksCreatedSessionBeforeRespawn(t *testing.T) {
+	m := &mockWorkspaceTmux{globalEnv: "PATH=/bin\n"}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
 		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Contains(t, m.calls, buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
 		MergeStripNames(
 			CanonicalStripExactNames(),
-			[]string{"CUSTOM_FLEET_TOKEN"},
+			[]string{"KWT_GITHUB_TOKEN"},
 			StripEnvNames(os.Environ()),
 		),
-	)
-	assert.Contains(t, m.calls, expected)
+	))
 }
 
 // TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing pins

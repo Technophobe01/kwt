@@ -3,11 +3,16 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// errNoServerRunning distinguishes a clean first-session launch from a tmux
+// server whose environment could not be inspected.
+var errNoServerRunning = errors.New("tmux server is not running")
 
 // TmuxInterface defines the contract for tmux operations
 type TmuxInterface interface {
@@ -270,7 +275,15 @@ func (t *TmuxCommand) RunCommandOutputContext(ctx context.Context, args ...strin
 // when no server is running; callers treat that as "nothing to inspect" and
 // fall back to the launcher-derived strip set.
 func (t *TmuxCommand) GlobalEnvironment() (string, error) {
-	return t.RunCommandOutputContext(context.Background(), "show-environment", "-g")
+	output, err := t.RunCommandOutputContext(
+		context.Background(),
+		"show-environment",
+		"-g",
+	)
+	if err != nil && strings.Contains(err.Error(), "no server running") {
+		return "", fmt.Errorf("%w: %v", errNoServerRunning, err)
+	}
+	return output, err
 }
 
 // SessionEnvironment returns a session's own environment table via
@@ -284,6 +297,19 @@ func (t *TmuxCommand) GlobalEnvironment() (string, error) {
 // as "nothing to inspect" and fall back to the other sources.
 func (t *TmuxCommand) SessionEnvironment(session string) (string, error) {
 	return t.RunCommandOutputContext(context.Background(), "show-environment", "-t", session)
+}
+
+// sessionOption reads a session-local user option without falling back to a
+// global value. Missing options return the tmux command error to the caller.
+func (t *TmuxCommand) sessionOption(session, option string) (string, error) {
+	return t.RunCommandOutputContext(
+		context.Background(),
+		"show-options",
+		"-v",
+		"-t",
+		session,
+		option,
+	)
 }
 
 // newCmd is the exec seam for every TmuxCommand method except the

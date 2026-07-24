@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/pullrequest"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -303,6 +304,68 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, started)
+}
+
+func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
+	service := &fakePRService{result: pullrequest.ImportResult{
+		Status: pullrequest.ImportCreated,
+		Workspace: pullrequest.Workspace{
+			ID: "ws", Path: "/worktrees/ws",
+			SessionName: "kwt-workspace-ws",
+		},
+	}}
+	withPRCommandDeps(t, testPRConfig(), service)
+	prStartSession = true
+	startPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) error {
+		return errors.New("invalid layout")
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRImport(cmd, []string{"17"})
+
+	var typed *pullrequest.Error
+	require.ErrorAs(t, err, &typed)
+	assert.False(t, typed.Retryable)
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.NotNil(t, envelope.Error)
+	assert.False(t, envelope.Error.Retryable)
+}
+
+func TestRunPRImportReportsSessionSafetyFailure(t *testing.T) {
+	service := &fakePRService{result: pullrequest.ImportResult{
+		Status: pullrequest.ImportExisting,
+		Workspace: pullrequest.Workspace{
+			ID: "ws", Path: "/worktrees/ws",
+			SessionName: "kwt-workspace-ws",
+		},
+	}}
+	withPRCommandDeps(t, testPRConfig(), service)
+	prStartSession = true
+	startPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) error {
+		return &tmux.SessionSafetyError{
+			Reason: "existing tmux session is not verified",
+		}
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRImport(cmd, []string{"17"})
+
+	var typed *pullrequest.Error
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, "existing tmux session is not verified", typed.Message)
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.NotNil(t, envelope.Error)
+	assert.Equal(t, "existing tmux session is not verified", envelope.Error.Message)
 }
 
 func TestPRCommandWritesTypedJSONErrorAndExitStatus(t *testing.T) {

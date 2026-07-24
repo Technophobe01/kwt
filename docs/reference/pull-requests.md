@@ -25,15 +25,21 @@ kwt pr import 17 --project github.com/acme/widget \
 `--start-session` creates or repairs the `session_name` returned by the import
 using kwt's configured default layout and workspace bootstrap, then leaves it
 detached for the caller. It is idempotent for an already imported worktree or
-an existing session. If session setup fails, the command returns a
-`workspace_creation_failed` error; retrying the same import safely retries
-session setup.
+a verified session that kwt created for the same workspace. Session setup
+failures return a non-retryable `workspace_creation_failed` error.
 
-Before invoking tmux, kwt removes every `KWT_*` variable and the variable named
-by `fleet.token_env` from the subprocess environment. It installs matching
-session remove-markers as part of bootstrap, including names discovered in an
-already-running tmux server or session, so provider and fleet credentials are
-not inherited by imported workspace panes.
+Before invoking tmux, kwt removes `KWT_GITHUB_TOKEN` and the variable named by
+`fleet.token_env` from the subprocess environment. It installs matching
+session remove-markers before any imported-workspace shell starts. Operational
+state such as `KWT_HOME` remains available inside the workspace.
+
+Session remove-markers are not an isolation boundary for a shared tmux server:
+a pane can reach that server through its tmux socket. Kwt therefore refuses to
+start a PR workspace when the server's global environment still contains
+either credential. It also refuses to reuse an existing same-named session
+unless the session carries the matching kwt workspace marker and its session
+environment is credential-free. The user must remove or rename rejected
+sessions, or remove sensitive variables from the server, before retrying.
 
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.
@@ -348,7 +354,7 @@ and return a stable nonzero status. For example:
 | 6    | `inaccessible_head`             | The fork or source branch is unavailable. |
 | 7    | `naming_conflict`               | The generated branch or workspace is occupied. |
 | 8    | `network_failure`               | A retryable provider or Git network failure. |
-| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, or persistence failed. |
+| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, persistence, or protected session startup failed. |
 | 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
 | 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
 | 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |

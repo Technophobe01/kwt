@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -134,10 +135,15 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			result.Workspace,
 			cfg,
 		); err != nil {
+			message := "failed to start imported workspace session"
+			var safetyError *tmux.SessionSafetyError
+			if errors.As(err, &safetyError) {
+				message = safetyError.Error()
+			}
 			return writePRError(cmd, pullrequest.NewError(
 				pullrequest.CodeWorkspaceCreation,
-				"failed to start imported workspace session",
-				true,
+				message,
+				false,
 				err,
 			))
 		}
@@ -207,9 +213,9 @@ func defaultStartPRWorkspaceSession(
 	if err != nil {
 		return err
 	}
-	stripNames := []string{cfg.Fleet.TokenEnv}
+	stripNames := []string{"KWT_GITHUB_TOKEN", cfg.Fleet.TokenEnv}
 	tmuxCommand := tmux.NewTmuxCommandWithStripNames("", stripNames)
-	return tmux.NewWorkspaceRunnerWithStripNames(
+	return tmux.NewProtectedWorkspaceRunner(
 		tmuxCommand,
 		stripNames,
 	).Ensure(

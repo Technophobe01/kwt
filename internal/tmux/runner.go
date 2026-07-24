@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -20,37 +21,64 @@ type workspaceTmux interface {
 	KillSession(session string) error
 	GlobalEnvironment() (string, error)
 	SessionEnvironment(session string) (string, error)
+	sessionOption(session, option string) (string, error)
 }
 
 var _ workspaceTmux = (*TmuxCommand)(nil)
+
+// SessionSafetyError is safe to return through the machine-readable PR
+// contract because it names only the rejected tmux state, never its value.
+type SessionSafetyError struct {
+	Reason string
+}
+
+func (e *SessionSafetyError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Reason
+}
 
 // WorkspaceRunner creates or reuses a tmux workspace session and attaches to it.
 type WorkspaceRunner struct {
 	tmux            workspaceTmux
 	extraStripNames []string
+	credentialNames []string
+	protected       bool
+}
+
+// NewProtectedWorkspaceRunner requires credential-clean tmux state and a
+// matching kwt workspace marker before it reuses an existing session.
+func NewProtectedWorkspaceRunner(
+	t workspaceTmux,
+	credentialNames []string,
+) *WorkspaceRunner {
+	names := cleanNames(credentialNames)
+	return &WorkspaceRunner{
+		tmux:            t,
+		extraStripNames: names,
+		credentialNames: names,
+		protected:       true,
+	}
 }
 
 // NewWorkspaceRunner returns a runner backed by the given tmux surface.
 func NewWorkspaceRunner(t workspaceTmux) *WorkspaceRunner {
-	return NewWorkspaceRunnerWithStripNames(t, nil)
+	return &WorkspaceRunner{tmux: t}
 }
 
-// NewWorkspaceRunnerWithStripNames installs caller-owned credential removal
-// markers in addition to kwt's canonical launcher-state set.
-func NewWorkspaceRunnerWithStripNames(
-	t workspaceTmux,
-	names []string,
-) *WorkspaceRunner {
-	extra := make([]string, 0, len(names))
+func cleanNames(names []string) []string {
+	cleaned := make([]string, 0, len(names))
+	seen := make(map[string]bool)
 	for _, name := range names {
-		if name = strings.TrimSpace(name); name != "" {
-			extra = append(extra, name)
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
 		}
+		seen[name] = true
+		cleaned = append(cleaned, name)
 	}
-	return &WorkspaceRunner{
-		tmux:            t,
-		extraStripNames: extra,
-	}
+	return cleaned
 }
 
 // EnsureAndAttach attaches to the workspace session, creating it first if it
@@ -77,7 +105,17 @@ func (r *WorkspaceRunner) EnsureAndAttach(
 func (r *WorkspaceRunner) Ensure(
 	ctx context.Context, session, worktreeDir string, layout models.Layout,
 ) error {
-	if r.tmux.HasSession(session) {
+	sessionExists := r.tmux.HasSession(session)
+	if r.protected {
+		if err := r.validateProtectedState(
+			session,
+			worktreeDir,
+			sessionExists,
+		); err != nil {
+			return err
+		}
+	}
+	if sessionExists {
 		if err := r.repairBootstrap(ctx, session); err != nil {
 			return err
 		}
@@ -85,6 +123,75 @@ func (r *WorkspaceRunner) Ensure(
 		return err
 	}
 	return nil
+}
+
+func (r *WorkspaceRunner) validateProtectedState(
+	session, worktreeDir string,
+	sessionExists bool,
+) error {
+	globalEnvironment, err := r.tmux.GlobalEnvironment()
+	if err != nil {
+		if !sessionExists && errors.Is(err, errNoServerRunning) {
+			return nil
+		}
+		return fmt.Errorf("cannot verify tmux server environment: %w", err)
+	}
+	if name, ok := firstMatchingName(
+		setServerEnvNames(globalEnvironment),
+		r.credentialNames,
+	); ok {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"tmux server environment contains sensitive variable %s; remove it before starting the imported workspace",
+			name,
+		)}
+	}
+	if !sessionExists {
+		return nil
+	}
+
+	sessionEnvironment, err := r.tmux.SessionEnvironment(session)
+	if err != nil {
+		return fmt.Errorf(
+			"cannot verify existing tmux session environment: %w",
+			err,
+		)
+	}
+	if name, ok := firstMatchingName(
+		setServerEnvNames(sessionEnvironment),
+		r.credentialNames,
+	); ok {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"existing tmux session contains sensitive variable %s; remove the session before retrying",
+			name,
+		)}
+	}
+	workspacePath, err := r.tmux.sessionOption(
+		session,
+		workspacePathOption,
+	)
+	workspacePath = strings.TrimSuffix(workspacePath, "\n")
+	workspacePath = strings.TrimSuffix(workspacePath, "\r")
+	if err != nil || workspacePath != worktreeDir {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"existing tmux session %q is not verified for workspace %q; remove or rename it before retrying",
+			session,
+			worktreeDir,
+		)}
+	}
+	return nil
+}
+
+func firstMatchingName(names, sensitive []string) (string, bool) {
+	sensitiveSet := make(map[string]bool, len(sensitive))
+	for _, name := range sensitive {
+		sensitiveSet[name] = true
+	}
+	for _, name := range names {
+		if sensitiveSet[name] {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // sessionStripNames derives the remove-marker set for session: the
@@ -158,6 +265,13 @@ func (r *WorkspaceRunner) create(
 	paneIDs = append(paneIDs, strings.TrimSpace(firstPane))
 
 	bootCmd := BuildSessionBootstrapCommand(session, stripNames)
+	if r.protected {
+		bootCmd = buildProtectedSessionBootstrapCommand(
+			session,
+			worktreeDir,
+			stripNames,
+		)
+	}
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
 		return r.abort(session, bootCmd, err)
 	}

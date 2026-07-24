@@ -135,14 +135,14 @@ explicit, documented exception, so they cannot silently drift apart:
   `EDITOR`/`VISUAL` out of every pane's shell even though the server process
   itself now keeps them.
 
-The full list: exact names `__CFBundleIdentifier`, `EDITOR`, `OLDPWD`,
-`PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`, `SHLVL`,
-`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
-prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `KWT_`, `NVM_`,
-`PYENV_`, `STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. PR
-workspace bootstrap additionally removes the exact variable named by
-`fleet.token_env`, both from tmux subprocesses and from the session
-environment. `EDITOR` and
+The full list: exact names `__CFBundleIdentifier`, `EDITOR`,
+`KWT_GITHUB_TOKEN`, `OLDPWD`, `PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`,
+`SHLVL`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
+prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `NVM_`, `PYENV_`,
+`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. Operational kwt
+variables such as `KWT_HOME` are preserved. PR workspace bootstrap additionally
+removes the exact variable named by `fleet.token_env`, both from tmux
+subprocesses and from the session environment. `EDITOR` and
 `VISUAL` are excluded from exec-time sanitization only, per above; every
 other name in this list is treated identically by both mechanisms.
 
@@ -178,6 +178,13 @@ already running, it re-applies the safe bootstrap subset (`default-command`
 plus the remove-markers — never construction or pane commands), so a session
 another tool created bare converges on consistent behavior for windows opened
 after that attach.
+
+PR imports use a stricter reuse boundary. `pr import --start-session` records
+the canonical workspace path when it creates the session and reuses only a
+same-named session with that exact marker. It rejects a shared server or
+existing session whose environment contains the provider or configured fleet
+credential, because a process inside the imported workspace can access the
+shared tmux socket and session masking does not remove the server's copy.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a

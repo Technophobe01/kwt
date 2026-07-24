@@ -53,6 +53,7 @@ func FirstPanePlaceholderArgv() []string {
 var canonicalStripExact = map[string]bool{
 	"__CFBundleIdentifier": true,
 	"EDITOR":               true,
+	"KWT_GITHUB_TOKEN":     true,
 	"OLDPWD":               true,
 	"PROMPT":               true,
 	"PROMPT_COMMAND":       true,
@@ -74,7 +75,6 @@ var canonicalStripPrefixes = []string{
 	"FZF_",
 	"ITERM",
 	"KITTY_",
-	"KWT_",
 	"NVM_",
 	"PYENV_",
 	"STARSHIP_",
@@ -176,6 +176,22 @@ func ParseServerEnvNames(output string) []string {
 			if after != "" {
 				names = append(names, after)
 			}
+			continue
+		}
+		if name, _, ok := strings.Cut(line, "="); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// setServerEnvNames extracts only variables with values from tmux
+// show-environment output. Session removal markers are intentionally ignored.
+func setServerEnvNames(output string) []string {
+	var names []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-") {
 			continue
 		}
 		if name, _, ok := strings.Cut(line, "="); ok && name != "" {
@@ -289,4 +305,19 @@ func BuildSessionBootstrapCommand(session string, stripNames []string) []string 
 		cmd = append(cmd, ";", "set-environment", "-t", session, "-r", name)
 	}
 	return cmd
+}
+
+const workspacePathOption = "@kwt-workspace-path"
+
+// buildProtectedSessionBootstrapCommand records the workspace identity in the
+// same pre-shell bootstrap transaction as the session environment policy.
+func buildProtectedSessionBootstrapCommand(
+	session, worktreeDir string,
+	stripNames []string,
+) []string {
+	cmd := BuildSessionBootstrapCommand(session, stripNames)
+	return append(
+		cmd,
+		";", "set-option", "-t", session, workspacePathOption, worktreeDir,
+	)
 }
