@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
@@ -81,6 +84,24 @@ func TestStaleProvenanceDoesNotLabelReusedWorktreePath(t *testing.T) {
 	for _, worktree := range tests {
 		assert.Empty(t, worktree.TmuxSocketName)
 	}
+}
+
+func TestProtectedSocketEnrichmentReportsUnreadableProvenance(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(kwtHome, "pull-requests.json"),
+		[]byte("{"),
+		0o600,
+	))
+
+	err := enrichProtectedSocketIdentity(
+		context.Background(),
+		[]models.Worktree{{Path: "/worktrees/pr-32"}},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pull-request provenance")
 }
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns

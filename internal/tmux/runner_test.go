@@ -30,6 +30,7 @@ type mockWorkspaceTmux struct {
 	switchedTo          string
 	attachedTo          string
 	protectedAttachedTo string
+	protectedAttachCtx  context.Context
 	outputErr           error
 	failOutputOnCall    int
 	outputCalls         int
@@ -135,8 +136,10 @@ func (m *mockWorkspaceTmux) AttachSession(session string) error {
 }
 
 func (m *mockWorkspaceTmux) AttachSessionWithoutEnvironment(
+	ctx context.Context,
 	session string,
 ) error {
+	m.protectedAttachCtx = ctx
 	m.protectedAttachedTo = session
 	return nil
 }
@@ -401,13 +404,16 @@ func TestProtectedAttachRepairsPolicyAndDisablesEnvironmentUpdate(t *testing.T) 
 		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
 	)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	err := r.AttachProtected(
-		context.Background(),
+		ctx,
 		"workspace",
 		"/wt",
 	)
 
 	require.NoError(t, err)
+	assert.Same(t, ctx, m.protectedAttachCtx)
 	assert.Equal(t, "workspace", m.protectedAttachedTo)
 	assert.Empty(t, m.attachedTo)
 	assert.Equal(t, [][]string{buildProtectedSessionBootstrapCommand(

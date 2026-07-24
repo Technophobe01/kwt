@@ -19,7 +19,7 @@ type workspaceTmux interface {
 	RunCommandOutputContext(ctx context.Context, args ...string) (string, error)
 	SwitchClient(target string) error
 	AttachSession(session string) error
-	AttachSessionWithoutEnvironment(session string) error
+	AttachSessionWithoutEnvironment(context.Context, string) error
 	KillSession(session string) error
 	GlobalEnvironment() (string, error)
 	SessionEnvironment(session string) (string, error)
@@ -159,7 +159,7 @@ func (r *WorkspaceRunner) AttachProtected(
 	if err := r.repairBootstrap(ctx, session, worktreeDir); err != nil {
 		return err
 	}
-	return r.tmux.AttachSessionWithoutEnvironment(session)
+	return r.tmux.AttachSessionWithoutEnvironment(ctx, session)
 }
 
 func (r *WorkspaceRunner) validateProtectedState(

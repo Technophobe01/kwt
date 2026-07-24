@@ -32,11 +32,13 @@ kwt pr attach <workspace.path>
 ```
 
 The attach command resolves the persisted workspace identity, verifies the
-isolated server and session, repairs the protected environment policy, and
-executes `attach-session -E` so tmux cannot import client environment
-variables. It is idempotent for an already imported worktree or a
-verified session that kwt created for the same workspace. Session setup
-failures return a non-retryable `workspace_creation_failed` error.
+recorded project clone and exact live worktree identity, verifies the isolated
+server and session, repairs the protected environment policy, and executes
+`attach-session -E` so tmux cannot import client environment variables. A
+deleted project, reused path, or branch, repository, or session-name mismatch
+fails closed. It is idempotent for an already imported worktree or a verified
+session that kwt created for the same workspace. Session setup failures return
+a non-retryable `workspace_creation_failed` error.
 
 Kwt runs each protected PR workspace on a deterministic, workspace-specific
 tmux socket rather than the user's ordinary tmux server. Before invoking that
@@ -52,6 +54,11 @@ Kwt reuses an existing session on that isolated socket only when the session
 carries the matching workspace marker and both its server and session
 environments are credential-free. A rejected protected session must be
 removed before retrying.
+
+`kwt list --json` reads the same provenance store before it labels worktrees
+with `tmux_socket_name`. If that store cannot be read or decoded, listing fails
+instead of emitting an imported workspace without its safety-critical socket
+identity.
 
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.

@@ -77,7 +77,12 @@ func runList(cmd *cobra.Command, args []string) error {
 
 			if listJSON {
 				enrichWorktreeIdentity(ctx.Git, ctx.Config.Projects, worktrees)
-				enrichProtectedSocketIdentity(worktrees)
+				if err := enrichProtectedSocketIdentity(
+					cmd.Context(),
+					worktrees,
+				); err != nil {
+					return err
+				}
 				return ctx.Printer.PrintWorktreesJSON(worktrees)
 			}
 
@@ -114,7 +119,12 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 	}
 
 	if listJSON {
-		enrichProtectedSocketIdentity(worktrees)
+		if err := enrichProtectedSocketIdentity(
+			context.Background(),
+			worktrees,
+		); err != nil {
+			return err
+		}
 		return ctx.Printer.PrintWorktreesJSON(worktrees)
 	}
 
@@ -122,10 +132,13 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 	return nil
 }
 
-func enrichProtectedSocketIdentity(worktrees []models.Worktree) {
+func enrichProtectedSocketIdentity(
+	ctx context.Context,
+	worktrees []models.Worktree,
+) error {
 	records := make(map[string]pullrequest.Provenance)
 	if err := pullrequest.NewFileStore(prStorePath()).View(
-		context.Background(),
+		ctx,
 		func(current map[string]pullrequest.Provenance) error {
 			for key, record := range current {
 				records[key] = record
@@ -133,9 +146,10 @@ func enrichProtectedSocketIdentity(worktrees []models.Worktree) {
 			return nil
 		},
 	); err != nil {
-		return
+		return fmt.Errorf("failed to read pull-request provenance: %w", err)
 	}
 	annotateProtectedSocketIdentity(worktrees, records)
+	return nil
 }
 
 func annotateProtectedSocketIdentity(

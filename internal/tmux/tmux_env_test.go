@@ -222,7 +222,10 @@ func TestProtectedAttachDisablesTmuxEnvironmentUpdate(t *testing.T) {
 		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
 	)
 
-	cmd := tc.attachSessionWithoutEnvironmentCmd("workspace")
+	cmd := tc.attachSessionWithoutEnvironmentCmd(
+		context.Background(),
+		"workspace",
+	)
 
 	want := []string{
 		"tmux", "-L", "kwt-pr-0123456789abcdef",

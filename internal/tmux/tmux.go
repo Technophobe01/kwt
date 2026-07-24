@@ -200,9 +200,10 @@ func (t *TmuxCommand) AttachSession(sessionName string) error {
 }
 
 func (t *TmuxCommand) AttachSessionWithoutEnvironment(
+	ctx context.Context,
 	sessionName string,
 ) error {
-	cmd := t.attachSessionWithoutEnvironmentCmd(sessionName)
+	cmd := t.attachSessionWithoutEnvironmentCmd(ctx, sessionName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -210,10 +211,11 @@ func (t *TmuxCommand) AttachSessionWithoutEnvironment(
 }
 
 func (t *TmuxCommand) attachSessionWithoutEnvironmentCmd(
+	ctx context.Context,
 	sessionName string,
 ) *exec.Cmd {
 	return t.newAttachCmd(
-		context.Background(),
+		ctx,
 		[]string{"attach-session", "-E", "-t", sessionName},
 	)
 }

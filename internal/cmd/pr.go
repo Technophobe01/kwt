@@ -35,6 +35,7 @@ var (
 	loadPRTargetConfig       = config.LoadForTarget
 	newPRService             = defaultNewPRService
 	validatePRProjectRoot    = defaultValidatePRProjectRoot
+	inspectPRProjectClone    = defaultInspectPRProjectClone
 	startPRWorkspaceSession  = defaultStartPRWorkspaceSession
 	attachPRWorkspaceSession = defaultAttachPRWorkspaceSession
 )
@@ -235,7 +236,103 @@ func importedWorkspaceProvenance(
 			nil,
 		)
 	}
-	return matches[0], nil
+	record := matches[0]
+	liveProject, liveWorkspaces, err := inspectPRProjectClone(
+		ctx,
+		record.Project,
+	)
+	if err != nil {
+		return pullrequest.Provenance{}, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"failed to verify imported workspace provenance",
+			false,
+			err,
+		)
+	}
+	if !samePRProjectClone(record.Project, liveProject) ||
+		!containsPRWorkspace(liveWorkspaces, record.Workspace) {
+		return pullrequest.Provenance{}, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"workspace no longer matches its pull-request provenance",
+			false,
+			nil,
+		)
+	}
+	return record, nil
+}
+
+func defaultInspectPRProjectClone(
+	ctx context.Context,
+	recorded pullrequest.Project,
+) (pullrequest.Project, []pullrequest.Workspace, error) {
+	if err := ctx.Err(); err != nil {
+		return pullrequest.Project{}, nil, err
+	}
+	project, err := validatePRProjectRoot(recorded)
+	if err != nil {
+		return pullrequest.Project{}, nil, err
+	}
+	g := gitadapter.New(project.Path)
+	info, err := worktree.RepositoryInfoFromGit(g)
+	if err != nil {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"resolve recorded project repository: %w",
+			err,
+		)
+	}
+	live, err := worktree.New(g, nil).List()
+	if err != nil {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"list recorded project worktrees: %w",
+			err,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return pullrequest.Project{}, nil, err
+	}
+	project.Identity = pullrequest.NormalizeRepositoryIdentity(info.FullPath)
+	workspaces := make([]pullrequest.Workspace, 0, len(live))
+	for _, candidate := range live {
+		workspaces = append(workspaces, pullrequest.Workspace{
+			Path:       candidate.Path,
+			Branch:     candidate.Branch,
+			Repository: project.Identity,
+			SessionName: tmux.WorkspaceSessionName(
+				info,
+				candidate.Branch,
+				candidate.Path,
+			),
+		})
+	}
+	return project, workspaces, nil
+}
+
+func samePRProjectClone(
+	left, right pullrequest.Project,
+) bool {
+	return pullrequest.EqualRepositoryIdentity(
+		left.Identity,
+		right.Identity,
+	) && utils.CanonicalPath(left.Path) == utils.CanonicalPath(right.Path)
+}
+
+func containsPRWorkspace(
+	live []pullrequest.Workspace,
+	recorded pullrequest.Workspace,
+) bool {
+	for _, candidate := range live {
+		if utils.CanonicalPath(candidate.Path) ==
+			utils.CanonicalPath(recorded.Path) &&
+			candidate.Branch == recorded.Branch &&
+			pullrequest.EqualRepositoryIdentity(
+				candidate.Repository,
+				recorded.Repository,
+			) &&
+			candidate.SessionName == recorded.SessionName {
+			return true
+		}
+	}
+	return false
 }
 
 func preparePRProject() (pullrequest.Project, error) {

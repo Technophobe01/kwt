@@ -51,6 +51,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldStartSession := prStartSession
 	oldStartWorkspaceSession := startPRWorkspaceSession
 	oldAttachWorkspaceSession := attachPRWorkspaceSession
+	oldInspectProjectClone := inspectPRProjectClone
 	t.Cleanup(func() {
 		loadPRConfig = oldLoad
 		loadPRTargetConfig = oldTargetLoad
@@ -61,11 +62,18 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 		prStartSession = oldStartSession
 		startPRWorkspaceSession = oldStartWorkspaceSession
 		attachPRWorkspaceSession = oldAttachWorkspaceSession
+		inspectPRProjectClone = oldInspectProjectClone
 	})
 	loadPRConfig = func() (*models.Config, error) { return cfg, nil }
 	loadPRTargetConfig = func(string, bool) (*models.Config, error) { return cfg, nil }
 	newPRService = func(context.Context, *models.Config, pullrequest.Project) (prService, error) { return service, nil }
 	validatePRProjectRoot = func(project pullrequest.Project) (pullrequest.Project, error) { return project, nil }
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Project,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return pullrequest.Project{}, nil, nil
+	}
 	prProject = "widget"
 	prState = "open"
 	prStartSession = false
@@ -348,16 +356,18 @@ func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
 	workspace := pullrequest.Workspace{
 		Path:        "/worktrees/pr-32",
 		Branch:      "pr-32",
+		Repository:  "github.com/acme/widget",
 		SessionName: "kwt-workspace-pr-32",
+	}
+	project := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Path:     "/repos/widget",
 	}
 	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
 		context.Background(),
 		func(records map[string]pullrequest.Provenance) error {
 			records["pr-32"] = pullrequest.Provenance{
-				Project: pullrequest.Project{
-					Identity: "github.com/acme/widget",
-					Path:     "/repos/widget",
-				},
+				Project:   project,
 				Workspace: workspace,
 			}
 			return nil
@@ -366,6 +376,12 @@ func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
 	cfg := testPRConfig()
 	cfg.Fleet.TokenEnv = "CUSTOM_FLEET_TOKEN"
 	withPRCommandDeps(t, cfg, &fakePRService{})
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Project,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return project, []pullrequest.Workspace{workspace}, nil
+	}
 	var attached bool
 	attachPRWorkspaceSession = func(
 		_ context.Context,
@@ -383,6 +399,53 @@ func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, attached)
+}
+
+func TestRunPRAttachRejectsStaleProvenanceAgainstLiveInventory(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	recorded := pullrequest.Workspace{
+		Path:        "/worktrees/reused",
+		Branch:      "pr-32",
+		Repository:  "github.com/acme/widget",
+		SessionName: "kwt-workspace-pr-32",
+	}
+	project := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Path:     "/repos/widget",
+	}
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-32"] = pullrequest.Provenance{
+				Project: project, Workspace: recorded,
+			}
+			return nil
+		},
+	))
+	withPRCommandDeps(t, testPRConfig(), &fakePRService{})
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Project,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		live := recorded
+		live.Branch = "unrelated"
+		return project, []pullrequest.Workspace{live}, nil
+	}
+	attached := false
+	attachPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) error {
+		attached = true
+		return nil
+	}
+	cmd, _, _ := prTestCommand()
+
+	err := runPRAttach(cmd, []string{recorded.Path})
+
+	assertPRCode(t, err, pullrequest.CodeWorkspaceCreation)
+	assert.False(t, attached)
 }
 
 func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
