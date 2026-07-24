@@ -50,6 +50,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldProject := prProject
 	oldState := prState
 	oldStartSession := prStartSession
+	oldValidateSessionConfig := validatePRWorkspaceSessionConfig
 	oldStartWorkspaceSession := startPRWorkspaceSession
 	oldAttachWorkspaceSession := attachPRWorkspaceSession
 	oldInspectProjectClone := inspectPRProjectClone
@@ -61,6 +62,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 		prProject = oldProject
 		prState = oldState
 		prStartSession = oldStartSession
+		validatePRWorkspaceSessionConfig = oldValidateSessionConfig
 		startPRWorkspaceSession = oldStartWorkspaceSession
 		attachPRWorkspaceSession = oldAttachWorkspaceSession
 		inspectPRProjectClone = oldInspectProjectClone
@@ -78,6 +80,9 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	prProject = "widget"
 	prState = "open"
 	prStartSession = false
+	validatePRWorkspaceSessionConfig = func(*models.Config) error {
+		return nil
+	}
 }
 
 func TestRunPRImportValidatesSelectorBeforeAuthentication(t *testing.T) {
@@ -550,7 +555,28 @@ func runPRInspectionGit(
 	require.NoError(t, err, "%s", output)
 }
 
-func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
+func TestRunPRImportPreflightsSessionBeforeMutation(t *testing.T) {
+	service := &fakePRService{}
+	withPRCommandDeps(t, testPRConfig(), service)
+	prStartSession = true
+	validatePRWorkspaceSessionConfig = func(*models.Config) error {
+		return errors.New("invalid layout")
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRImport(cmd, []string{"17"})
+
+	assert.Empty(t, service.gotSelector)
+	var typed *pullrequest.Error
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, pullrequest.CodeWorkspaceCreation, typed.Code)
+	var envelope pullrequest.ErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.NotNil(t, envelope.Error)
+	assert.Equal(t, pullrequest.CodeWorkspaceCreation, envelope.Error.Code)
+}
+
+func TestRunPRImportReportsDurableImportWithSessionFailure(t *testing.T) {
 	service := &fakePRService{result: pullrequest.ImportResult{
 		Status: pullrequest.ImportCreated,
 		Workspace: pullrequest.Workspace{
@@ -571,13 +597,17 @@ func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
 
 	err := runPRImport(cmd, []string{"17"})
 
-	var typed *pullrequest.Error
-	require.ErrorAs(t, err, &typed)
-	assert.False(t, typed.Retryable)
-	var envelope pullrequest.ErrorEnvelope
-	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
-	require.NotNil(t, envelope.Error)
-	assert.False(t, envelope.Error.Retryable)
+	require.NoError(t, err)
+	var result pullrequest.ImportResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.Equal(t, pullrequest.ImportCreated, result.Status)
+	require.NotNil(t, result.SessionStartError)
+	assert.Equal(
+		t,
+		pullrequest.CodeWorkspaceCreation,
+		result.SessionStartError.Code,
+	)
+	assert.False(t, result.SessionStartError.Retryable)
 }
 
 func TestRunPRImportReportsSessionSafetyFailure(t *testing.T) {
@@ -603,13 +633,15 @@ func TestRunPRImportReportsSessionSafetyFailure(t *testing.T) {
 
 	err := runPRImport(cmd, []string{"17"})
 
-	var typed *pullrequest.Error
-	require.ErrorAs(t, err, &typed)
-	assert.Equal(t, "existing tmux session is not verified", typed.Message)
-	var envelope pullrequest.ErrorEnvelope
-	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
-	require.NotNil(t, envelope.Error)
-	assert.Equal(t, "existing tmux session is not verified", envelope.Error.Message)
+	require.NoError(t, err)
+	var result pullrequest.ImportResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	require.NotNil(t, result.SessionStartError)
+	assert.Equal(
+		t,
+		"existing tmux session is not verified",
+		result.SessionStartError.Message,
+	)
 }
 
 func TestPRCommandWritesTypedJSONErrorAndExitStatus(t *testing.T) {

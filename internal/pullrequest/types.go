@@ -132,10 +132,11 @@ const (
 )
 
 type ImportResult struct {
-	Status      ImportStatus `json:"status"`
-	PullRequest PullRequest  `json:"pull_request"`
-	Project     Project      `json:"project"`
-	Workspace   Workspace    `json:"workspace"`
+	Status            ImportStatus `json:"status"`
+	PullRequest       PullRequest  `json:"pull_request"`
+	Project           Project      `json:"project"`
+	Workspace         Workspace    `json:"workspace"`
+	SessionStartError *Error       `json:"session_start_error,omitempty"`
 }
 
 type ErrorEnvelope struct {

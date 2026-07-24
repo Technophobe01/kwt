@@ -40,8 +40,30 @@ fails closed. Prunable entries and paths without a live Git worktree are not
 accepted. The registered project's canonical identity remains authoritative
 when its checkout's origin points to a fork, matching kwt's other inventory
 surfaces. It is idempotent for an already imported worktree or a verified
-session that kwt created for the same workspace. Session setup failures return
-a non-retryable `workspace_creation_failed` error.
+session that kwt created for the same workspace. Kwt validates layout and
+agent configuration before import mutation. If runtime session establishment
+fails after the import becomes durable, the command still exits successfully
+and returns the imported workspace with an explicit
+`session_start_error`:
+
+```json
+{
+  "status": "created",
+  "workspace": {
+    "path": "/worktrees/pr-17",
+    "session_name": "kwt-workspace-pr-17"
+  },
+  "session_start_error": {
+    "code": "workspace_creation_failed",
+    "message": "failed to start imported workspace session",
+    "retryable": false
+  }
+}
+```
+
+Clients must retain or refresh the imported workspace when this field is
+present and present the session failure separately. Retrying the same import
+converges on `already_imported` and retries session establishment.
 
 Kwt runs each protected PR workspace on a deterministic, workspace-specific
 tmux socket rather than the user's ordinary tmux server. Before invoking that
@@ -342,8 +364,10 @@ returns a conflict rather than replacing the original clone's provenance. KWT
 does not push during this check or rewrite Git remotes and routing that the
 local user changed after import.
 
-If an import fails after creating a workspace, kwt rolls it back even when the
-request context was canceled. Request cancellation, including `SIGINT` and
+If the import transaction fails after creating a workspace, kwt rolls it back
+even when the request context was canceled. Session establishment happens
+after that transaction and therefore uses the partial-success contract above
+rather than claiming rollback. Request cancellation, including `SIGINT` and
 `SIGTERM`, terminates checkout; cleanup then runs without the canceled context.
 Worktree creation retains an ownership reservation through late rollback and
 removes only the original directory identity, a clean worktree, and the
@@ -376,7 +400,7 @@ and return a stable nonzero status. For example:
 | 6    | `inaccessible_head`             | The fork or source branch is unavailable. |
 | 7    | `naming_conflict`               | The generated branch or workspace is occupied. |
 | 8    | `network_failure`               | A retryable provider or Git network failure. |
-| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, persistence, or protected session startup failed. |
+| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, persistence, or session-configuration preflight failed. |
 | 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
 | 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
 | 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |

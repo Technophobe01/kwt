@@ -31,13 +31,14 @@ var (
 	prJSON         bool
 	prStartSession bool
 
-	loadPRConfig             = config.Load
-	loadPRTargetConfig       = config.LoadForTarget
-	newPRService             = defaultNewPRService
-	validatePRProjectRoot    = defaultValidatePRProjectRoot
-	inspectPRProjectClone    = defaultInspectPRProjectClone
-	startPRWorkspaceSession  = defaultStartPRWorkspaceSession
-	attachPRWorkspaceSession = defaultAttachPRWorkspaceSession
+	loadPRConfig                     = config.Load
+	loadPRTargetConfig               = config.LoadForTarget
+	newPRService                     = defaultNewPRService
+	validatePRProjectRoot            = defaultValidatePRProjectRoot
+	inspectPRProjectClone            = defaultInspectPRProjectClone
+	validatePRWorkspaceSessionConfig = defaultValidatePRWorkspaceSessionConfig
+	startPRWorkspaceSession          = defaultStartPRWorkspaceSession
+	attachPRWorkspaceSession         = defaultAttachPRWorkspaceSession
 )
 
 var prCmd = &cobra.Command{
@@ -134,6 +135,16 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
+	if prStartSession {
+		if err := validatePRWorkspaceSessionConfig(cfg); err != nil {
+			return writePRError(cmd, pullrequest.NewError(
+				pullrequest.CodeWorkspaceCreation,
+				"invalid imported workspace session configuration",
+				false,
+				err,
+			))
+		}
+	}
 	result, err := service.Import(cmd.Context(), project, args[0])
 	if err != nil {
 		return writePRError(cmd, err)
@@ -150,12 +161,14 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			if errors.As(startErr, &safetyError) {
 				message = safetyError.Error()
 			}
-			return writePRError(cmd, pullrequest.NewError(
+			result.SessionStartError = pullrequest.NewError(
 				pullrequest.CodeWorkspaceCreation,
 				message,
 				false,
 				startErr,
-			))
+			)
+			result.PullRequest.Workspace = &result.Workspace
+			return writePRJSON(cmd, result)
 		}
 		result.Workspace.TmuxSocketName = socketName
 		result.PullRequest.Workspace = &result.Workspace
@@ -427,20 +440,7 @@ func defaultStartPRWorkspaceSession(
 		strings.TrimSpace(workspace.SessionName) == "" {
 		return "", fmt.Errorf("imported workspace has no tmux identity")
 	}
-	if err := tmux.ValidateLayouts(cfg.Layouts, cfg.Agents); err != nil {
-		return "", err
-	}
-	layout, err := tmux.ResolveLayout(
-		cfg.Layouts,
-		"",
-		false,
-		"",
-		nil,
-	)
-	if err != nil {
-		return "", err
-	}
-	layout, err = tmux.ResolvePaneCommands(layout, cfg.Agents)
+	layout, err := preparePRWorkspaceSessionLayout(cfg)
 	if err != nil {
 		return "", err
 	}
@@ -467,6 +467,39 @@ func defaultStartPRWorkspaceSession(
 		return "", err
 	}
 	return socketName, nil
+}
+
+func defaultValidatePRWorkspaceSessionConfig(
+	cfg *models.Config,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("kwt configuration is unavailable")
+	}
+	_, err := preparePRWorkspaceSessionLayout(cfg)
+	return err
+}
+
+func preparePRWorkspaceSessionLayout(
+	cfg *models.Config,
+) (models.Layout, error) {
+	if err := tmux.ValidateLayouts(cfg.Layouts, cfg.Agents); err != nil {
+		return models.Layout{}, err
+	}
+	layout, err := tmux.ResolveLayout(
+		cfg.Layouts,
+		"",
+		false,
+		"",
+		nil,
+	)
+	if err != nil {
+		return models.Layout{}, err
+	}
+	layout, err = tmux.ResolvePaneCommands(layout, cfg.Agents)
+	if err != nil {
+		return models.Layout{}, err
+	}
+	return layout, nil
 }
 
 func defaultAttachPRWorkspaceSession(
