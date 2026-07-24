@@ -46,6 +46,18 @@ func NewWorkspaceRunner(t workspaceTmux) *WorkspaceRunner {
 func (r *WorkspaceRunner) EnsureAndAttach(
 	ctx context.Context, session, worktreeDir string, layout models.Layout, insideTmux bool,
 ) error {
+	if err := r.Ensure(ctx, session, worktreeDir, layout); err != nil {
+		return err
+	}
+	return r.attach(session, insideTmux)
+}
+
+// Ensure creates or repairs the workspace session without attaching a client.
+// Automation callers can use this to establish kwt's canonical layout and
+// bootstrap before handing presentation to another ordinary tmux client.
+func (r *WorkspaceRunner) Ensure(
+	ctx context.Context, session, worktreeDir string, layout models.Layout,
+) error {
 	if r.tmux.HasSession(session) {
 		if err := r.repairBootstrap(ctx, session); err != nil {
 			return err
@@ -53,7 +65,7 @@ func (r *WorkspaceRunner) EnsureAndAttach(
 	} else if err := r.create(ctx, session, worktreeDir, layout); err != nil {
 		return err
 	}
-	return r.attach(session, insideTmux)
+	return nil
 }
 
 // sessionStripNames derives the remove-marker set for session: the

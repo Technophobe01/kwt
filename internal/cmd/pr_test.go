@@ -47,6 +47,8 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldValidateRoot := validatePRProjectRoot
 	oldProject := prProject
 	oldState := prState
+	oldStartSession := prStartSession
+	oldStartWorkspaceSession := startPRWorkspaceSession
 	t.Cleanup(func() {
 		loadPRConfig = oldLoad
 		loadPRTargetConfig = oldTargetLoad
@@ -54,6 +56,8 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 		validatePRProjectRoot = oldValidateRoot
 		prProject = oldProject
 		prState = oldState
+		prStartSession = oldStartSession
+		startPRWorkspaceSession = oldStartWorkspaceSession
 	})
 	loadPRConfig = func() (*models.Config, error) { return cfg, nil }
 	loadPRTargetConfig = func(string, bool) (*models.Config, error) { return cfg, nil }
@@ -61,6 +65,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	validatePRProjectRoot = func(project pullrequest.Project) (pullrequest.Project, error) { return project, nil }
 	prProject = "widget"
 	prState = "open"
+	prStartSession = false
 }
 
 func TestRunPRImportValidatesSelectorBeforeAuthentication(t *testing.T) {
@@ -136,7 +141,7 @@ func TestPreparePRServiceLoadsSelectedTargetConfiguration(t *testing.T) {
 
 	project, err := preparePRProject()
 	require.NoError(t, err)
-	_, err = preparePRService(context.Background(), project)
+	_, _, err = preparePRService(context.Background(), project)
 
 	require.NoError(t, err)
 	assert.Equal(t, "/repos/widget", loadedPath)
@@ -163,7 +168,7 @@ func TestPreparePRServiceRejectsPathOutsideMainRepositoryRootBeforeLoadingConfig
 		return testPRConfig(), nil
 	}
 
-	_, err := preparePRService(context.Background(), pullrequest.Project{
+	_, _, err := preparePRService(context.Background(), pullrequest.Project{
 		Identity: "github.com/acme/widget", Name: "widget", Path: subdir,
 	})
 
@@ -263,6 +268,41 @@ func TestRunPRImportWritesCreatedAndAlreadyImportedResults(t *testing.T) {
 			assert.Equal(t, "https://github.com/acme/widget/pull/17", service.gotSelector)
 		})
 	}
+}
+
+func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
+	workspace := pullrequest.Workspace{
+		ID: "ws", Path: "/worktrees/ws",
+		SessionName: "kwt-workspace-ws",
+	}
+	service := &fakePRService{result: pullrequest.ImportResult{
+		Status:    pullrequest.ImportCreated,
+		Project:   pullrequest.Project{Identity: "github.com/acme/widget"},
+		Workspace: workspace,
+	}}
+	cfg := testPRConfig()
+	withPRCommandDeps(t, cfg, service)
+	prStartSession = true
+	var started bool
+	startPRWorkspaceSession = func(
+		_ context.Context,
+		got pullrequest.Workspace,
+		gotConfig *models.Config,
+	) error {
+		started = true
+		assert.Equal(t, workspace, got)
+		assert.Same(t, cfg, gotConfig)
+		return nil
+	}
+	cmd, _, _ := prTestCommand()
+
+	err := runPRImport(
+		cmd,
+		[]string{"https://github.com/acme/widget/pull/17"},
+	)
+
+	require.NoError(t, err)
+	assert.True(t, started)
 }
 
 func TestPRCommandWritesTypedJSONErrorAndExitStatus(t *testing.T) {

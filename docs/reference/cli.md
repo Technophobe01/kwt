@@ -30,7 +30,8 @@ kwt add -b fix/parser-race
 kwt open parser
 kwt status
 kwt pr list --project github.com/acme/widget --json
-kwt pr import 17 --project github.com/acme/widget --json
+kwt pr import 17 --project github.com/acme/widget \
+  --start-session --json
 kwt sync status
 kwt exec fix/parser-race -- go test ./internal/parser
 kwt workspace add ~/notes
@@ -70,6 +71,9 @@ for pull-request clients. kwt owns provider calls, ref handling, branch and
 workspace naming, normal worktree creation and setup, push configuration,
 provenance, and tmux session naming. See [Pull-request
 automation](pull-requests.md) for the JSON and exit-status contract.
+`pr import --start-session` additionally establishes that canonical session
+without attaching, for clients that provide their own ordinary tmux
+presentation.
 
 ### Repository identity fallback
 

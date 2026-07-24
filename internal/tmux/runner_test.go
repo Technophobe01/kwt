@@ -156,6 +156,23 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 		"the create path must not query the session table of a session that does not exist yet")
 }
 
+func TestEnsureCreatesWorkspaceWithoutAttaching(t *testing.T) {
+	m := &mockWorkspaceTmux{hasSession: false}
+	r := NewWorkspaceRunner(m)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, m.calls)
+	assert.Empty(t, m.attachedTo)
+	assert.Empty(t, m.switchedTo)
+}
+
 func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
 	m := &mockWorkspaceTmux{hasSession: false, defaultShell: "/opt/homebrew/bin/fish"}
 	r := NewWorkspaceRunner(m)

@@ -14,6 +14,21 @@ kwt pr import github:github.com/acme/widget#17 \
   --project github.com/acme/widget --json
 ```
 
+Clients that present their own ordinary tmux client can ask kwt to establish
+the canonical workspace session without attaching kwt's process:
+
+```sh
+kwt pr import 17 --project github.com/acme/widget \
+  --start-session --json
+```
+
+`--start-session` creates or repairs the `session_name` returned by the import
+using kwt's configured default layout and workspace bootstrap, then leaves it
+detached for the caller. It is idempotent for an already imported worktree or
+an existing session. If session setup fails, the command returns a
+`workspace_creation_failed` error; retrying the same import safely retries
+session setup.
+
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.
 Identity and unique-name matching take precedence over path matching; relative

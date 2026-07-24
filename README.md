@@ -45,6 +45,10 @@ kwt status
 kwt pr list --project github.com/acme/widget --json
 kwt pr import 17 --project github.com/acme/widget --json
 
+# Import and establish the canonical tmux workspace for another client
+kwt pr import 17 --project github.com/acme/widget \
+  --start-session --json
+
 # Use a worktree path in scripts
 cd "$(kwt get feature/new-ui)"
 kwt exec feature/new-ui -- npm test

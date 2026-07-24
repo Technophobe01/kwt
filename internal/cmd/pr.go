@@ -12,6 +12,7 @@ import (
 	"go.kenn.io/kwt/internal/config"
 	gitadapter "go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/pullrequest"
+	"go.kenn.io/kwt/internal/tmux"
 	urlutil "go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
@@ -24,14 +25,16 @@ type prService interface {
 }
 
 var (
-	prProject string
-	prState   string
-	prJSON    bool
+	prProject      string
+	prState        string
+	prJSON         bool
+	prStartSession bool
 
-	loadPRConfig          = config.Load
-	loadPRTargetConfig    = config.LoadForTarget
-	newPRService          = defaultNewPRService
-	validatePRProjectRoot = defaultValidatePRProjectRoot
+	loadPRConfig            = config.Load
+	loadPRTargetConfig      = config.LoadForTarget
+	newPRService            = defaultNewPRService
+	validatePRProjectRoot   = defaultValidatePRProjectRoot
+	startPRWorkspaceSession = defaultStartPRWorkspaceSession
 )
 
 var prCmd = &cobra.Command{
@@ -73,6 +76,12 @@ func init() {
 	prCmd.PersistentFlags().StringVar(&prProject, "project", "", "registered project identity, name, or path (defaults to current repository)")
 	prCmd.PersistentFlags().BoolVar(&prJSON, "json", true, "emit the stable JSON automation contract")
 	prListCmd.Flags().StringVar(&prState, "state", "open", "pull-request state: open, closed, or all")
+	prImportCmd.Flags().BoolVar(
+		&prStartSession,
+		"start-session",
+		false,
+		"ensure the imported workspace's tmux session exists without attaching",
+	)
 	prCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return writePRError(cmd, pullrequest.NewError(pullrequest.CodeInvalidSelector, err.Error(), false, nil))
 	})
@@ -87,7 +96,7 @@ func runPRList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	service, err := preparePRService(cmd.Context(), project)
+	service, _, err := preparePRService(cmd.Context(), project)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -111,13 +120,27 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	if _, err := pullrequest.ParseSelector(args[0], project.Identity); err != nil {
 		return writePRError(cmd, err)
 	}
-	service, err := preparePRService(cmd.Context(), project)
+	service, cfg, err := preparePRService(cmd.Context(), project)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
 	result, err := service.Import(cmd.Context(), project, args[0])
 	if err != nil {
 		return writePRError(cmd, err)
+	}
+	if prStartSession {
+		if err := startPRWorkspaceSession(
+			cmd.Context(),
+			result.Workspace,
+			cfg,
+		); err != nil {
+			return writePRError(cmd, pullrequest.NewError(
+				pullrequest.CodeWorkspaceCreation,
+				"failed to start imported workspace session",
+				true,
+				err,
+			))
+		}
 	}
 	return writePRJSON(cmd, result)
 }
@@ -135,17 +158,63 @@ func preparePRProject() (pullrequest.Project, error) {
 	return project, nil
 }
 
-func preparePRService(ctx context.Context, project pullrequest.Project) (prService, error) {
+func preparePRService(
+	ctx context.Context,
+	project pullrequest.Project,
+) (prService, *models.Config, error) {
 	project, err := validatePRProjectRoot(project)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg, err := loadPRTargetConfig(project.Path, false)
 	if err != nil {
-		return nil, pullrequest.NewError(
+		return nil, nil, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation, "failed to load selected project configuration", false, err)
 	}
-	return newPRService(ctx, cfg, project)
+	service, err := newPRService(ctx, cfg, project)
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, cfg, nil
+}
+
+func defaultStartPRWorkspaceSession(
+	ctx context.Context,
+	workspace pullrequest.Workspace,
+	cfg *models.Config,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("kwt configuration is unavailable")
+	}
+	if strings.TrimSpace(workspace.Path) == "" ||
+		strings.TrimSpace(workspace.SessionName) == "" {
+		return fmt.Errorf("imported workspace has no tmux identity")
+	}
+	if err := tmux.ValidateLayouts(cfg.Layouts, cfg.Agents); err != nil {
+		return err
+	}
+	layout, err := tmux.ResolveLayout(
+		cfg.Layouts,
+		"",
+		false,
+		"",
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	layout, err = tmux.ResolvePaneCommands(layout, cfg.Agents)
+	if err != nil {
+		return err
+	}
+	return tmux.NewWorkspaceRunner(
+		tmux.NewTmuxCommand(""),
+	).Ensure(
+		ctx,
+		workspace.SessionName,
+		workspace.Path,
+		layout,
+	)
 }
 
 func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
