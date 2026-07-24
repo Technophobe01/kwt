@@ -174,8 +174,8 @@ func TestSanitizedEnvironDropsExactKeys(t *testing.T) {
 // set (canonicalStripPrefixes) exhaustively, one prefix at a time.
 func TestSanitizedEnvironDropsPrefixedKeys(t *testing.T) {
 	prefixes := []string{
-		"ALACRITTY_", "CONDA_", "FZF_", "ITERM", "KITTY_", "NVM_", "PYENV_",
-		"STARSHIP_", "VIRTUAL_ENV", "WEZTERM_", "WT_", "VSCODE_",
+		"ALACRITTY_", "CONDA_", "FZF_", "ITERM", "KITTY_", "KWT_", "NVM_",
+		"PYENV_", "STARSHIP_", "VIRTUAL_ENV", "WEZTERM_", "WT_", "VSCODE_",
 	}
 	for _, prefix := range prefixes {
 		t.Run(prefix, func(t *testing.T) {

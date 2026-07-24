@@ -16,7 +16,9 @@ import (
 // in bootstrap.go; see TestNewCmdPreservesEditorAndVisual).
 func TestNewCmdSanitizesEnvironment(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
-	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+	t.Setenv("KWT_GITHUB_TOKEN", "secret")
+	t.Setenv("KWT_TEST_OTHER", "secret")
+	t.Setenv("UNRELATED_VAR", "keep-me")
 
 	tc := NewTmuxCommand("tmux")
 	cmd := tc.newCmd(context.Background(), []string{"has-session", "-t", "x"})
@@ -25,15 +27,39 @@ func TestNewCmdSanitizesEnvironment(t *testing.T) {
 		if hasEnvName(entry, "TERM_PROGRAM") {
 			t.Errorf("newCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
 		}
+		if hasEnvName(entry, "KWT_GITHUB_TOKEN") ||
+			hasEnvName(entry, "KWT_TEST_OTHER") {
+			t.Errorf("newCmd().Env leaked KWT-owned credentials: %v", cmd.Env)
+		}
 	}
 	found := false
 	for _, entry := range cmd.Env {
-		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
+		if hasEnvName(entry, "UNRELATED_VAR") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("newCmd().Env dropped unrelated var KWT_TEST_UNRELATED_VAR: %v", cmd.Env)
+		t.Errorf("newCmd().Env dropped unrelated var: %v", cmd.Env)
+	}
+}
+
+func TestNewCmdStripsConfiguredSensitiveEnvironmentName(t *testing.T) {
+	t.Setenv("CUSTOM_FLEET_TOKEN", "secret")
+	t.Setenv("UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommandWithStripNames(
+		"tmux",
+		[]string{"CUSTOM_FLEET_TOKEN"},
+	)
+	cmd := tc.newCmd(
+		context.Background(),
+		[]string{"has-session", "-t", "x"},
+	)
+
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "CUSTOM_FLEET_TOKEN") {
+			t.Errorf("newCmd().Env leaked configured credential: %v", cmd.Env)
+		}
 	}
 }
 
@@ -102,7 +128,7 @@ func TestNewAttachCmdStripsEditorAndVisual(t *testing.T) {
 	t.Setenv("EDITOR", "vim")
 	t.Setenv("VISUAL", "code")
 	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
-	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+	t.Setenv("UNRELATED_VAR", "keep-me")
 
 	tc := NewTmuxCommand("tmux")
 	cmd := tc.newAttachCmd(context.Background(), []string{"attach-session", "-t", "x"})
@@ -118,7 +144,7 @@ func TestNewAttachCmdStripsEditorAndVisual(t *testing.T) {
 		if hasEnvName(entry, "TERM_PROGRAM") {
 			t.Errorf("newAttachCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
 		}
-		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
+		if hasEnvName(entry, "UNRELATED_VAR") {
 			foundUnrelated = true
 		}
 	}

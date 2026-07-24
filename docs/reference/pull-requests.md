@@ -29,6 +29,12 @@ an existing session. If session setup fails, the command returns a
 `workspace_creation_failed` error; retrying the same import safely retries
 session setup.
 
+Before invoking tmux, kwt removes every `KWT_*` variable and the variable named
+by `fleet.token_env` from the subprocess environment. It installs matching
+session remove-markers as part of bootstrap, including names discovered in an
+already-running tmux server or session, so provider and fleet credentials are
+not inherited by imported workspace panes.
+
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.
 Identity and unique-name matching take precedence over path matching; relative

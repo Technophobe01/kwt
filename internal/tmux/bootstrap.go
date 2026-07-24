@@ -74,6 +74,7 @@ var canonicalStripPrefixes = []string{
 	"FZF_",
 	"ITERM",
 	"KITTY_",
+	"KWT_",
 	"NVM_",
 	"PYENV_",
 	"STARSHIP_",

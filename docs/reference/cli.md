@@ -138,8 +138,11 @@ explicit, documented exception, so they cannot silently drift apart:
 The full list: exact names `__CFBundleIdentifier`, `EDITOR`, `OLDPWD`,
 `PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`, `SHLVL`,
 `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
-prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `NVM_`, `PYENV_`,
-`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. `EDITOR` and
+prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `KWT_`, `NVM_`,
+`PYENV_`, `STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. PR
+workspace bootstrap additionally removes the exact variable named by
+`fleet.token_env`, both from tmux subprocesses and from the session
+environment. `EDITOR` and
 `VISUAL` are excluded from exec-time sanitization only, per above; every
 other name in this list is treated identically by both mechanisms.
 

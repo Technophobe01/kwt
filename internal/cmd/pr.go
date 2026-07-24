@@ -207,8 +207,11 @@ func defaultStartPRWorkspaceSession(
 	if err != nil {
 		return err
 	}
-	return tmux.NewWorkspaceRunner(
-		tmux.NewTmuxCommand(""),
+	stripNames := []string{cfg.Fleet.TokenEnv}
+	tmuxCommand := tmux.NewTmuxCommandWithStripNames("", stripNames)
+	return tmux.NewWorkspaceRunnerWithStripNames(
+		tmuxCommand,
+		stripNames,
 	).Ensure(
 		ctx,
 		workspace.SessionName,

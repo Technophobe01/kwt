@@ -36,14 +36,33 @@ type SessionManagerInterface interface {
 }
 
 type TmuxCommand struct {
-	command string
+	command         string
+	extraStripNames map[string]bool
 }
 
 func NewTmuxCommand(command string) *TmuxCommand {
+	return NewTmuxCommandWithStripNames(command, nil)
+}
+
+// NewTmuxCommandWithStripNames adds caller-owned credential names to the
+// environment variables removed from every tmux subprocess.
+func NewTmuxCommandWithStripNames(
+	command string,
+	names []string,
+) *TmuxCommand {
 	if command == "" {
 		command = "tmux"
 	}
-	return &TmuxCommand{command: command}
+	extra := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			extra[name] = true
+		}
+	}
+	return &TmuxCommand{
+		command:         command,
+		extraStripNames: extra,
+	}
 }
 
 func (t *TmuxCommand) NewSession(name, workDir string) error {
@@ -280,7 +299,7 @@ func (t *TmuxCommand) SessionEnvironment(session string) (string, error) {
 // predate context plumbing pass context.Background().
 func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, t.command, args...)
-	cmd.Env = SanitizedEnviron(os.Environ())
+	cmd.Env = t.stripExtraNames(SanitizedEnviron(os.Environ()))
 	return cmd
 }
 
@@ -293,6 +312,15 @@ func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 // client still carried them.
 func (t *TmuxCommand) newAttachCmd(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, t.command, args...)
-	cmd.Env = AttachSanitizedEnviron(os.Environ())
+	cmd.Env = t.stripExtraNames(AttachSanitizedEnviron(os.Environ()))
 	return cmd
+}
+
+func (t *TmuxCommand) stripExtraNames(env []string) []string {
+	if len(t.extraStripNames) == 0 {
+		return env
+	}
+	return filteredEnviron(env, func(name string) bool {
+		return t.extraStripNames[name]
+	})
 }

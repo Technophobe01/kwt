@@ -26,12 +26,31 @@ var _ workspaceTmux = (*TmuxCommand)(nil)
 
 // WorkspaceRunner creates or reuses a tmux workspace session and attaches to it.
 type WorkspaceRunner struct {
-	tmux workspaceTmux
+	tmux            workspaceTmux
+	extraStripNames []string
 }
 
 // NewWorkspaceRunner returns a runner backed by the given tmux surface.
 func NewWorkspaceRunner(t workspaceTmux) *WorkspaceRunner {
-	return &WorkspaceRunner{tmux: t}
+	return NewWorkspaceRunnerWithStripNames(t, nil)
+}
+
+// NewWorkspaceRunnerWithStripNames installs caller-owned credential removal
+// markers in addition to kwt's canonical launcher-state set.
+func NewWorkspaceRunnerWithStripNames(
+	t workspaceTmux,
+	names []string,
+) *WorkspaceRunner {
+	extra := make([]string, 0, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			extra = append(extra, name)
+		}
+	}
+	return &WorkspaceRunner{
+		tmux:            t,
+		extraStripNames: extra,
+	}
 }
 
 // EnsureAndAttach attaches to the workspace session, creating it first if it
@@ -102,7 +121,13 @@ func (r *WorkspaceRunner) sessionStripNames(session string, sessionExists bool) 
 			sessionDerived = CanonicalStripNames(ParseServerEnvNames(output))
 		}
 	}
-	return MergeStripNames(CanonicalStripExactNames(), launcher, serverDerived, sessionDerived)
+	return MergeStripNames(
+		CanonicalStripExactNames(),
+		r.extraStripNames,
+		launcher,
+		serverDerived,
+		sessionDerived,
+	)
 }
 
 // create spawns the first pane as an inert placeholder (it spawns before the
@@ -136,12 +161,25 @@ func (r *WorkspaceRunner) create(
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
 		return r.abort(session, bootCmd, err)
 	}
-	defaultShellCmd := []string{"show-options", "-gv", "default-shell"}
+	defaultShellCmd := []string{
+		"show-options", "-v", "-t", session, "default-shell",
+	}
 	defaultShellOut, err := r.tmux.RunCommandOutputContext(ctx, defaultShellCmd...)
 	if err != nil {
 		return r.abort(session, defaultShellCmd, err)
 	}
 	defaultShell := strings.TrimSpace(defaultShellOut)
+	if defaultShell == "" {
+		defaultShellCmd = []string{"show-options", "-gv", "default-shell"}
+		defaultShellOut, err = r.tmux.RunCommandOutputContext(
+			ctx,
+			defaultShellCmd...,
+		)
+		if err != nil {
+			return r.abort(session, defaultShellCmd, err)
+		}
+		defaultShell = strings.TrimSpace(defaultShellOut)
+	}
 	if defaultShell == "" {
 		return r.abort(session, defaultShellCmd, fmt.Errorf("tmux returned an empty default-shell"))
 	}
