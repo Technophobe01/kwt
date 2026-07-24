@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,15 @@ type workspaceTmux interface {
 	GlobalEnvironment() (string, error)
 	SessionEnvironment(session string) (string, error)
 	sessionOption(session, option string) (string, error)
+	globalOption(option string) (string, error)
+}
+
+// ProtectedWorkspaceSocketName returns the deterministic tmux socket name for
+// one protected workspace. The path participates in the identity so equal
+// session names from separate repositories cannot share a server.
+func ProtectedWorkspaceSocketName(session, worktreeDir string) string {
+	sum := sha256.Sum256([]byte(session + "\x00" + worktreeDir))
+	return fmt.Sprintf("kwt-pr-%x", sum[:8])
 }
 
 var _ workspaceTmux = (*TmuxCommand)(nil)
@@ -116,7 +126,7 @@ func (r *WorkspaceRunner) Ensure(
 		}
 	}
 	if sessionExists {
-		if err := r.repairBootstrap(ctx, session); err != nil {
+		if err := r.repairBootstrap(ctx, session, worktreeDir); err != nil {
 			return err
 		}
 	} else if err := r.create(ctx, session, worktreeDir, layout); err != nil {
@@ -266,10 +276,17 @@ func (r *WorkspaceRunner) create(
 
 	bootCmd := BuildSessionBootstrapCommand(session, stripNames)
 	if r.protected {
+		updateEnvironment, updateErr := r.protectedUpdateEnvironment(session)
+		if updateErr != nil {
+			return r.abort(session, []string{
+				"show-options", "-t", session, "update-environment",
+			}, updateErr)
+		}
 		bootCmd = buildProtectedSessionBootstrapCommand(
 			session,
 			worktreeDir,
 			stripNames,
+			updateEnvironment,
 		)
 	}
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
@@ -326,12 +343,52 @@ func (r *WorkspaceRunner) create(
 // including one an external tool created bare with new-session. The session is
 // not kwt's to tear down, so a failure is wrapped and returned without killing
 // it.
-func (r *WorkspaceRunner) repairBootstrap(ctx context.Context, session string) error {
-	bootCmd := BuildSessionBootstrapCommand(session, r.sessionStripNames(session, true))
+func (r *WorkspaceRunner) repairBootstrap(
+	ctx context.Context,
+	session, worktreeDir string,
+) error {
+	stripNames := r.sessionStripNames(session, true)
+	bootCmd := BuildSessionBootstrapCommand(session, stripNames)
+	if r.protected {
+		updateEnvironment, err := r.protectedUpdateEnvironment(session)
+		if err != nil {
+			return fmt.Errorf("cannot inspect protected tmux update-environment: %w", err)
+		}
+		bootCmd = buildProtectedSessionBootstrapCommand(
+			session,
+			worktreeDir,
+			stripNames,
+			updateEnvironment,
+		)
+	}
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
 		return wrapTmuxErr(bootCmd, err)
 	}
 	return nil
+}
+
+func (r *WorkspaceRunner) protectedUpdateEnvironment(session string) (string, error) {
+	value, err := r.tmux.sessionOption(session, "update-environment")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(value) == "" {
+		value, err = r.tmux.globalOption("update-environment")
+		if err != nil {
+			return "", err
+		}
+	}
+	protected := make(map[string]bool, len(r.credentialNames))
+	for _, name := range r.credentialNames {
+		protected[name] = true
+	}
+	kept := make([]string, 0)
+	for _, name := range strings.Fields(value) {
+		if !protected[name] {
+			kept = append(kept, name)
+		}
+	}
+	return strings.Join(kept, " "), nil
 }
 
 // abort wraps a construction-command failure and kills the just-created

@@ -289,13 +289,13 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 		_ context.Context,
 		got pullrequest.Workspace,
 		gotConfig *models.Config,
-	) error {
+	) (string, error) {
 		started = true
 		assert.Equal(t, workspace, got)
 		assert.Same(t, cfg, gotConfig)
-		return nil
+		return "kwt-pr-0123456789abcdef", nil
 	}
-	cmd, _, _ := prTestCommand()
+	cmd, stdout, _ := prTestCommand()
 
 	err := runPRImport(
 		cmd,
@@ -304,6 +304,9 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, started)
+	var got pullrequest.ImportResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+	assert.Equal(t, "kwt-pr-0123456789abcdef", got.Workspace.TmuxSocketName)
 }
 
 func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
@@ -320,8 +323,8 @@ func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,
-	) error {
-		return errors.New("invalid layout")
+	) (string, error) {
+		return "", errors.New("invalid layout")
 	}
 	cmd, stdout, _ := prTestCommand()
 
@@ -350,8 +353,8 @@ func TestRunPRImportReportsSessionSafetyFailure(t *testing.T) {
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,
-	) error {
-		return &tmux.SessionSafetyError{
+	) (string, error) {
+		return "", &tmux.SessionSafetyError{
 			Reason: "existing tmux session is not verified",
 		}
 	}

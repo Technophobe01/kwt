@@ -73,7 +73,8 @@ provenance, and tmux session naming. See [Pull-request
 automation](pull-requests.md) for the JSON and exit-status contract.
 `pr import --start-session` additionally establishes that canonical session
 without attaching, for clients that provide their own ordinary tmux
-presentation.
+presentation. Its workspace record includes `tmux_socket_name`; attach with
+`tmux -L <tmux_socket_name> attach-session -t <session_name>`.
 
 ### Repository identity fallback
 
@@ -180,11 +181,12 @@ another tool created bare converges on consistent behavior for windows opened
 after that attach.
 
 PR imports use a stricter reuse boundary. `pr import --start-session` records
-the canonical workspace path when it creates the session and reuses only a
-same-named session with that exact marker. It rejects a shared server or
-existing session whose environment contains the provider or configured fleet
-credential, because a process inside the imported workspace can access the
-shared tmux socket and session masking does not remove the server's copy.
+the canonical workspace path when it creates the session on a deterministic,
+workspace-specific socket and reuses only a same-named session with that exact
+marker. The isolated server starts without the provider or configured fleet
+credential. The protected session also masks those names and removes them
+from `update-environment`, preventing a later client attach from restoring
+them.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a

@@ -314,10 +314,15 @@ const workspacePathOption = "@kwt-workspace-path"
 func buildProtectedSessionBootstrapCommand(
 	session, worktreeDir string,
 	stripNames []string,
+	updateEnvironment string,
 ) []string {
 	cmd := BuildSessionBootstrapCommand(session, stripNames)
-	return append(
+	cmd = append(
 		cmd,
 		";", "set-option", "-t", session, workspacePathOption, worktreeDir,
+	)
+	return append(
+		cmd,
+		";", "set-option", "-t", session, "update-environment", updateEnvironment,
 	)
 }

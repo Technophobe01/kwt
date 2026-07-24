@@ -24,22 +24,25 @@ kwt pr import 17 --project github.com/acme/widget \
 
 `--start-session` creates or repairs the `session_name` returned by the import
 using kwt's configured default layout and workspace bootstrap, then leaves it
-detached for the caller. It is idempotent for an already imported worktree or
-a verified session that kwt created for the same workspace. Session setup
+detached for the caller. The response also includes `tmux_socket_name`; clients
+must attach with `tmux -L <tmux_socket_name> attach-session -t
+<session_name>`. It is idempotent for an already imported worktree or a
+verified session that kwt created for the same workspace. Session setup
 failures return a non-retryable `workspace_creation_failed` error.
 
-Before invoking tmux, kwt removes `KWT_GITHUB_TOKEN` and the variable named by
+Kwt runs each protected PR workspace on a deterministic, workspace-specific
+tmux socket rather than the user's ordinary tmux server. Before invoking that
+server, kwt removes `KWT_GITHUB_TOKEN` and the variable named by
 `fleet.token_env` from the subprocess environment. It installs matching
-session remove-markers before any imported-workspace shell starts. Operational
-state such as `KWT_HOME` remains available inside the workspace.
+session remove-markers before any imported-workspace shell starts and removes
+those names from the session's effective `update-environment` option so later
+client attachment cannot restore them. Operational state such as `KWT_HOME`
+remains available inside the workspace.
 
-Session remove-markers are not an isolation boundary for a shared tmux server:
-a pane can reach that server through its tmux socket. Kwt therefore refuses to
-start a PR workspace when the server's global environment still contains
-either credential. It also refuses to reuse an existing same-named session
-unless the session carries the matching kwt workspace marker and its session
-environment is credential-free. The user must remove or rename rejected
-sessions, or remove sensitive variables from the server, before retrying.
+Kwt reuses an existing session on that isolated socket only when the session
+carries the matching workspace marker and both its server and session
+environments are credential-free. A rejected protected session must be
+removed before retrying.
 
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.

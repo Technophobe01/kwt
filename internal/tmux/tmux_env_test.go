@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -65,6 +66,31 @@ func TestNewCmdStripsConfiguredSensitiveEnvironmentName(t *testing.T) {
 		if hasEnvName(entry, "CUSTOM_FLEET_TOKEN") {
 			t.Errorf("newCmd().Env leaked configured credential: %v", cmd.Env)
 		}
+	}
+}
+
+func TestSocketCommandPrefixesEveryInvocationWithSocketName(t *testing.T) {
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	cmd := tc.newCmd(
+		context.Background(),
+		[]string{"has-session", "-t", "workspace"},
+	)
+	attach := tc.newAttachCmd(
+		context.Background(),
+		[]string{"attach-session", "-t", "workspace"},
+	)
+
+	wantPrefix := []string{"tmux", "-L", "kwt-pr-0123456789abcdef"}
+	if len(cmd.Args) < len(wantPrefix) || !slices.Equal(cmd.Args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("newCmd args = %v, want prefix %v", cmd.Args, wantPrefix)
+	}
+	if len(attach.Args) < len(wantPrefix) || !slices.Equal(attach.Args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("newAttachCmd args = %v, want prefix %v", attach.Args, wantPrefix)
 	}
 }
 

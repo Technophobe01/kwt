@@ -42,6 +42,7 @@ type SessionManagerInterface interface {
 
 type TmuxCommand struct {
 	command         string
+	socketName      string
 	extraStripNames map[string]bool
 }
 
@@ -55,6 +56,17 @@ func NewTmuxCommandWithStripNames(
 	command string,
 	names []string,
 ) *TmuxCommand {
+	return NewTmuxCommandForSocketWithStripNames(command, "", names)
+}
+
+// NewTmuxCommandForSocketWithStripNames targets a named tmux socket for every
+// invocation. A named socket gives protected workspaces a server boundary
+// separate from the user's ordinary tmux server.
+func NewTmuxCommandForSocketWithStripNames(
+	command string,
+	socketName string,
+	names []string,
+) *TmuxCommand {
 	if command == "" {
 		command = "tmux"
 	}
@@ -66,6 +78,7 @@ func NewTmuxCommandWithStripNames(
 	}
 	return &TmuxCommand{
 		command:         command,
+		socketName:      strings.TrimSpace(socketName),
 		extraStripNames: extra,
 	}
 }
@@ -312,6 +325,15 @@ func (t *TmuxCommand) sessionOption(session, option string) (string, error) {
 	)
 }
 
+func (t *TmuxCommand) globalOption(option string) (string, error) {
+	return t.RunCommandOutputContext(
+		context.Background(),
+		"show-options",
+		"-gv",
+		option,
+	)
+}
+
 // newCmd is the exec seam for every TmuxCommand method except the
 // attach-class commands (see newAttachCmd). It builds the *exec.Cmd for a
 // tmux invocation with Env set to a sanitized copy of the process environment
@@ -324,7 +346,7 @@ func (t *TmuxCommand) sessionOption(session, option string) (string, error) {
 // reads them at server start for its default key mode. Call sites that
 // predate context plumbing pass context.Background().
 func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
 	cmd.Env = t.stripExtraNames(SanitizedEnviron(os.Environ()))
 	return cmd
 }
@@ -337,9 +359,18 @@ func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 // session table, which would override the bootstrap's remove-markers if the
 // client still carried them.
 func (t *TmuxCommand) newAttachCmd(ctx context.Context, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, t.command, args...)
+	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
 	cmd.Env = t.stripExtraNames(AttachSanitizedEnviron(os.Environ()))
 	return cmd
+}
+
+func (t *TmuxCommand) socketArgs(args []string) []string {
+	if t.socketName == "" {
+		return args
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-L", t.socketName)
+	return append(prefixed, args...)
 }
 
 func (t *TmuxCommand) stripExtraNames(env []string) []string {

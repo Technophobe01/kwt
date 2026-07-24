@@ -100,6 +100,7 @@ type Workspace struct {
 	Path           string `json:"path"`
 	State          string `json:"state"`
 	SessionName    string `json:"session_name"`
+	TmuxSocketName string `json:"tmux_socket_name,omitempty"`
 	partialCleanup *workspacePartialCleanup
 	// preserveOnImportError means Kit could not prove that cleanup was safe.
 	// Other post-creation failures retain rollback metadata and are cleaned up.

@@ -44,6 +44,8 @@ type mockWorkspaceTmux struct {
 	sessionEnvErr       error
 	sessionEnvQueried   bool
 	sessionWorkspace    string
+	sessionUpdateEnv    string
+	globalUpdateEnv     string
 	sessionOptionErr    error
 }
 
@@ -60,8 +62,22 @@ func (m *mockWorkspaceTmux) SessionEnvironment(string) (string, error) {
 	return m.sessionEnv, m.sessionEnvErr
 }
 
-func (m *mockWorkspaceTmux) sessionOption(string, string) (string, error) {
-	return m.sessionWorkspace, m.sessionOptionErr
+func (m *mockWorkspaceTmux) sessionOption(_ string, option string) (string, error) {
+	switch option {
+	case workspacePathOption:
+		return m.sessionWorkspace, m.sessionOptionErr
+	case "update-environment":
+		return m.sessionUpdateEnv, m.sessionOptionErr
+	default:
+		return "", m.sessionOptionErr
+	}
+}
+
+func (m *mockWorkspaceTmux) globalOption(option string) (string, error) {
+	if option == "update-environment" {
+		return m.globalUpdateEnv, nil
+	}
+	return "", nil
 }
 
 // expectedBootstrapCommand derives the bootstrap invocation a test should
@@ -307,10 +323,11 @@ func TestProtectedEnsureRepairsVerifiedExistingSession(t *testing.T) {
 		globalEnv:        "PATH=/bin\n",
 		sessionEnv:       "PATH=/bin\n",
 		sessionWorkspace: "/wt",
+		sessionUpdateEnv: "DISPLAY SSH_AUTH_SOCK KWT_GITHUB_TOKEN CUSTOM_FLEET_TOKEN",
 	}
 	r := NewProtectedWorkspaceRunner(
 		m,
-		[]string{"KWT_GITHUB_TOKEN"},
+		[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
 	)
 
 	err := r.Ensure(
@@ -321,11 +338,23 @@ func TestProtectedEnsureRepairsVerifiedExistingSession(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, [][]string{expectedBootstrapCommand("workspace")}, m.calls)
+	assert.Equal(t, [][]string{buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY SSH_AUTH_SOCK",
+	)}, m.calls)
 }
 
 func TestProtectedEnsureMarksCreatedSessionBeforeRespawn(t *testing.T) {
-	m := &mockWorkspaceTmux{globalEnv: "PATH=/bin\n"}
+	m := &mockWorkspaceTmux{
+		globalEnv:       "PATH=/bin\n",
+		globalUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN SSH_AUTH_SOCK",
+	}
 	r := NewProtectedWorkspaceRunner(
 		m,
 		[]string{"KWT_GITHUB_TOKEN"},
@@ -347,7 +376,16 @@ func TestProtectedEnsureMarksCreatedSessionBeforeRespawn(t *testing.T) {
 			[]string{"KWT_GITHUB_TOKEN"},
 			StripEnvNames(os.Environ()),
 		),
+		"DISPLAY SSH_AUTH_SOCK",
 	))
+}
+
+func TestProtectedWorkspaceSocketNameIsStableAndWorkspaceSpecific(t *testing.T) {
+	first := ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/a")
+
+	assert.Equal(t, first, ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/a"))
+	assert.NotEqual(t, first, ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/b"))
+	assert.Regexp(t, `^kwt-pr-[0-9a-f]{16}$`, first)
 }
 
 // TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing pins

@@ -130,23 +130,25 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 		return writePRError(cmd, err)
 	}
 	if prStartSession {
-		if err := startPRWorkspaceSession(
+		socketName, startErr := startPRWorkspaceSession(
 			cmd.Context(),
 			result.Workspace,
 			cfg,
-		); err != nil {
+		)
+		if startErr != nil {
 			message := "failed to start imported workspace session"
 			var safetyError *tmux.SessionSafetyError
-			if errors.As(err, &safetyError) {
+			if errors.As(startErr, &safetyError) {
 				message = safetyError.Error()
 			}
 			return writePRError(cmd, pullrequest.NewError(
 				pullrequest.CodeWorkspaceCreation,
 				message,
 				false,
-				err,
+				startErr,
 			))
 		}
+		result.Workspace.TmuxSocketName = socketName
 	}
 	return writePRJSON(cmd, result)
 }
@@ -188,16 +190,16 @@ func defaultStartPRWorkspaceSession(
 	ctx context.Context,
 	workspace pullrequest.Workspace,
 	cfg *models.Config,
-) error {
+) (string, error) {
 	if cfg == nil {
-		return fmt.Errorf("kwt configuration is unavailable")
+		return "", fmt.Errorf("kwt configuration is unavailable")
 	}
 	if strings.TrimSpace(workspace.Path) == "" ||
 		strings.TrimSpace(workspace.SessionName) == "" {
-		return fmt.Errorf("imported workspace has no tmux identity")
+		return "", fmt.Errorf("imported workspace has no tmux identity")
 	}
 	if err := tmux.ValidateLayouts(cfg.Layouts, cfg.Agents); err != nil {
-		return err
+		return "", err
 	}
 	layout, err := tmux.ResolveLayout(
 		cfg.Layouts,
@@ -207,15 +209,23 @@ func defaultStartPRWorkspaceSession(
 		nil,
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	layout, err = tmux.ResolvePaneCommands(layout, cfg.Agents)
 	if err != nil {
-		return err
+		return "", err
 	}
 	stripNames := []string{"KWT_GITHUB_TOKEN", cfg.Fleet.TokenEnv}
-	tmuxCommand := tmux.NewTmuxCommandWithStripNames("", stripNames)
-	return tmux.NewProtectedWorkspaceRunner(
+	socketName := tmux.ProtectedWorkspaceSocketName(
+		workspace.SessionName,
+		workspace.Path,
+	)
+	tmuxCommand := tmux.NewTmuxCommandForSocketWithStripNames(
+		"",
+		socketName,
+		stripNames,
+	)
+	err = tmux.NewProtectedWorkspaceRunner(
 		tmuxCommand,
 		stripNames,
 	).Ensure(
@@ -224,6 +234,10 @@ func defaultStartPRWorkspaceSession(
 		workspace.Path,
 		layout,
 	)
+	if err != nil {
+		return "", err
+	}
+	return socketName, nil
 }
 
 func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
