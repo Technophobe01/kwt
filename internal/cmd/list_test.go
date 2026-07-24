@@ -8,11 +8,35 @@ import (
 	"testing"
 
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/ui"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestImportedWorktreeReceivesProtectedSocketIdentity(t *testing.T) {
+	worktrees := []models.Worktree{{
+		Path:        "/worktrees/pr-32",
+		SessionName: "kwt-workspace-pr-32",
+	}}
+	annotateProtectedSocketIdentity(worktrees, map[string]pullrequest.Provenance{
+		"pr-32": {
+			Workspace: pullrequest.Workspace{
+				Path:        "/worktrees/pr-32",
+				SessionName: "kwt-workspace-pr-32",
+			},
+		},
+	})
+
+	want := tmux.ProtectedWorkspaceSocketName(
+		"kwt-workspace-pr-32",
+		"/worktrees/pr-32",
+	)
+	if worktrees[0].TmuxSocketName != want {
+		t.Fatalf("tmux socket = %q, want %q", worktrees[0].TmuxSocketName, want)
+	}
+}
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns
 // everything it wrote. The ui.Printer writes to os.Stdout directly, so this is

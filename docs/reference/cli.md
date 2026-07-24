@@ -49,10 +49,13 @@ default branch. If that remote base is unavailable, it falls back to local
 `--json` emits an array of objects with `path`, `branch`, `commit_hash`, `is_main`,
 `created_at` (worktree directory mtime), `repository` (the `host/owner/name`
 slug, or a `local/<path>` fallback for a repository without a usable remote —
-see below), and `session_name` (the tmux workspace session name kwt attaches to). To
+see below), and `session_name` (the tmux workspace session name kwt attaches to).
+An imported pull-request worktree additionally includes `tmux_socket_name` for
+its protected workspace-specific server. To
 converge on the same session, prefer an attach-only command — `tmux
-attach-session -t <session_name>` (or `switch-client -t` from inside tmux) — so
-you never create the session bare. See [Attaching from other
+attach-session -t <session_name>` on the normal server, or `tmux -L
+<tmux_socket_name> attach-session -t <session_name>` when that field is
+present — so you never create the session bare. See [Attaching from other
 tools](#attaching-from-other-tools) before using `new-session`.
 `created_at` is populated in both local and `-g` mode.
 

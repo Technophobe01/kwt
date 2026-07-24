@@ -5,14 +5,15 @@ import "time"
 
 // Worktree represents a Git worktree with its associated metadata.
 type Worktree struct {
-	Path        string    `json:"path"`         // Absolute path to the worktree directory
-	Branch      string    `json:"branch"`       // Branch name associated with this worktree
-	CommitHash  string    `json:"commit_hash"`  // Current HEAD commit hash
-	IsMain      bool      `json:"is_main"`      // Whether this is the main worktree
-	CreatedAt   time.Time `json:"created_at"`   // Worktree directory modification time
-	Repository  string    `json:"repository"`   // Repository slug, e.g. github.com/owner/name
-	SessionName string    `json:"session_name"` // Computed tmux workspace session name
-	Prunable    bool      `json:"-"`            // Git reports this worktree entry as stale/prunable
+	Path           string    `json:"path"`                       // Absolute path to the worktree directory
+	Branch         string    `json:"branch"`                     // Branch name associated with this worktree
+	CommitHash     string    `json:"commit_hash"`                // Current HEAD commit hash
+	IsMain         bool      `json:"is_main"`                    // Whether this is the main worktree
+	CreatedAt      time.Time `json:"created_at"`                 // Worktree directory modification time
+	Repository     string    `json:"repository"`                 // Repository slug, e.g. github.com/owner/name
+	SessionName    string    `json:"session_name"`               // Computed tmux workspace session name
+	TmuxSocketName string    `json:"tmux_socket_name,omitempty"` // Protected alternate tmux socket
+	Prunable       bool      `json:"-"`                          // Git reports this worktree entry as stale/prunable
 }
 
 // Branch represents a Git branch with its metadata.

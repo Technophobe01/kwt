@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -74,6 +77,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 			if listJSON {
 				enrichWorktreeIdentity(ctx.Git, ctx.Config.Projects, worktrees)
+				enrichProtectedSocketIdentity(worktrees)
 				return ctx.Printer.PrintWorktreesJSON(worktrees)
 			}
 
@@ -110,11 +114,50 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 	}
 
 	if listJSON {
+		enrichProtectedSocketIdentity(worktrees)
 		return ctx.Printer.PrintWorktreesJSON(worktrees)
 	}
 
 	ctx.Printer.PrintWorktrees(worktrees, listVerbose)
 	return nil
+}
+
+func enrichProtectedSocketIdentity(worktrees []models.Worktree) {
+	records := make(map[string]pullrequest.Provenance)
+	if err := pullrequest.NewFileStore(prStorePath()).View(
+		context.Background(),
+		func(current map[string]pullrequest.Provenance) error {
+			for key, record := range current {
+				records[key] = record
+			}
+			return nil
+		},
+	); err != nil {
+		return
+	}
+	annotateProtectedSocketIdentity(worktrees, records)
+}
+
+func annotateProtectedSocketIdentity(
+	worktrees []models.Worktree,
+	records map[string]pullrequest.Provenance,
+) {
+	socketByPath := make(map[string]string, len(records))
+	for _, record := range records {
+		workspace := record.Workspace
+		if workspace.Path == "" || workspace.SessionName == "" {
+			continue
+		}
+		socketByPath[utils.CanonicalPath(workspace.Path)] =
+			tmux.ProtectedWorkspaceSocketName(
+				workspace.SessionName,
+				workspace.Path,
+			)
+	}
+	for i := range worktrees {
+		worktrees[i].TmuxSocketName =
+			socketByPath[utils.CanonicalPath(worktrees[i].Path)]
+	}
 }
 
 // enrichWorktreeIdentity fills the repository slug and session name for each
