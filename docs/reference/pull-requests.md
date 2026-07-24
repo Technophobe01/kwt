@@ -36,7 +36,10 @@ recorded project clone and exact live worktree identity, verifies the isolated
 server and session, repairs the protected environment policy, and executes
 `attach-session -E` so tmux cannot import client environment variables. A
 deleted project, reused path, or branch, repository, or session-name mismatch
-fails closed. It is idempotent for an already imported worktree or a verified
+fails closed. Prunable entries and paths without a live Git worktree are not
+accepted. The registered project's canonical identity remains authoritative
+when its checkout's origin points to a fork, matching kwt's other inventory
+surfaces. It is idempotent for an already imported worktree or a verified
 session that kwt created for the same workspace. Session setup failures return
 a non-retryable `workspace_creation_failed` error.
 

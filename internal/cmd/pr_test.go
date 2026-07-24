@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
+	urlutil "go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -446,6 +447,107 @@ func TestRunPRAttachRejectsStaleProvenanceAgainstLiveInventory(t *testing.T) {
 
 	assertPRCode(t, err, pullrequest.CodeWorkspaceCreation)
 	assert.False(t, attached)
+}
+
+func TestInspectPRProjectCloneUsesRegisteredIdentityOverForkOrigin(
+	t *testing.T,
+) {
+	repo := newPRInspectionRepo(t)
+	runPRInspectionGit(
+		t,
+		repo,
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/contributor/widget.git",
+	)
+	recorded := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Name:     "widget",
+		Path:     repo,
+	}
+	oldLoad := loadPRConfig
+	t.Cleanup(func() { loadPRConfig = oldLoad })
+	loadPRConfig = func() (*models.Config, error) {
+		return &models.Config{Projects: []models.Project{{
+			Repository: recorded.Identity,
+			Name:       recorded.Name,
+			Path:       recorded.Path,
+		}}}, nil
+	}
+
+	project, workspaces, err := defaultInspectPRProjectClone(
+		context.Background(),
+		recorded,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, recorded.Identity, project.Identity)
+	require.NotEmpty(t, workspaces)
+	assert.Equal(t, recorded.Identity, workspaces[0].Repository)
+}
+
+func TestLivePRWorkspacesExcludePrunableAndMissingPaths(
+	t *testing.T,
+) {
+	livePath := t.TempDir()
+	require.NoError(t, os.Mkdir(
+		filepath.Join(livePath, ".git"),
+		0o755,
+	))
+	info, ok := urlutil.CanonicalRepositoryInfo("github.com/acme/widget")
+	require.True(t, ok)
+
+	workspaces := livePRWorkspaces(
+		info,
+		pullrequest.Project{Identity: info.FullPath},
+		[]models.Worktree{
+			{
+				Path:     livePath,
+				Branch:   "prunable",
+				Prunable: true,
+			},
+			{
+				Path:   filepath.Join(t.TempDir(), "missing"),
+				Branch: "missing",
+			},
+			{
+				Path:   livePath,
+				Branch: "live",
+			},
+		},
+	)
+
+	require.Len(t, workspaces, 1)
+	assert.Equal(t, "live", workspaces[0].Branch)
+}
+
+func newPRInspectionRepo(t *testing.T) string {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), "repo")
+	runPRInspectionGit(t, "", "init", "-b", "main", repo)
+	runPRInspectionGit(t, repo, "config", "user.name", "Test User")
+	runPRInspectionGit(t, repo, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repo, "README.md"),
+		[]byte("# widget\n"),
+		0o644,
+	))
+	runPRInspectionGit(t, repo, "add", "README.md")
+	runPRInspectionGit(t, repo, "commit", "-m", "Initial commit")
+	return repo
+}
+
+func runPRInspectionGit(
+	t *testing.T,
+	dir string,
+	args ...string,
+) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
 }
 
 func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {

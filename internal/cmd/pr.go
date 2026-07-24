@@ -272,8 +272,35 @@ func defaultInspectPRProjectClone(
 	if err != nil {
 		return pullrequest.Project{}, nil, err
 	}
+	cfg, err := loadPRConfig()
+	if err != nil {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"load registered project inventory: %w",
+			err,
+		)
+	}
+	registered := make([]models.Project, 0, 1)
+	for _, candidate := range cfg.Projects {
+		if utils.CanonicalPath(candidate.Path) !=
+			utils.CanonicalPath(recorded.Path) ||
+			!pullrequest.EqualRepositoryIdentity(
+				publishableProjectRepository(candidate),
+				recorded.Identity,
+			) {
+			continue
+		}
+		registered = append(registered, candidate)
+	}
+	if len(registered) != 1 {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"recorded project is not uniquely registered",
+		)
+	}
 	g := gitadapter.New(project.Path)
-	info, err := worktree.RepositoryInfoFromGit(g)
+	info, err := worktree.RepositoryInfoWithProjects(
+		g,
+		registered,
+	)
 	if err != nil {
 		return pullrequest.Project{}, nil, fmt.Errorf(
 			"resolve recorded project repository: %w",
@@ -291,8 +318,19 @@ func defaultInspectPRProjectClone(
 		return pullrequest.Project{}, nil, err
 	}
 	project.Identity = pullrequest.NormalizeRepositoryIdentity(info.FullPath)
+	return project, livePRWorkspaces(info, project, live), nil
+}
+
+func livePRWorkspaces(
+	info *urlutil.RepositoryInfo,
+	project pullrequest.Project,
+	live []models.Worktree,
+) []pullrequest.Workspace {
 	workspaces := make([]pullrequest.Workspace, 0, len(live))
 	for _, candidate := range live {
+		if candidate.Prunable || !liveGitWorktreePath(candidate.Path) {
+			continue
+		}
 		workspaces = append(workspaces, pullrequest.Workspace{
 			Path:       candidate.Path,
 			Branch:     candidate.Branch,
@@ -304,7 +342,16 @@ func defaultInspectPRProjectClone(
 			),
 		})
 	}
-	return project, workspaces, nil
+	return workspaces
+}
+
+func liveGitWorktreePath(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(path, ".git"))
+	return err == nil
 }
 
 func samePRProjectClone(
