@@ -51,6 +51,21 @@ func newBackendRepo(t *testing.T) (string, *GitBackend) {
 	return repo, NewGitBackend(g, worktree.New(g, cfg), testProject())
 }
 
+func configureTestPushTracking(
+	t *testing.T,
+	repo, branch, remote, remoteURL string,
+) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	runGit(t, repo, "init", "-b", branch)
+	runGit(t, repo, "remote", "add", remote, remoteURL)
+	runGit(t, repo, "config", "branch."+branch+".remote", remote)
+	runGit(t, repo, "config",
+		"branch."+branch+".merge", "refs/heads/feature/widgets")
+	runGit(t, repo, "config", "branch."+branch+".pushRemote", remote)
+	runGit(t, repo, "config", "push.default", "upstream")
+}
+
 func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	runGit(t, repo, "remote", "set-url", "origin",
@@ -61,6 +76,10 @@ func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 		_ context.Context, opts managedworktree.MergeRequestWorktreeOptions,
 	) (managedworktree.CreateWorktreeResult, error) {
 		got = opts
+		configureTestPushTracking(
+			t, opts.Path, opts.Branch, "origin",
+			"https://github.com/acme/widget.git",
+		)
 		return managedworktree.CreateWorktreeResult{
 			Path: opts.Path, Branch: opts.Branch, BranchCreated: true,
 		}, nil
@@ -91,6 +110,51 @@ func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	assert.NotEmpty(t, workspace.SessionName)
 }
 
+func TestGitBackendSameRepositoryImportRejectsBroadPush(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{
+			name:  "remote push refspec",
+			key:   "remote.origin.push",
+			value: "HEAD:refs/heads/main",
+		},
+		{
+			name:  "follow tags",
+			key:   "push.followTags",
+			value: "true",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, backend := newBackendRepo(t)
+			original := createMergeRequestWorktree
+			createMergeRequestWorktree = func(
+				_ context.Context,
+				opts managedworktree.MergeRequestWorktreeOptions,
+			) (managedworktree.CreateWorktreeResult, error) {
+				configureTestPushTracking(
+					t, opts.Path, opts.Branch, "origin",
+					"https://github.com/acme/widget.git",
+				)
+				runGit(t, opts.Path, "config", tc.key, tc.value)
+				return managedworktree.CreateWorktreeResult{
+					Path: opts.Path, Branch: opts.Branch, BranchCreated: true,
+				}, nil
+			}
+			t.Cleanup(func() { createMergeRequestWorktree = original })
+
+			workspace, err := backend.ImportPullRequest(
+				t.Context(), testPR(17, false), "pr-17-feature-widgets",
+			)
+
+			assertErrorCode(t, err, CodeWorkspaceCreation)
+			assert.NotEmpty(t, workspace.Path)
+		})
+	}
+}
+
 func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing.T) {
 	_, backend := newBackendRepo(t)
 	original := createMergeRequestWorktree
@@ -117,19 +181,13 @@ func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing
 	assert.NotEmpty(t, workspace.Path)
 }
 
-func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
+func TestEnsurePullRequestPushSafetyValidatesEffectiveDestination(t *testing.T) {
 	repo := t.TempDir()
 	home := t.TempDir()
-	runGit(t, repo, "init", "-b", "pr-17-feature-widgets")
-	runGit(t, repo, "remote", "add", "fork",
-		"https://github.com/octocat/widget.git")
-	runGit(t, repo, "config",
-		"branch.pr-17-feature-widgets.remote", "fork")
-	runGit(t, repo, "config",
-		"branch.pr-17-feature-widgets.merge", "refs/heads/feature/widgets")
-	runGit(t, repo, "config",
-		"branch.pr-17-feature-widgets.pushRemote", "fork")
-	runGit(t, repo, "config", "push.default", "upstream")
+	configureTestPushTracking(
+		t, repo, "pr-17-feature-widgets", "fork",
+		"https://github.com/octocat/widget.git",
+	)
 	runner := gitcmd.New()
 	runner.StripEnv = false
 	runner.Env = append(
@@ -141,17 +199,17 @@ func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
 		filepath.Join(home, "system.gitconfig"), nil, 0o600,
 	))
 
-	err := ensureForkPushSafety(
+	err := ensurePullRequestPushSafety(
 		t.Context(), runner, repo, "pr-17-feature-widgets",
-		"github.com/octocat/widget", "feature/widgets", true,
+		"github.com/octocat/widget", "feature/widgets",
 	)
 	require.NoError(t, err)
 
 	runGit(t, repo, "config", "remote.fork.pushurl",
 		"https://github.com/acme/widget.git")
-	err = ensureForkPushSafety(
+	err = ensurePullRequestPushSafety(
 		t.Context(), runner, repo, "pr-17-feature-widgets",
-		"github.com/octocat/widget", "feature/widgets", true,
+		"github.com/octocat/widget", "feature/widgets",
 	)
 	require.Error(t, err)
 
@@ -161,9 +219,9 @@ func TestEnsureForkPushSafetyValidatesEffectiveDestination(t *testing.T) {
 		[]byte("[push]\n\tfollowTags = true\n"),
 		0o600,
 	))
-	err = ensureForkPushSafety(
+	err = ensurePullRequestPushSafety(
 		t.Context(), runner, repo, "pr-17-feature-widgets",
-		"github.com/octocat/widget", "feature/widgets", true,
+		"github.com/octocat/widget", "feature/widgets",
 	)
 	require.Error(t, err)
 }

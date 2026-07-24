@@ -688,6 +688,31 @@ func TestImportRollsBackPostCreationFailure(t *testing.T) {
 	assert.NotContains(t, err.Error(), "manual cleanup")
 }
 
+func TestImportPreservesTypedPostCreationFailureAfterRollback(t *testing.T) {
+	pr := testPR(65, true)
+	backend := newFakeBackend()
+	backend.createErr = NewError(
+		CodeNetwork, "fork fetch failed", true, errors.New("connection reset"),
+	)
+	backend.createErrWorkspace = Workspace{
+		Path:   "/worktrees/widget/pr-65-feature-widgets",
+		Branch: "pr-65-feature-widgets",
+	}
+	service := newTestService(
+		&fakeProvider{prs: []PullRequest{pr}}, backend, newMemoryStore(),
+	)
+
+	_, err := service.Import(t.Context(), testProject(), "65")
+
+	var typed *Error
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, CodeNetwork, typed.Code)
+	assert.True(t, typed.Retryable)
+	assert.Contains(t, typed.Message, "fork fetch failed")
+	assert.Contains(t, typed.Message, "rolled it back")
+	assert.Empty(t, backend.workspaces)
+}
+
 func TestImportPreservesTypedNamingFailureFromWorkspaceCreation(t *testing.T) {
 	pr := testPR(56, false)
 	backend := newFakeBackend()

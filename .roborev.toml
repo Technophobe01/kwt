@@ -65,11 +65,12 @@ Threat model for pull-request discovery and import:
   worktree, add a clean credential-free remote, and configure pushes to the
   PR's head branch. It must not push during import or redirect a later plain
   `git push` to the base repository when the PR came from a fork.
-- Kit owns selection and configuration of fork routing. KWT does not recreate
-  those mechanics, but it validates the successful-import postcondition: the
-  effective push destination and upstream must be exactly the PR source
-  repository and branch, without broader remote push behavior. If that
-  postcondition is absent, KWT rejects and rolls back the import.
+- Kit owns selection and configuration of pull-request push routing. KWT does
+  not recreate those mechanics, but it validates the successful-import
+  postcondition for same-repository and fork requests: the effective push
+  destination and upstream must be exactly the PR source repository and branch,
+  without broader remote push behavior. If that postcondition is absent, KWT
+  rejects and rolls back the import.
 - Repeating an import validates KWT's persisted provenance and the live
   worktree path and branch. It does not push, and it does not rewrite Git
   remotes or routing changed by the same local user after import; those remain

@@ -151,33 +151,25 @@ func (b *GitBackend) ImportPullRequest(
 		)
 		return workspace, mapSharedChangeRequestError(createErr)
 	}
-	if err := ensureForkPushSafety(
+	if err := ensurePullRequestPushSafety(
 		ctx, runner, created.Path, branch,
 		pr.Source.Repository.Identity, pr.Source.Name,
-		!EqualRepositoryIdentity(
-			pr.Source.Repository.Identity, pr.Repository.Identity,
-		),
 	); err != nil {
 		return workspace, NewError(
 			CodeWorkspaceCreation,
-			"failed to make fork push routing safe",
+			"failed to validate pull-request push routing",
 			false, err,
 		)
 	}
 	return workspace, nil
 }
 
-func ensureForkPushSafety(
+func ensurePullRequestPushSafety(
 	ctx context.Context,
 	runner gitcmd.Runner,
 	path, branch string,
 	sourceRepository, sourceBranch string,
-	fork bool,
 ) error {
-	if !fork {
-		return nil
-	}
-
 	// Checkout isolation hides ambient configuration. Push validation models
 	// the ordinary Git commands the user will run after import instead.
 	runner.NullGlobalConfig = false

@@ -189,6 +189,15 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 					fmt.Sprintf("%s and rollback failed; manual cleanup is required at %s for branch %q", cleanupReason, created.Path, created.Branch),
 					false, errors.Join(err, rollbackErr))
 			}
+			var typed *Error
+			if errors.As(err, &typed) {
+				return ImportResult{}, NewError(
+					typed.Code,
+					typed.Message+"; "+cleanupReason+"; rolled it back",
+					typed.Retryable,
+					err,
+				)
+			}
 			return ImportResult{}, NewError(CodeWorkspaceCreation, cleanupReason+"; rolled it back", false, err)
 		}
 		return ImportResult{}, AsError(err, CodeWorkspaceCreation, "pull-request import failed")
