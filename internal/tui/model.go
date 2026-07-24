@@ -45,6 +45,12 @@ type rowsMsg struct {
 	err      error
 }
 
+type fastRowsMsg struct {
+	rows     []Row
+	warnings []string
+	err      error
+}
+
 // fleetRowsMsg delivers the fleet overlay for the load identified by seq;
 // stale overlays (an intervening refresh bumped loadSeq) are dropped.
 type fleetRowsMsg struct {
@@ -54,10 +60,11 @@ type fleetRowsMsg struct {
 }
 
 type actionDoneMsg struct {
-	message    string
-	err        error
-	refresh    bool
-	anchorPath string
+	message     string
+	err         error
+	refresh     bool
+	anchorPath  string
+	pendingPath string
 }
 
 type Model struct {
@@ -135,7 +142,7 @@ func launchPerspective(rows []Row, anchorPath string) string {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.fetchRowsCmd()
+	return m.fetchFastRowsCmd()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -144,6 +151,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+	case fastRowsMsg:
+		return m.applyFastRows(msg)
 	case rowsMsg:
 		return m.applyRows(msg)
 	case fleetRowsMsg:
@@ -210,6 +219,23 @@ func (m Model) filteredRows() []Row {
 	)
 }
 
+func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
+	pendingRefresh := m.pendingRefresh
+	m.pendingRefresh = false
+	next, _ := m.applyRows(rowsMsg(msg))
+	next = next.cancelFleetMerge()
+	next.fleetPending = false
+	if msg.err != nil {
+		return next, nil
+	}
+	if pendingRefresh {
+		next.pendingRefresh = false
+		return next.startFetch()
+	}
+	next.fetching = true
+	return next, next.fetchRowsCmd()
+}
+
 func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	m.fetching = false
 	if msg.err != nil {
@@ -222,6 +248,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	oldCursor := m.cursor
 	hadRows := len(m.rows) > 0
 	rows := append([]Row(nil), msg.rows...)
+	rows = appendMissingCreatingRows(rows, m.rows)
 	sortRows(rows)
 	m.rows = rows
 	if !hadRows && m.anchorPath != "" {
@@ -279,6 +306,7 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 	oldRows := m.filteredRows()
 	oldCursor := m.cursor
 	rows := append([]Row(nil), msg.rows...)
+	rows = appendMissingCreatingRows(rows, m.rows)
 	sortRows(rows)
 	m.rows = rows
 	m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
@@ -287,6 +315,10 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 
 func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 	if msg.err != nil {
+		if msg.pendingPath != "" {
+			m.rows = removeRowByPath(m.rows, msg.pendingPath)
+			m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+		}
 		m.err = msg.err
 		m.message = ""
 		return m, nil
@@ -322,7 +354,31 @@ func (m Model) startFetch() (Model, tea.Cmd) {
 	m.fetching = true
 	m.fleetPending = false
 	m = m.cancelFleetMerge()
-	return m, m.fetchRowsCmd()
+	return m, m.fetchFastRowsCmd()
+}
+
+func appendMissingCreatingRows(rows, current []Row) []Row {
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		seen[rowPath(row)] = true
+	}
+	for _, row := range current {
+		path := rowPath(row)
+		if row.Creating && path != "" && !seen[path] {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func removeRowByPath(rows []Row, path string) []Row {
+	filtered := rows[:0]
+	for _, row := range rows {
+		if rowPath(row) != path {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func (m Model) cancelFleetMerge() Model {
@@ -466,7 +522,7 @@ func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			row := m.selectedRow()
-			return m, m.createWorktreeCmd(row, branch)
+			return m.startCreateWorktree(row, branch)
 		case inputFilter:
 			m.inputMode = inputNone
 			m.input.Blur()
@@ -481,6 +537,21 @@ func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	return m.updateTextInput(msg)
+}
+
+func (m Model) startCreateWorktree(row Row, branch string) (Model, tea.Cmd) {
+	planned, err := m.backend.PreviewWorktree(row, branch)
+	if err != nil {
+		m.err = err
+		m.message = ""
+		return m, nil
+	}
+	planned.Creating = true
+	m.rows = append(m.rows, planned)
+	sortRows(m.rows)
+	m.cursor = indexByPath(m.filteredRows(), rowPath(planned))
+	m.message = fmt.Sprintf("creating %s", branch)
+	return m, m.createWorktreeCmd(row, branch, rowPath(planned))
 }
 
 func (m Model) handlePaste(msg tea.PasteMsg) (Model, tea.Cmd) {
@@ -593,6 +664,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 func (m Model) openSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Creating {
+		m.message = "worktree is still being created"
+		return m, nil
+	}
 	if row.Entry == nil && row.Workspace == nil {
 		if row.Fleet != nil && row.Fleet.CanMaterialize {
 			m.message = "press s to sync this worktree"
@@ -610,6 +685,10 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 
 func (m Model) shellSelected() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Creating {
+		m.message = "worktree is still being created"
+		return m, nil
+	}
 	if row.Entry == nil && row.Workspace == nil {
 		m.message = "sync this worktree before opening a shell"
 		return m, nil
@@ -805,6 +884,14 @@ func (m Model) fetchRowsCmd() tea.Cmd {
 	}
 }
 
+func (m Model) fetchFastRowsCmd() tea.Cmd {
+	backend := m.backend
+	return func() tea.Msg {
+		rows, warnings, err := backend.ListFast(context.Background())
+		return fastRowsMsg{rows: rows, warnings: warnings, err: err}
+	}
+}
+
 func (m Model) fleetRowsCmd(ctx context.Context, seq int, rows []Row) tea.Cmd {
 	backend := m.backend
 	// Copy: the merge mutates row elements while the UI keeps rendering the
@@ -816,16 +903,19 @@ func (m Model) fleetRowsCmd(ctx context.Context, seq int, rows []Row) tea.Cmd {
 	}
 }
 
-func (m Model) createWorktreeCmd(row Row, branch string) tea.Cmd {
+func (m Model) createWorktreeCmd(row Row, branch, pendingPath string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := m.backend.CreateWorktree(context.Background(), row, branch)
+		path, err := m.backend.CreateWorktree(
+			context.Background(), row, branch, pendingPath,
+		)
 		if err != nil {
-			return actionDoneMsg{err: err}
+			return actionDoneMsg{err: err, pendingPath: pendingPath}
 		}
 		return actionDoneMsg{
-			message:    fmt.Sprintf("created %s", branch),
-			refresh:    true,
-			anchorPath: path,
+			message:     fmt.Sprintf("created %s", branch),
+			refresh:     true,
+			anchorPath:  path,
+			pendingPath: pendingPath,
 		}
 	}
 }
@@ -891,8 +981,10 @@ func (m Model) renderHeader() string {
 		repoCount[rowRepoName(row)] = true
 	}
 	spinner := ""
-	if m.fetching {
+	if m.fetching && len(m.rows) == 0 {
 		spinner = " · fetching"
+	} else if m.fetching {
+		spinner = " · checking"
 	} else if m.fleetPending {
 		spinner = " · syncing"
 	}
@@ -1016,6 +1108,9 @@ func (m Model) renderStatusLine() string {
 
 func (m Model) renderSelectionDetails() string {
 	row := m.selectedRow()
+	if row.Creating {
+		return fmt.Sprintf("creating %s\n%s", rowLabel(row), abbreviateHome(rowPath(row)))
+	}
 	if row.Entry == nil && row.Fleet != nil {
 		location := "remote"
 		if row.Fleet.MaterializeHost != "" {

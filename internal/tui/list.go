@@ -264,6 +264,9 @@ func formatPushPullStatus(status *models.WorktreeStatus) (string, bool) {
 }
 
 func formatRowChanges(row Row) string {
+	if row.Creating {
+		return "creating…"
+	}
 	if row.Workspace != nil {
 		return "-"
 	}
@@ -344,6 +347,9 @@ func compactFleetDirtySummary(summary string) string {
 }
 
 func formatRowSync(row Row) string {
+	if row.Creating {
+		return "-"
+	}
 	if row.Workspace != nil {
 		return "-"
 	}
@@ -681,6 +687,9 @@ func padRight(s string, width int) string {
 }
 
 func formatWorkspace(row Row) string {
+	if row.Creating {
+		return "pending"
+	}
 	if row.Entry == nil && row.Fleet != nil {
 		return "remote"
 	}

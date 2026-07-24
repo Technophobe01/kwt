@@ -28,6 +28,7 @@ type Row struct {
 	Workspace   *WorkspaceInfo
 	SessionName string
 	SessionLive bool
+	Creating    bool
 }
 
 // WorkspaceInfo is the TUI-facing view of one registered directory workspace.
@@ -58,15 +59,18 @@ type FleetInfo struct {
 }
 
 type Backend interface {
+	// ListFast returns enough local metadata to paint dashboard rows without
+	// waiting for repository status collection.
+	ListFast(ctx context.Context) ([]Row, []string, error)
 	// List returns local dashboard rows plus non-fatal warnings that should
-	// be surfaced to the user. It must stay fast: fleet hub work belongs in
-	// MergeFleet, which runs after the first paint.
+	// be surfaced to the user. Fleet hub work belongs in MergeFleet.
 	List(ctx context.Context) ([]Row, []string, error)
 	// MergeFleet overlays multi-machine sync state onto rows and returns the
 	// merged rows plus hub warnings. When sync is disabled it returns rows
 	// unchanged.
 	MergeFleet(ctx context.Context, rows []Row) ([]Row, []string)
-	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
+	PreviewWorktree(row Row, branch string) (Row, error)
+	CreateWorktree(ctx context.Context, row Row, branch, destination string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
 	RemoveWorktree(ctx context.Context, row Row, force bool) error
 	UnregisterWorkspace(row Row) error

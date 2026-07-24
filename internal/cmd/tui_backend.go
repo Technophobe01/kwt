@@ -35,6 +35,7 @@ type tuiBackend struct {
 	cfg                       *models.Config
 	tmux                      *tmux.TmuxCommand
 	launchDir                 string
+	launchProjectRegistered   bool
 	launchWorkspaceRegistered bool
 	discoverGlobalWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	discoverProjectWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
@@ -79,34 +80,70 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 	}
 }
 
+func (b *tuiBackend) ListFast(ctx context.Context) ([]dashboard.Row, []string, error) {
+	return b.list(ctx, false)
+}
+
 func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
+	return b.list(ctx, true)
+}
+
+func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
+	var (
+		entries           []*discovery.GlobalWorktreeEntry
+		registeredEntries []*discovery.GlobalWorktreeEntry
+		launchEntries     []*discovery.GlobalWorktreeEntry
+		sessions          []string
+		discoveryErr      error
+		launchErr         error
+		sessionsErr       error
+		startup           sync.WaitGroup
+	)
+	startup.Add(4)
+	go func() {
+		defer startup.Done()
+		entries, discoveryErr = b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
+	}()
+	go func() {
+		defer startup.Done()
+		registeredEntries = b.discoverRegisteredProjectWorktrees()
+	}()
+	go func() {
+		defer startup.Done()
+		launchEntries, launchErr = b.discoverLaunchWorktrees(b.launchDir)
+	}()
+	go func() {
+		defer startup.Done()
+		sessions, sessionsErr = b.listSessions()
+	}()
+	startup.Wait()
+
+	if discoveryErr != nil {
+		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", discoveryErr)
+	}
+	if launchErr != nil {
+		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", launchErr)
+	}
+	if sessionsErr != nil {
+		return nil, nil, sessionsErr
 	}
 
-	entries = mergeTUIEntries(entries, b.discoverRegisteredProjectWorktrees())
-
-	launchEntries, err := b.discoverLaunchWorktrees(b.launchDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
-	}
+	entries = mergeTUIEntries(entries, registeredEntries)
 	b.registerLaunchProject(launchEntries)
 	b.registerLaunchWorkspace(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
-	statusByPath, err := b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
-	if err != nil {
-		return nil, nil, err
+	var statusByPath map[string]*models.WorktreeStatus
+	if includeStatuses {
+		statusByPath, discoveryErr = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
+		if discoveryErr != nil {
+			return nil, nil, discoveryErr
+		}
 	}
 
-	sessions, err := b.listSessions()
-	if err != nil {
-		return nil, nil, err
-	}
 	liveSessions := make(map[string]bool, len(sessions))
 	for _, session := range sessions {
 		liveSessions[session] = true
@@ -279,14 +316,18 @@ func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWor
 	return entries
 }
 
+// registerLaunchProject persists the launch repository at most once per TUI
+// run. Both stages discover it, but rewriting config during each load would
+// put bookkeeping back on the startup and refresh paths.
 func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEntry) {
-	if b.registerProject == nil {
+	if b.launchProjectRegistered || b.registerProject == nil {
 		return
 	}
 	project, ok := projectFromEntries(entries, b.launchDir)
 	if !ok {
 		return
 	}
+	b.launchProjectRegistered = true
 	if existing, found := b.projectByPath(project.Path); found {
 		if reusable, ok := reusableExistingProject(existing, project); ok {
 			project = reusable
@@ -852,16 +893,45 @@ func fleetMaterializeObservation(observations []fleet.Observation, currentHost s
 	return fleet.Observation{}, false
 }
 
-func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, branch string) (string, error) {
+func (b *tuiBackend) CreateWorktree(
+	ctx context.Context,
+	row dashboard.Row,
+	branch string,
+	destination string,
+) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(
+		branch, destination, true,
+	)
 	if err != nil {
 		return "", err
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
+}
+
+func (b *tuiBackend) PreviewWorktree(row dashboard.Row, branch string) (dashboard.Row, error) {
+	if row.Entry == nil {
+		return dashboard.Row{}, fmt.Errorf("no worktree selected")
+	}
+	manager := worktree.New(git.New(row.Entry.Path), b.cfg)
+	worktreePath, err := manager.PreparePath("", branch)
+	if err != nil {
+		return dashboard.Row{}, err
+	}
+
+	entry := *row.Entry
+	entry.Branch = branch
+	entry.Path = worktreePath
+	entry.CommitHash = ""
+	entry.IsMain = false
+	entry.CreatedAt = time.Time{}
+	return dashboard.Row{
+		Entry:  &entry,
+		Status: unknownStatusForEntry(&entry),
+	}, nil
 }
 
 func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {

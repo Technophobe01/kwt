@@ -27,16 +27,23 @@ type fakeBackend struct {
 	removeErr       error
 	killErr         error
 	openErr         error
+	fastListCalls   int
 	listCalls       int
 	mergeFleetCalls int
 	mergeCtx        context.Context
 	createCalls     []string
+	createPaths     []string
 	materializeRows []string
 	removeCalls     []string
 	removeForces    []bool
 	killCalls       []string
 	openCalls       []string
 	unregistered    []Row
+}
+
+func (b *fakeBackend) ListFast(ctx context.Context) ([]Row, []string, error) {
+	b.fastListCalls++
+	return append([]Row(nil), b.rows...), nil, nil
 }
 
 func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
@@ -50,9 +57,21 @@ func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []stri
 	return append(append([]Row(nil), rows...), b.fleetRows...), b.fleetWarnings
 }
 
-func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
+func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch, destination string) (string, error) {
 	b.createCalls = append(b.createCalls, rowPath(row)+":"+branch)
+	b.createPaths = append(b.createPaths, destination)
 	return b.createPath, b.createErr
+}
+
+func (b *fakeBackend) PreviewWorktree(row Row, branch string) (Row, error) {
+	if b.createErr != nil {
+		return Row{}, b.createErr
+	}
+	entry := *row.Entry
+	entry.Branch = branch
+	entry.Path = b.createPath
+	entry.IsMain = false
+	return Row{Entry: &entry}, nil
 }
 
 func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row, force bool) error {
@@ -119,6 +138,26 @@ func updateModel(t *testing.T, model Model, msg tea.Msg) (Model, tea.Cmd) {
 
 func viewContent(model Model) string {
 	return model.View().Content
+}
+
+func TestModelPaintsFastRowsBeforeLoadingFullStatus(t *testing.T) {
+	backend := &fakeBackend{
+		rows: []Row{testRow("kwt", "main", "/w/kwt/main")},
+	}
+	model := NewModel(backend, "/worktrees")
+
+	fastCmd := model.Init()
+	fastMsg := fastCmd()
+
+	assert.Equal(t, 1, backend.fastListCalls)
+	assert.Zero(t, backend.listCalls)
+
+	model, fullCmd := updateModel(t, model, fastMsg)
+	assert.Contains(t, stripANSI(viewContent(model)), "main")
+	require.NotNil(t, fullCmd)
+
+	_ = fullCmd()
+	assert.Equal(t, 1, backend.listCalls)
 }
 
 func TestWorkspaceRowActions(t *testing.T) {
@@ -660,6 +699,88 @@ func TestModelNewBranchAcceptsPaste(t *testing.T) {
 	assert.Equal(t, []string{"/w/kwt/main:feature/pasted"}, backend.createCalls)
 }
 
+func TestModelShowsNewWorktreeWhileCreateIsInFlight(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-fast"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-fast"))
+
+	model, createCmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, createCmd)
+	assert.Empty(t, backend.createCalls, "Git creation must remain asynchronous")
+	assert.Equal(t, "/w/kwt/feature-fast", rowPath(model.selectedRow()))
+	assert.Contains(t, stripANSI(viewContent(model)), "creating")
+
+	_ = createCmd()
+	assert.Equal(t, []string{"/w/kwt/main:feature-fast"}, backend.createCalls)
+	assert.Equal(t, []string{"/w/kwt/feature-fast"}, backend.createPaths)
+}
+
+func TestModelRemovesOptimisticWorktreeWhenCreateFails(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-broken"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-broken"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	backend.createErr = errors.New("creation failed")
+
+	model, _ = updateModel(t, model, createCmd())
+
+	assert.Len(t, model.rows, 1)
+	assert.Equal(t, "/w/kwt/main", rowPath(model.rows[0]))
+	assert.Contains(t, stripANSI(viewContent(model)), "creation failed")
+}
+
+func TestModelKeepsCreatingWorktreeAcrossFleetRefresh(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
+	model := NewModel(backend, "/worktrees")
+	model, fleetCmd := updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	require.NotNil(t, fleetCmd)
+
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-pending"))
+	model, _ = updateModel(t, model, press("enter"))
+	require.Len(t, model.rows, 2)
+
+	model, _ = updateModel(t, model, fleetCmd())
+
+	require.Len(t, model.rows, 2)
+	assert.Equal(t, "/w/kwt/feature-pending", rowPath(model.selectedRow()))
+	assert.True(t, model.selectedRow().Creating)
+}
+
+func TestModelKeepsCreatedWorktreeUntilRefreshFindsIt(t *testing.T) {
+	backend := &fakeBackend{
+		rows:       []Row{testRow("kwt", "main", "/w/kwt/main")},
+		createPath: "/w/kwt/feature-created",
+	}
+	model := NewModel(backend, "/worktrees")
+	model, staleFullCmd := updateModel(t, model, fastRowsMsg{rows: backend.rows})
+	require.NotNil(t, staleFullCmd)
+
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-created"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	model, _ = updateModel(t, model, createCmd())
+	require.True(t, model.pendingRefresh)
+
+	model, _ = updateModel(t, model, staleFullCmd())
+
+	require.Len(t, model.rows, 2)
+	assert.Equal(t, "/w/kwt/feature-created", rowPath(model.selectedRow()))
+	assert.True(t, model.selectedRow().Creating,
+		"the optimistic row stays pending until a fresh listing confirms it")
+}
+
 func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
 	row := Row{Fleet: &FleetInfo{
 		ProjectIdentity: "github.com/example/kwt",
@@ -870,14 +991,14 @@ func TestModelQueuesActionRefreshWhileFetchInFlight(t *testing.T) {
 	require.Nil(t, actionCmd)
 
 	backend.rows = []Row{testRow("kwt", "main", "/w/kwt/main")}
-	model, queuedRefreshCmd := updateModel(t, model, rowsMsg{rows: backend.rows})
+	model, queuedRefreshCmd := updateModel(t, model, fastRowsMsg{rows: backend.rows})
 
 	require.NotNil(t, queuedRefreshCmd)
 	assert.True(t, model.fetching)
-	before := backend.listCalls
+	before := backend.fastListCalls
 	msg := queuedRefreshCmd()
-	assert.Equal(t, before+1, backend.listCalls)
-	assert.IsType(t, rowsMsg{}, msg)
+	assert.Equal(t, before+1, backend.fastListCalls)
+	assert.IsType(t, fastRowsMsg{}, msg)
 }
 
 func TestModelPreservesCreateAnchorAcrossQueuedRefresh(t *testing.T) {
