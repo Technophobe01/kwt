@@ -544,6 +544,21 @@ func normalizeTargetConfigPath(path string) (string, error) {
 
 func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 	repoRoot = utils.CanonicalPath(repoRoot)
+	if local.IsSet("naming.template") &&
+		targetPathHasEnvironmentReference(local.GetString("naming.template")) {
+		return fmt.Errorf(
+			"environment variable references are not allowed in repository-local naming templates",
+		)
+	}
+	for _, replacement := range local.GetStringMapString(
+		"naming.sanitize_chars",
+	) {
+		if targetPathHasEnvironmentReference(replacement) {
+			return fmt.Errorf(
+				"environment variable references are not allowed in repository-local naming replacements",
+			)
+		}
+	}
 	if local.IsSet("worktree.basedir") {
 		resolved, err := resolveTargetRelativePath(repoRoot, local.GetString("worktree.basedir"))
 		if err != nil {

@@ -1694,6 +1694,8 @@ func TestLoadForTargetRejectsEnvironmentReferencesInRepositoryLocalPaths(t *test
 		local string
 	}{
 		{name: "worktree base directory", local: "[worktree]\nbasedir = '$KWT_GITHUB_TOKEN'\n"},
+		{name: "naming template", local: "[naming]\ntemplate = '$KWT_GITHUB_TOKEN/{{.Branch}}'\n"},
+		{name: "naming replacement", local: "[naming.sanitize_chars]\n'/' = '$KWT_GITHUB_TOKEN'\n"},
 		{name: "repository selector", local: "[[repository_settings]]\nrepository = '$KWT_GITHUB_TOKEN'\nsetup_commands = ['echo trusted']\n"},
 		{name: "repository base directory", local: "[[repository_settings]]\nrepository = '.'\nbasedir = '${KWT_GITHUB_TOKEN}'\nsetup_commands = ['echo trusted']\n"},
 	} {

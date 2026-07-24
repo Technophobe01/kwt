@@ -59,6 +59,10 @@ Threat model for pull-request discovery and import:
   worktree, add a clean credential-free remote, and configure pushes to the
   PR's head branch. It must not push during import or redirect a later plain
   `git push` to the base repository when the PR came from a fork.
+- Repeating an import validates KWT's persisted provenance and the live
+  worktree path and branch. It does not push, and it does not rewrite Git
+  remotes or routing changed by the same local user after import; those remain
+  trusted user-owned configuration under the local-execution model above.
 - GitHub owner/repository identity is case-insensitive. Ref names, local paths,
   opaque IDs, and provenance keys remain exact data and require their own
   validation; do not transfer GitHub's case-folding rule to arbitrary Git or
