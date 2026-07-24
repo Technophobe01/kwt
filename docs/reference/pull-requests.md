@@ -25,19 +25,28 @@ kwt pr import 17 --project github.com/acme/widget \
 `--start-session` creates or repairs the `session_name` returned by the import
 using kwt's configured default layout and workspace bootstrap, then leaves it
 detached for the caller. The response also includes `tmux_socket_name`; clients
-must attach with `tmux -L <tmux_socket_name> attach-session -t
-<session_name>`. It is idempotent for an already imported worktree or a
+must attach through kwt's protected path:
+
+```sh
+kwt pr attach <workspace.path>
+```
+
+The attach command resolves the persisted workspace identity, verifies the
+isolated server and session, repairs the protected environment policy, and
+executes `attach-session -E` so tmux cannot import client environment
+variables. It is idempotent for an already imported worktree or a
 verified session that kwt created for the same workspace. Session setup
 failures return a non-retryable `workspace_creation_failed` error.
 
 Kwt runs each protected PR workspace on a deterministic, workspace-specific
 tmux socket rather than the user's ordinary tmux server. Before invoking that
-server, kwt removes `KWT_GITHUB_TOKEN` and the variable named by
-`fleet.token_env` from the subprocess environment. It installs matching
-session remove-markers before any imported-workspace shell starts and removes
-those names from the session's effective `update-environment` option so later
-client attachment cannot restore them. Operational state such as `KWT_HOME`
-remains available inside the workspace.
+server, kwt removes `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, and the variable
+named by `fleet.token_env` from the subprocess environment. It installs
+matching session remove-markers before any imported-workspace shell starts.
+Because tmux options are mutable by processes with socket access, filtering
+`update-environment` is defense in depth; the protected attach command always
+passes `-E` and never relies on that option for enforcement. Operational state
+such as `KWT_HOME` remains available inside the workspace.
 
 Kwt reuses an existing session on that isolated socket only when the session
 carries the matching workspace marker and both its server and session

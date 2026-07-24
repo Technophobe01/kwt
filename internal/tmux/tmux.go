@@ -199,6 +199,25 @@ func (t *TmuxCommand) AttachSession(sessionName string) error {
 	return cmd.Run()
 }
 
+func (t *TmuxCommand) AttachSessionWithoutEnvironment(
+	sessionName string,
+) error {
+	cmd := t.attachSessionWithoutEnvironmentCmd(sessionName)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (t *TmuxCommand) attachSessionWithoutEnvironmentCmd(
+	sessionName string,
+) *exec.Cmd {
+	return t.newAttachCmd(
+		context.Background(),
+		[]string{"attach-session", "-E", "-t", sessionName},
+	)
+}
+
 // attachSessionCmd builds the attach-session invocation through the
 // attach-class exec seam; split out so tests can pin that the attach path
 // uses the full-strip sanitizer without needing a tty to run it.

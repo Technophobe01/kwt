@@ -53,9 +53,9 @@ see below), and `session_name` (the tmux workspace session name kwt attaches to)
 An imported pull-request worktree additionally includes `tmux_socket_name` for
 its protected workspace-specific server. To
 converge on the same session, prefer an attach-only command — `tmux
-attach-session -t <session_name>` on the normal server, or `tmux -L
-<tmux_socket_name> attach-session -t <session_name>` when that field is
-present — so you never create the session bare. See [Attaching from other
+attach-session -t <session_name>` on the normal server, or `kwt pr attach
+<path>` when `tmux_socket_name` is present — so you never create the session
+bare or bypass its protected attach policy. See [Attaching from other
 tools](#attaching-from-other-tools) before using `new-session`.
 `created_at` is populated in both local and `-g` mode.
 
@@ -77,7 +77,8 @@ automation](pull-requests.md) for the JSON and exit-status contract.
 `pr import --start-session` additionally establishes that canonical session
 without attaching, for clients that provide their own ordinary tmux
 presentation. Its workspace record includes `tmux_socket_name`; attach with
-`tmux -L <tmux_socket_name> attach-session -t <session_name>`.
+`kwt pr attach <workspace.path>`, which verifies the persisted identity and
+uses `attach-session -E`.
 
 ### Repository identity fallback
 
@@ -187,9 +188,10 @@ PR imports use a stricter reuse boundary. `pr import --start-session` records
 the canonical workspace path when it creates the session on a deterministic,
 workspace-specific socket and reuses only a same-named session with that exact
 marker. The isolated server starts without the provider or configured fleet
-credential. The protected session also masks those names and removes them
-from `update-environment`, preventing a later client attach from restoring
-them.
+credential. The protected session also masks those names and filters them from
+`update-environment`. Clients must use `kwt pr attach <workspace.path>`;
+because tmux options are mutable, that command repairs the policy and enforces
+`attach-session -E` rather than trusting the current option value.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a

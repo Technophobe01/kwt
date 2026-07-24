@@ -142,21 +142,47 @@ func annotateProtectedSocketIdentity(
 	worktrees []models.Worktree,
 	records map[string]pullrequest.Provenance,
 ) {
-	socketByPath := make(map[string]string, len(records))
+	type workspaceIdentity struct {
+		path       string
+		branch     string
+		session    string
+		repository string
+	}
+	socketByIdentity := make(map[workspaceIdentity]string, len(records))
 	for _, record := range records {
 		workspace := record.Workspace
-		if workspace.Path == "" || workspace.SessionName == "" {
+		repository := workspace.Repository
+		if repository == "" {
+			repository = record.Project.Identity
+		}
+		if workspace.Path == "" ||
+			workspace.Branch == "" ||
+			workspace.SessionName == "" ||
+			repository == "" {
 			continue
 		}
-		socketByPath[utils.CanonicalPath(workspace.Path)] =
+		key := workspaceIdentity{
+			path:       utils.CanonicalPath(workspace.Path),
+			branch:     workspace.Branch,
+			session:    workspace.SessionName,
+			repository: pullrequest.NormalizeRepositoryIdentity(repository),
+		}
+		socketByIdentity[key] =
 			tmux.ProtectedWorkspaceSocketName(
 				workspace.SessionName,
 				workspace.Path,
 			)
 	}
 	for i := range worktrees {
-		worktrees[i].TmuxSocketName =
-			socketByPath[utils.CanonicalPath(worktrees[i].Path)]
+		key := workspaceIdentity{
+			path:    utils.CanonicalPath(worktrees[i].Path),
+			branch:  worktrees[i].Branch,
+			session: worktrees[i].SessionName,
+			repository: pullrequest.NormalizeRepositoryIdentity(
+				worktrees[i].Repository,
+			),
+		}
+		worktrees[i].TmuxSocketName = socketByIdentity[key]
 	}
 }
 

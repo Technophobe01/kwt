@@ -50,6 +50,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldState := prState
 	oldStartSession := prStartSession
 	oldStartWorkspaceSession := startPRWorkspaceSession
+	oldAttachWorkspaceSession := attachPRWorkspaceSession
 	t.Cleanup(func() {
 		loadPRConfig = oldLoad
 		loadPRTargetConfig = oldTargetLoad
@@ -59,6 +60,7 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 		prState = oldState
 		prStartSession = oldStartSession
 		startPRWorkspaceSession = oldStartWorkspaceSession
+		attachPRWorkspaceSession = oldAttachWorkspaceSession
 	})
 	loadPRConfig = func() (*models.Config, error) { return cfg, nil }
 	loadPRTargetConfig = func(string, bool) (*models.Config, error) { return cfg, nil }
@@ -179,6 +181,7 @@ func TestPreparePRServiceRejectsPathOutsideMainRepositoryRootBeforeLoadingConfig
 
 func prTestCommand() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	cmd.SetOut(stdout)
@@ -307,6 +310,79 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 	var got pullrequest.ImportResult
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 	assert.Equal(t, "kwt-pr-0123456789abcdef", got.Workspace.TmuxSocketName)
+	importedWorkspace := tryRequireWorkspace(t, got.PullRequest.Workspace)
+	assert.Equal(
+		t,
+		"kwt-pr-0123456789abcdef",
+		importedWorkspace.TmuxSocketName,
+	)
+}
+
+func tryRequireWorkspace(
+	t *testing.T,
+	workspace *pullrequest.Workspace,
+) pullrequest.Workspace {
+	t.Helper()
+	require.NotNil(t, workspace)
+	return *workspace
+}
+
+func TestProtectedCredentialNamesAlwaysIncludeFleetDefaults(t *testing.T) {
+	for _, configured := range []string{"", "CUSTOM_FLEET_TOKEN"} {
+		names := protectedCredentialNames(&models.Config{
+			Fleet: models.FleetConfig{TokenEnv: configured},
+		})
+		want := []string{
+			"KWT_GITHUB_TOKEN",
+			"KWT_FLEET_TOKEN",
+		}
+		if configured != "" {
+			want = append(want, configured)
+		}
+		assert.ElementsMatch(t, want, names)
+	}
+}
+
+func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	workspace := pullrequest.Workspace{
+		Path:        "/worktrees/pr-32",
+		Branch:      "pr-32",
+		SessionName: "kwt-workspace-pr-32",
+	}
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-32"] = pullrequest.Provenance{
+				Project: pullrequest.Project{
+					Identity: "github.com/acme/widget",
+					Path:     "/repos/widget",
+				},
+				Workspace: workspace,
+			}
+			return nil
+		},
+	))
+	cfg := testPRConfig()
+	cfg.Fleet.TokenEnv = "CUSTOM_FLEET_TOKEN"
+	withPRCommandDeps(t, cfg, &fakePRService{})
+	var attached bool
+	attachPRWorkspaceSession = func(
+		_ context.Context,
+		got pullrequest.Workspace,
+		gotConfig *models.Config,
+	) error {
+		attached = true
+		assert.Equal(t, workspace, got)
+		assert.Same(t, cfg, gotConfig)
+		return nil
+	}
+	cmd, _, _ := prTestCommand()
+
+	err := runPRAttach(cmd, []string{workspace.Path})
+
+	require.NoError(t, err)
+	assert.True(t, attached)
 }
 
 func TestRunPRImportSessionFailureIsNotRetryable(t *testing.T) {

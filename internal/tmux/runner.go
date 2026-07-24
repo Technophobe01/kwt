@@ -19,6 +19,7 @@ type workspaceTmux interface {
 	RunCommandOutputContext(ctx context.Context, args ...string) (string, error)
 	SwitchClient(target string) error
 	AttachSession(session string) error
+	AttachSessionWithoutEnvironment(session string) error
 	KillSession(session string) error
 	GlobalEnvironment() (string, error)
 	SessionEnvironment(session string) (string, error)
@@ -133,6 +134,32 @@ func (r *WorkspaceRunner) Ensure(
 		return err
 	}
 	return nil
+}
+
+// AttachProtected verifies and repairs an existing protected session before
+// attaching without tmux's client-environment update. The -E attach is the
+// final enforcement point: session options are mutable by pane processes, so
+// attachment must not trust update-environment to remain filtered.
+func (r *WorkspaceRunner) AttachProtected(
+	ctx context.Context,
+	session, worktreeDir string,
+) error {
+	if !r.protected {
+		return fmt.Errorf("protected attachment requires a protected workspace runner")
+	}
+	if !r.tmux.HasSession(session) {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"protected tmux session %q is not running",
+			session,
+		)}
+	}
+	if err := r.validateProtectedState(session, worktreeDir, true); err != nil {
+		return err
+	}
+	if err := r.repairBootstrap(ctx, session, worktreeDir); err != nil {
+		return err
+	}
+	return r.tmux.AttachSessionWithoutEnvironment(session)
 }
 
 func (r *WorkspaceRunner) validateProtectedState(

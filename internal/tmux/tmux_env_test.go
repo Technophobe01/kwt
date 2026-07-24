@@ -215,6 +215,24 @@ func TestAttachPathsUseFullStripSanitizer(t *testing.T) {
 	}
 }
 
+func TestProtectedAttachDisablesTmuxEnvironmentUpdate(t *testing.T) {
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+	)
+
+	cmd := tc.attachSessionWithoutEnvironmentCmd("workspace")
+
+	want := []string{
+		"tmux", "-L", "kwt-pr-0123456789abcdef",
+		"attach-session", "-E", "-t", "workspace",
+	}
+	if !slices.Equal(cmd.Args, want) {
+		t.Fatalf("protected attach args = %v, want %v", cmd.Args, want)
+	}
+}
+
 func hasEnvName(entry, name string) bool {
 	return len(entry) > len(name) && entry[:len(name)] == name && entry[len(name)] == '='
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
@@ -18,12 +19,19 @@ import (
 func TestImportedWorktreeReceivesProtectedSocketIdentity(t *testing.T) {
 	worktrees := []models.Worktree{{
 		Path:        "/worktrees/pr-32",
+		Branch:      "pr-32",
+		Repository:  "github.com/acme/widget",
 		SessionName: "kwt-workspace-pr-32",
 	}}
 	annotateProtectedSocketIdentity(worktrees, map[string]pullrequest.Provenance{
 		"pr-32": {
+			Project: pullrequest.Project{
+				Identity: "github.com/acme/widget",
+			},
 			Workspace: pullrequest.Workspace{
 				Path:        "/worktrees/pr-32",
+				Branch:      "pr-32",
+				Repository:  "github.com/acme/widget",
 				SessionName: "kwt-workspace-pr-32",
 			},
 		},
@@ -35,6 +43,43 @@ func TestImportedWorktreeReceivesProtectedSocketIdentity(t *testing.T) {
 	)
 	if worktrees[0].TmuxSocketName != want {
 		t.Fatalf("tmux socket = %q, want %q", worktrees[0].TmuxSocketName, want)
+	}
+}
+
+func TestStaleProvenanceDoesNotLabelReusedWorktreePath(t *testing.T) {
+	record := pullrequest.Provenance{
+		Project: pullrequest.Project{Identity: "github.com/acme/widget"},
+		Workspace: pullrequest.Workspace{
+			Path:        "/worktrees/reused",
+			Branch:      "pr-32",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-pr-32",
+		},
+	}
+	tests := []models.Worktree{
+		{
+			Path: "/worktrees/reused", Branch: "other",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-pr-32",
+		},
+		{
+			Path: "/worktrees/reused", Branch: "pr-32",
+			Repository:  "github.com/acme/other",
+			SessionName: "kwt-workspace-pr-32",
+		},
+		{
+			Path: "/worktrees/reused", Branch: "pr-32",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-other",
+		},
+	}
+
+	annotateProtectedSocketIdentity(tests, map[string]pullrequest.Provenance{
+		"stale": record,
+	})
+
+	for _, worktree := range tests {
+		assert.Empty(t, worktree.TmuxSocketName)
 	}
 }
 

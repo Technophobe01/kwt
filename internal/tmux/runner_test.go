@@ -29,6 +29,7 @@ type mockWorkspaceTmux struct {
 	paneSeq             int
 	switchedTo          string
 	attachedTo          string
+	protectedAttachedTo string
 	outputErr           error
 	failOutputOnCall    int
 	outputCalls         int
@@ -130,6 +131,13 @@ func (m *mockWorkspaceTmux) SwitchClient(target string) error {
 
 func (m *mockWorkspaceTmux) AttachSession(session string) error {
 	m.attachedTo = session
+	return nil
+}
+
+func (m *mockWorkspaceTmux) AttachSessionWithoutEnvironment(
+	session string,
+) error {
+	m.protectedAttachedTo = session
 	return nil
 }
 
@@ -378,6 +386,40 @@ func TestProtectedEnsureMarksCreatedSessionBeforeRespawn(t *testing.T) {
 		),
 		"DISPLAY SSH_AUTH_SOCK",
 	))
+}
+
+func TestProtectedAttachRepairsPolicyAndDisablesEnvironmentUpdate(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "PATH=/bin\n",
+		sessionWorkspace: "/wt",
+		sessionUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN KWT_FLEET_TOKEN",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+	)
+
+	err := r.AttachProtected(
+		context.Background(),
+		"workspace",
+		"/wt",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "workspace", m.protectedAttachedTo)
+	assert.Empty(t, m.attachedTo)
+	assert.Equal(t, [][]string{buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY",
+	)}, m.calls)
 }
 
 func TestProtectedWorkspaceSocketNameIsStableAndWorkspaceSpecific(t *testing.T) {

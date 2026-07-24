@@ -31,11 +31,12 @@ var (
 	prJSON         bool
 	prStartSession bool
 
-	loadPRConfig            = config.Load
-	loadPRTargetConfig      = config.LoadForTarget
-	newPRService            = defaultNewPRService
-	validatePRProjectRoot   = defaultValidatePRProjectRoot
-	startPRWorkspaceSession = defaultStartPRWorkspaceSession
+	loadPRConfig             = config.Load
+	loadPRTargetConfig       = config.LoadForTarget
+	newPRService             = defaultNewPRService
+	validatePRProjectRoot    = defaultValidatePRProjectRoot
+	startPRWorkspaceSession  = defaultStartPRWorkspaceSession
+	attachPRWorkspaceSession = defaultAttachPRWorkspaceSession
 )
 
 var prCmd = &cobra.Command{
@@ -71,9 +72,16 @@ var prImportCmd = &cobra.Command{
 	RunE:  withGracefulSignals(runPRImport),
 }
 
+var prAttachCmd = &cobra.Command{
+	Use:   "attach <workspace-path>",
+	Short: "Attach to a protected imported workspace session",
+	Args:  prExactArgs(1),
+	RunE:  withGracefulSignals(runPRAttach),
+}
+
 func init() {
 	rootCmd.AddCommand(prCmd)
-	prCmd.AddCommand(prListCmd, prImportCmd)
+	prCmd.AddCommand(prListCmd, prImportCmd, prAttachCmd)
 	prCmd.PersistentFlags().StringVar(&prProject, "project", "", "registered project identity, name, or path (defaults to current repository)")
 	prCmd.PersistentFlags().BoolVar(&prJSON, "json", true, "emit the stable JSON automation contract")
 	prListCmd.Flags().StringVar(&prState, "state", "open", "pull-request state: open, closed, or all")
@@ -149,8 +157,85 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			))
 		}
 		result.Workspace.TmuxSocketName = socketName
+		result.PullRequest.Workspace = &result.Workspace
 	}
 	return writePRJSON(cmd, result)
+}
+
+func runPRAttach(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return prExactArgs(1)(cmd, args)
+	}
+	record, err := importedWorkspaceProvenance(
+		cmd.Context(),
+		args[0],
+	)
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	cfg, err := loadPRTargetConfig(record.Project.Path, false)
+	if err != nil {
+		return writePRError(cmd, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"failed to load imported workspace configuration",
+			false,
+			err,
+		))
+	}
+	if err := attachPRWorkspaceSession(
+		cmd.Context(),
+		record.Workspace,
+		cfg,
+	); err != nil {
+		message := "failed to attach imported workspace session"
+		var safetyError *tmux.SessionSafetyError
+		if errors.As(err, &safetyError) {
+			message = safetyError.Error()
+		}
+		return writePRError(cmd, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			message,
+			false,
+			err,
+		))
+	}
+	return nil
+}
+
+func importedWorkspaceProvenance(
+	ctx context.Context,
+	workspacePath string,
+) (pullrequest.Provenance, error) {
+	path := utils.CanonicalPath(workspacePath)
+	var matches []pullrequest.Provenance
+	err := pullrequest.NewFileStore(prStorePath()).View(
+		ctx,
+		func(records map[string]pullrequest.Provenance) error {
+			for _, record := range records {
+				if utils.CanonicalPath(record.Workspace.Path) == path {
+					matches = append(matches, record)
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return pullrequest.Provenance{}, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"failed to read pull-request provenance",
+			false,
+			err,
+		)
+	}
+	if len(matches) != 1 {
+		return pullrequest.Provenance{}, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"workspace is not a uniquely verified pull-request import",
+			false,
+			nil,
+		)
+	}
+	return matches[0], nil
 }
 
 func preparePRProject() (pullrequest.Project, error) {
@@ -215,7 +300,7 @@ func defaultStartPRWorkspaceSession(
 	if err != nil {
 		return "", err
 	}
-	stripNames := []string{"KWT_GITHUB_TOKEN", cfg.Fleet.TokenEnv}
+	stripNames := protectedCredentialNames(cfg)
 	socketName := tmux.ProtectedWorkspaceSocketName(
 		workspace.SessionName,
 		workspace.Path,
@@ -238,6 +323,56 @@ func defaultStartPRWorkspaceSession(
 		return "", err
 	}
 	return socketName, nil
+}
+
+func defaultAttachPRWorkspaceSession(
+	ctx context.Context,
+	workspace pullrequest.Workspace,
+	cfg *models.Config,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("kwt configuration is unavailable")
+	}
+	if strings.TrimSpace(workspace.Path) == "" ||
+		strings.TrimSpace(workspace.SessionName) == "" {
+		return fmt.Errorf("imported workspace has no tmux identity")
+	}
+	stripNames := protectedCredentialNames(cfg)
+	socketName := tmux.ProtectedWorkspaceSocketName(
+		workspace.SessionName,
+		workspace.Path,
+	)
+	tmuxCommand := tmux.NewTmuxCommandForSocketWithStripNames(
+		"",
+		socketName,
+		stripNames,
+	)
+	return tmux.NewProtectedWorkspaceRunner(
+		tmuxCommand,
+		stripNames,
+	).AttachProtected(
+		ctx,
+		workspace.SessionName,
+		workspace.Path,
+	)
+}
+
+func protectedCredentialNames(cfg *models.Config) []string {
+	names := []string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"}
+	if cfg != nil {
+		names = append(names, cfg.Fleet.TokenEnv)
+	}
+	seen := make(map[string]bool, len(names))
+	protected := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		protected = append(protected, name)
+	}
+	return protected
 }
 
 func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
