@@ -149,6 +149,14 @@ func mapGitHubPullRequest(value *github.PullRequest) (PullRequest, error) {
 		return PullRequest{}, NewError(CodeMalformedResponse,
 			"GitHub returned a pull request with missing required fields", false, nil)
 	}
+	if value.GetNumber() <= 0 ||
+		strings.TrimSpace(value.GetHTMLURL()) == "" ||
+		strings.TrimSpace(value.GetTitle()) == "" ||
+		strings.TrimSpace(value.User.GetLogin()) == "" ||
+		strings.TrimSpace(value.GetState()) == "" {
+		return PullRequest{}, NewError(CodeMalformedResponse,
+			"GitHub returned a pull request with invalid required fields", false, nil)
+	}
 	if value.Head.Repo == nil {
 		return PullRequest{}, NewError(CodeInaccessibleHead,
 			fmt.Sprintf("pull request #%d has no accessible head repository", value.GetNumber()), false, nil)
@@ -161,7 +169,10 @@ func mapGitHubPullRequest(value *github.PullRequest) (PullRequest, error) {
 	if err != nil {
 		return PullRequest{}, err
 	}
-	if value.Head.Ref == nil || value.Head.SHA == nil || value.Base.Ref == nil {
+	if value.Head.Ref == nil || value.Head.SHA == nil || value.Base.Ref == nil ||
+		strings.TrimSpace(value.Head.GetRef()) == "" ||
+		strings.TrimSpace(value.Base.GetRef()) == "" ||
+		!validGitOID(value.Head.GetSHA()) {
 		return PullRequest{}, NewError(CodeMalformedResponse,
 			"GitHub returned a pull request with incomplete branch information", false, nil)
 	}
@@ -179,16 +190,36 @@ func mapGitHubRepository(repository *github.Repository) (Repository, error) {
 		return Repository{}, NewError(CodeMalformedResponse,
 			"GitHub returned a repository with missing required fields", false, nil)
 	}
-	owner, name, ok := strings.Cut(repository.GetFullName(), "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+	fullName := strings.TrimSpace(repository.GetFullName())
+	cloneURL := strings.TrimSpace(repository.GetCloneURL())
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") ||
+		owner != strings.TrimSpace(owner) ||
+		name != strings.TrimSpace(name) ||
+		strings.TrimSpace(repository.GetName()) == "" ||
+		cloneURL == "" {
 		return Repository{}, NewError(CodeMalformedResponse,
 			"GitHub returned a malformed repository identity", false, nil)
 	}
 	return Repository{
 		Provider: "github", Host: "github.com", Owner: owner, Name: name,
 		Identity: NormalizeRepositoryIdentity("github.com/" + owner + "/" + name),
-		CloneURL: repository.GetCloneURL(), SSHURL: repository.GetSSHURL(),
+		CloneURL: cloneURL, SSHURL: repository.GetSSHURL(),
 	}, nil
+}
+
+func validGitOID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, digit := range value {
+		if (digit < '0' || digit > '9') &&
+			(digit < 'a' || digit > 'f') &&
+			(digit < 'A' || digit > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func classifyGitHubError(err error, operation string) error {
@@ -214,7 +245,8 @@ func classifyGitHubError(err error, operation string) error {
 		}
 	}
 	var syntaxError *json.SyntaxError
-	if errors.As(err, &syntaxError) {
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &syntaxError) || errors.As(err, &typeError) {
 		return NewError(CodeMalformedResponse, "GitHub returned malformed JSON", false, err)
 	}
 	var urlError *url.Error

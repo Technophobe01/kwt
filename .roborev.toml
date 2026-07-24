@@ -72,10 +72,12 @@ Threat model for pull-request discovery and import:
   branch, without broader remote push behavior. SSH aliases and explicit ports
   are valid only when their authority matches the trusted project remote. If
   that postcondition is absent, KWT rejects and rolls back the import.
-- Repeating an import validates KWT's persisted provenance and the live
-  worktree path and branch. It does not push, and it does not rewrite Git
-  remotes or routing changed by the same local user after import; those remain
-  trusted user-owned configuration under the local-execution model above.
+- Repeating an import validates KWT's persisted provenance, canonical project
+  clone path, and live worktree path and branch. A record for another clone is
+  an explicit conflict, not stale state to overwrite. The check does not push
+  or rewrite Git remotes or routing changed by the same local user; those
+  remain trusted user-owned configuration under the local-execution model
+  above.
 - GitHub owner/repository identity is case-insensitive. Ref names, local paths,
   opaque IDs, and provenance keys remain exact data and require their own
   validation; do not transfer GitHub's case-folding rule to arbitrary Git or

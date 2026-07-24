@@ -69,7 +69,7 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 	for i := range prs {
 		prs[i].Source.IsFork = !EqualRepositoryIdentity(prs[i].Source.Repository.Identity, prs[i].Repository.Identity)
 		_, record, ok := findProvenance(records, prs[i])
-		if ok && EqualRepositoryIdentity(record.Project.Identity, project.Identity) &&
+		if ok && sameProjectClone(record.Project, project) &&
 			provenanceSourceMatches(record, prs[i]) {
 			if workspace, live := matchingProvenanceWorkspace(paths, record); live {
 				prs[i].Imported = true
@@ -118,8 +118,12 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		}
 		recordKey, record, ok := findProvenance(records, pr)
 		if ok {
-			if !EqualRepositoryIdentity(record.Project.Identity, project.Identity) {
-				return NewError(CodeConflict, "pull request is recorded for a different project", false, nil)
+			if !sameProjectClone(record.Project, project) {
+				return NewError(
+					CodeConflict,
+					"pull request is recorded for a different project clone",
+					false, nil,
+				)
 			}
 			if workspace, live := matchingProvenanceWorkspace(byPath, record); live {
 				if !provenanceSourceComplete(record) {
@@ -219,6 +223,11 @@ func findProvenance(records map[string]Provenance, pr PullRequest) (string, Prov
 		return key, record, true
 	}
 	return "", Provenance{}, false
+}
+
+func sameProjectClone(left, right Project) bool {
+	return EqualRepositoryIdentity(left.Identity, right.Identity) &&
+		utils.CanonicalPath(left.Path) == utils.CanonicalPath(right.Path)
 }
 
 func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance) (Workspace, bool) {

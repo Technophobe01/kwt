@@ -48,7 +48,9 @@ func newBackendRepo(t *testing.T) (string, *GitBackend) {
 			Repository: testProject().Identity, Name: testProject().Name, Path: repo,
 		}},
 	}
-	return repo, NewGitBackend(g, worktree.New(g, cfg), testProject())
+	return repo, NewGitBackend(
+		g, worktree.New(g, cfg), testProject(), cfg.Fleet.TokenEnv,
+	)
 }
 
 func configureTestPushTracking(
@@ -318,10 +320,11 @@ func TestGitBackendMapsSharedLifecycleErrors(t *testing.T) {
 func TestSafeGitEnvironmentRemovesKWTSecrets(t *testing.T) {
 	environment := []string{
 		"PATH=/bin", "KWT_GITHUB_TOKEN=secret", "KWT_FLEET_TOKEN=fleet",
-		"KWT_HOME=/private/kwt", "VISIBLE=yes",
+		"KWT_HOME=/private/kwt", "AWS_SECRET_ACCESS_KEY=custom-fleet-token",
+		"VISIBLE=yes",
 	}
 
-	got := SafeGitEnvironment(environment)
+	got := SafeGitEnvironment(environment, "aws_secret_access_key")
 
 	assert.Equal(t, []string{"PATH=/bin", "VISIBLE=yes"}, got)
 }

@@ -287,9 +287,11 @@ updated under a cross-process file lock. The lock covers checking, fetching,
 creating, configuring, and recording, so concurrent imports converge on one
 workspace. A stale provenance record is not reported as imported when its Git
 worktree no longer exists. Existing imports require complete source provenance
-and a matching live worktree path and branch before `already_imported` is
-returned. KWT does not push during this check or rewrite Git remotes and routing
-that the local user changed after import.
+and matching project-clone, live worktree path, and branch identities before
+`already_imported` is returned. Importing the same PR from another clone
+returns a conflict rather than replacing the original clone's provenance. KWT
+does not push during this check or rewrite Git remotes and routing that the
+local user changed after import.
 
 If an import fails after creating a workspace, kwt rolls it back even when the
 request context was canceled. Request cancellation, including `SIGINT` and

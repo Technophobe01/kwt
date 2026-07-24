@@ -29,19 +29,23 @@ func NewGitBackend(
 	g *gitadapter.Git,
 	manager *worktree.Manager,
 	project Project,
+	fleetTokenEnv string,
 ) *GitBackend {
 	return &GitBackend{
 		git: g, manager: manager, project: project,
-		gitEnvironment: SafeGitEnvironment(os.Environ()),
+		gitEnvironment: SafeGitEnvironment(os.Environ(), fleetTokenEnv),
 	}
 }
 
 // SafeGitEnvironment retains ordinary Git authentication context while
-// removing credentials and configuration locators owned by KWT.
-func SafeGitEnvironment(environment []string) []string {
+// removing credentials and configuration locators owned or configured by KWT.
+func SafeGitEnvironment(environment []string, fleetTokenEnv string) []string {
 	blocked := map[string]bool{
 		"kwt_github_token": true,
 		"kwt_fleet_token":  true,
+	}
+	if fleetTokenEnv = strings.TrimSpace(fleetTokenEnv); fleetTokenEnv != "" {
+		blocked[strings.ToLower(fleetTokenEnv)] = true
 	}
 	result := make([]string, 0, len(environment))
 	for _, entry := range environment {

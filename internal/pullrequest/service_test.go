@@ -535,6 +535,34 @@ func TestImportExistingDoesNotReenterSharedLifecycle(t *testing.T) {
 	assert.Zero(t, backend.importCalls)
 }
 
+func TestImportRejectsProvenanceFromDifferentClone(t *testing.T) {
+	pr := testPR(48, false)
+	backend := newFakeBackend()
+	store := newMemoryStore()
+	otherClone := testProject()
+	otherClone.Path = "/repos/other-widget-clone"
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID,
+		Project:       otherClone,
+		Workspace: Workspace{
+			Path:   "/worktrees/other-widget/pr-48-feature-widgets",
+			Branch: "pr-48-feature-widgets",
+		},
+		HeadSHA:      pr.HeadSHA,
+		SourceRepo:   pr.Source.Repository.Identity,
+		SourceBranch: pr.Source.Name,
+	}
+	service := newTestService(
+		&fakeProvider{prs: []PullRequest{pr}}, backend, store,
+	)
+
+	_, err := service.Import(t.Context(), testProject(), "48")
+
+	assertErrorCode(t, err, CodeConflict)
+	assert.Zero(t, backend.importCalls)
+	assert.Equal(t, otherClone.Path, store.records[pr.ID].Project.Path)
+}
+
 func TestImportMigratesLegacyCasedProvenance(t *testing.T) {
 	pr := testPR(43, false)
 	backend := newFakeBackend()

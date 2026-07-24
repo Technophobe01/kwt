@@ -113,6 +113,7 @@ func TestGitHubProviderClassifiesFailures(t *testing.T) {
 		{name: "missing", status: http.StatusNotFound, body: `{"message":"Not Found"}`, want: CodeNotFound},
 		{name: "network", status: http.StatusServiceUnavailable, body: `{"message":"try later"}`, want: CodeNetwork, retryable: true},
 		{name: "malformed", status: http.StatusOK, body: `{broken`, want: CodeMalformedResponse},
+		{name: "wrong JSON types", status: http.StatusOK, body: `[{"number":"seventeen"}]`, want: CodeMalformedResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -143,10 +144,10 @@ func TestGitHubProviderListSkipsDeletedHeadRepository(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `[{"number":1,"html_url":"https://github.com/acme/widget/pull/1","title":"gone",`+
-			`"user":{"login":"octocat"},"state":"open","head":{"ref":"gone","sha":"abc","repo":null},`+
+			`"user":{"login":"octocat"},"state":"open","head":{"ref":"gone","sha":"0123456789abcdef0123456789abcdef01234567","repo":null},`+
 			`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}},`+
 			`{"number":2,"html_url":"https://github.com/acme/widget/pull/2","title":"available",`+
-			`"user":{"login":"hubot"},"state":"closed","head":{"ref":"topic","sha":"def",`+
+			`"user":{"login":"hubot"},"state":"closed","head":{"ref":"topic","sha":"0123456789abcdef0123456789abcdef01234567",`+
 			`"repo":{"name":"widget","full_name":"hubot/widget","clone_url":"https://github.com/hubot/widget.git"}},`+
 			`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}}]`)
 	}))
@@ -180,6 +181,64 @@ func TestGitHubProviderRejectsMalformedSuccessfulResponse(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "malformed"))
 }
 
+func TestMapGitHubPullRequestRejectsInvalidImportFields(t *testing.T) {
+	valid := func() *github.PullRequest {
+		return &github.PullRequest{
+			Number:  github.Ptr(17),
+			HTMLURL: github.Ptr("https://github.com/acme/widget/pull/17"),
+			Title:   github.Ptr("Improve widgets"),
+			User:    &github.User{Login: github.Ptr("octocat")},
+			State:   github.Ptr("open"),
+			Head: &github.PullRequestBranch{
+				Ref: github.Ptr("feature/widgets"),
+				SHA: github.Ptr("0123456789abcdef0123456789abcdef01234567"),
+				Repo: &github.Repository{
+					Name:     github.Ptr("widget"),
+					FullName: github.Ptr("octocat/widget"),
+					CloneURL: github.Ptr("https://github.com/octocat/widget.git"),
+				},
+			},
+			Base: &github.PullRequestBranch{
+				Ref: github.Ptr("main"),
+				Repo: &github.Repository{
+					Name:     github.Ptr("widget"),
+					FullName: github.Ptr("acme/widget"),
+					CloneURL: github.Ptr("https://github.com/acme/widget.git"),
+				},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*github.PullRequest)
+	}{
+		{name: "nonpositive number", mutate: func(pr *github.PullRequest) {
+			pr.Number = github.Ptr(0)
+		}},
+		{name: "empty head ref", mutate: func(pr *github.PullRequest) {
+			pr.Head.Ref = github.Ptr("")
+		}},
+		{name: "empty base ref", mutate: func(pr *github.PullRequest) {
+			pr.Base.Ref = github.Ptr("")
+		}},
+		{name: "invalid head OID", mutate: func(pr *github.PullRequest) {
+			pr.Head.SHA = github.Ptr("abc")
+		}},
+		{name: "empty clone URL", mutate: func(pr *github.PullRequest) {
+			pr.Head.Repo.CloneURL = github.Ptr("")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := valid()
+			tc.mutate(pr)
+
+			_, err := mapGitHubPullRequest(pr)
+
+			assertErrorCode(t, err, CodeMalformedResponse)
+		})
+	}
+}
+
 func TestGitHubProviderRejectsMismatchedSuccessfulResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -190,7 +249,7 @@ func TestGitHubProviderRejectsMismatchedSuccessfulResponse(t *testing.T) {
 			name: "list repository",
 			body: `[{"number":17,"html_url":"https://github.com/other/widget/pull/17","title":"wrong repo",` +
 				`"user":{"login":"octocat"},"state":"open",` +
-				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"head":{"ref":"topic","sha":"0123456789abcdef0123456789abcdef01234567","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
 				`"base":{"ref":"main","repo":{"name":"widget","full_name":"other/widget","clone_url":"https://github.com/other/widget.git"}}}]`,
 		},
 		{
@@ -198,7 +257,7 @@ func TestGitHubProviderRejectsMismatchedSuccessfulResponse(t *testing.T) {
 			get:  true,
 			body: `{"number":17,"html_url":"https://github.com/other/widget/pull/17","title":"wrong repo",` +
 				`"user":{"login":"octocat"},"state":"open",` +
-				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"head":{"ref":"topic","sha":"0123456789abcdef0123456789abcdef01234567","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
 				`"base":{"ref":"main","repo":{"name":"widget","full_name":"other/widget","clone_url":"https://github.com/other/widget.git"}}}`,
 		},
 		{
@@ -206,7 +265,7 @@ func TestGitHubProviderRejectsMismatchedSuccessfulResponse(t *testing.T) {
 			get:  true,
 			body: `{"number":18,"html_url":"https://github.com/acme/widget/pull/18","title":"wrong number",` +
 				`"user":{"login":"octocat"},"state":"open",` +
-				`"head":{"ref":"topic","sha":"abc","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
+				`"head":{"ref":"topic","sha":"0123456789abcdef0123456789abcdef01234567","repo":{"name":"widget","full_name":"octocat/widget","clone_url":"https://github.com/octocat/widget.git"}},` +
 				`"base":{"ref":"main","repo":{"name":"widget","full_name":"acme/widget","clone_url":"https://github.com/acme/widget.git"}}}`,
 		},
 	} {
