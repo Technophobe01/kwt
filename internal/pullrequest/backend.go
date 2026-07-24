@@ -203,11 +203,11 @@ func ensurePullRequestPushSafety(
 		trackingRemote != pushRemote ||
 		mergeRef != "refs/heads/"+sourceBranch ||
 		pushDefault != "upstream" {
-		return errors.New("kit did not establish exact fork push tracking")
+		return errors.New("kit did not establish exact pull-request push tracking")
 	}
 	if strings.HasPrefix(pushRemote, "-") ||
 		strings.ContainsAny(pushRemote, " \t\r\n") {
-		return errors.New("kit configured an invalid fork push remote")
+		return errors.New("kit configured an invalid pull-request push remote")
 	}
 
 	pushURLs, err := effectivePushURLs(ctx, runner, path, pushRemote)
@@ -215,11 +215,12 @@ func ensurePullRequestPushSafety(
 		return err
 	}
 	if len(pushURLs) != 1 {
-		return errors.New("fork push remote does not have exactly one destination")
+		return errors.New("pull-request push remote does not have exactly one destination")
 	}
-	pushIdentity, ok := urlutil.CanonicalRepositoryIdentityFromRemote(pushURLs[0])
-	if !ok || !EqualRepositoryIdentity(pushIdentity, sourceRepository) {
-		return errors.New("fork push remote does not target the pull-request repository")
+	if err := validatePushDestination(
+		ctx, runner, path, pushURLs[0], sourceRepository,
+	); err != nil {
+		return err
 	}
 
 	for _, key := range []string{
@@ -231,7 +232,10 @@ func ensurePullRequestPushSafety(
 			return configErr
 		}
 		if len(values) != 0 {
-			return fmt.Errorf("fork push remote has unsupported %s configuration", key)
+			return fmt.Errorf(
+				"pull-request push remote has unsupported %s configuration",
+				key,
+			)
 		}
 	}
 	mirror, err := effectiveGitConfig(
@@ -241,7 +245,7 @@ func ensurePullRequestPushSafety(
 		return err
 	}
 	if mirror != "" && !strings.EqualFold(mirror, "false") {
-		return errors.New("fork push remote is configured as a mirror")
+		return errors.New("pull-request push remote is configured as a mirror")
 	}
 	followTags, err := effectiveGitBoolean(
 		ctx, runner, path, "push.followTags",
@@ -251,6 +255,43 @@ func ensurePullRequestPushSafety(
 	}
 	if followTags {
 		return errors.New("push.followTags would publish tags with the pull-request branch")
+	}
+	return nil
+}
+
+func validatePushDestination(
+	ctx context.Context,
+	runner gitcmd.Runner,
+	path, pushURL, sourceRepository string,
+) error {
+	pushInfo, pushOK := urlutil.CanonicalRepositoryInfoFromRemote(pushURL)
+	sourceInfo, sourceOK := urlutil.CanonicalRepositoryInfo(sourceRepository)
+	if !pushOK || !sourceOK {
+		return errors.New("pull-request push remote has an invalid repository identity")
+	}
+	_, pushRepository, pushPathOK := strings.Cut(pushInfo.FullPath, "/")
+	_, sourceRepositoryPath, sourcePathOK := strings.Cut(sourceInfo.FullPath, "/")
+	if !pushPathOK || !sourcePathOK ||
+		!EqualRepositoryIdentity(
+			sourceInfo.Host+"/"+pushRepository,
+			sourceInfo.Host+"/"+sourceRepositoryPath,
+		) {
+		return errors.New("pull-request push remote targets a different repository")
+	}
+	if strings.EqualFold(pushInfo.Host, sourceInfo.Host) {
+		return nil
+	}
+
+	projectURLs, err := effectivePushURLs(ctx, runner, path, "origin")
+	if err != nil {
+		return fmt.Errorf("inspect trusted project remote: %w", err)
+	}
+	if len(projectURLs) != 1 {
+		return errors.New("trusted project remote does not have exactly one destination")
+	}
+	projectInfo, ok := urlutil.CanonicalRepositoryInfoFromRemote(projectURLs[0])
+	if !ok || !strings.EqualFold(pushInfo.Host, projectInfo.Host) {
+		return errors.New("pull-request push remote uses an untrusted authority")
 	}
 	return nil
 }
@@ -340,13 +381,13 @@ func effectivePushURLs(
 		return nil, ctx.Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect fork push destination: %w", err)
+		return nil, fmt.Errorf("inspect pull-request push destination: %w", err)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(stdout), "\n"), "\n")
 	for _, line := range lines {
 		if line == "" || line != strings.TrimSpace(line) ||
 			strings.ContainsRune(line, '\r') {
-			return nil, errors.New("fork push remote has an invalid destination")
+			return nil, errors.New("pull-request push remote has an invalid destination")
 		}
 	}
 	return lines, nil

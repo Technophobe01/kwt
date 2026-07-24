@@ -66,6 +66,25 @@ func configureTestPushTracking(
 	runGit(t, repo, "config", "push.default", "upstream")
 }
 
+func newTestPushRunner(t *testing.T) (gitcmd.Runner, string) {
+	t.Helper()
+	configDir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, "global.gitconfig"), nil, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, "system.gitconfig"), nil, 0o600,
+	))
+	runner := gitcmd.New()
+	runner.StripEnv = false
+	runner.Env = append(
+		runner.Env,
+		"GIT_CONFIG_GLOBAL="+filepath.Join(configDir, "global.gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(configDir, "system.gitconfig"),
+	)
+	return runner, filepath.Join(configDir, "global.gitconfig")
+}
+
 func TestGitBackendDelegatesPullRequestLifecycleToKit(t *testing.T) {
 	repo, backend := newBackendRepo(t)
 	runGit(t, repo, "remote", "set-url", "origin",
@@ -183,21 +202,11 @@ func TestGitBackendForkImportWithoutTrackingRejectsExplicitOriginPush(t *testing
 
 func TestEnsurePullRequestPushSafetyValidatesEffectiveDestination(t *testing.T) {
 	repo := t.TempDir()
-	home := t.TempDir()
 	configureTestPushTracking(
 		t, repo, "pr-17-feature-widgets", "fork",
 		"https://github.com/octocat/widget.git",
 	)
-	runner := gitcmd.New()
-	runner.StripEnv = false
-	runner.Env = append(
-		runner.Env,
-		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
-		"GIT_CONFIG_SYSTEM="+filepath.Join(home, "system.gitconfig"),
-	)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(home, "system.gitconfig"), nil, 0o600,
-	))
+	runner, globalConfig := newTestPushRunner(t)
 
 	err := ensurePullRequestPushSafety(
 		t.Context(), runner, repo, "pr-17-feature-widgets",
@@ -215,7 +224,7 @@ func TestEnsurePullRequestPushSafetyValidatesEffectiveDestination(t *testing.T) 
 
 	runGit(t, repo, "config", "--unset", "remote.fork.pushurl")
 	require.NoError(t, os.WriteFile(
-		filepath.Join(home, ".gitconfig"),
+		globalConfig,
 		[]byte("[push]\n\tfollowTags = true\n"),
 		0o600,
 	))
@@ -224,6 +233,53 @@ func TestEnsurePullRequestPushSafetyValidatesEffectiveDestination(t *testing.T) 
 		"github.com/octocat/widget", "feature/widgets",
 	)
 	require.Error(t, err)
+}
+
+func TestEnsurePullRequestPushSafetyValidatesTrustedProjectAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		projectURL string
+		sourceURL  string
+		wantErr    bool
+	}{
+		{
+			name:       "SSH alias",
+			projectURL: "git@github-work:acme/widget.git",
+			sourceURL:  "git@github-work:octocat/widget.git",
+		},
+		{
+			name:       "explicit SSH port",
+			projectURL: "ssh://git@github.com:22/acme/widget.git",
+			sourceURL:  "ssh://git@github.com:22/octocat/widget.git",
+		},
+		{
+			name:       "unrelated SSH alias",
+			projectURL: "git@github-work:acme/widget.git",
+			sourceURL:  "git@github-other:octocat/widget.git",
+			wantErr:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			configureTestPushTracking(
+				t, repo, "pr-17-feature-widgets", "fork", tc.sourceURL,
+			)
+			runGit(t, repo, "remote", "add", "origin", tc.projectURL)
+
+			runner, _ := newTestPushRunner(t)
+			err := ensurePullRequestPushSafety(
+				t.Context(), runner, repo,
+				"pr-17-feature-widgets",
+				"github.com/octocat/widget", "feature/widgets",
+			)
+
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestGitBackendMapsSharedLifecycleErrors(t *testing.T) {
