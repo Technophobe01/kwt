@@ -35,6 +35,8 @@ The attach command resolves the persisted workspace identity, verifies the
 recorded project clone and exact live worktree identity, verifies the isolated
 server and session, repairs the protected environment policy, and executes
 `attach-session -E` so tmux cannot import client environment variables. A
+parent tmux client identity is removed before attachment, so the command also
+works when invoked from a pane connected to another tmux server. A
 deleted project, reused path, or branch, repository, or session-name mismatch
 fails closed. Prunable entries and paths without a live Git worktree are not
 accepted. The registered project's canonical identity remains authoritative

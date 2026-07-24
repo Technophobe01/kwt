@@ -236,6 +236,38 @@ func TestProtectedAttachDisablesTmuxEnvironmentUpdate(t *testing.T) {
 	}
 }
 
+func TestProtectedAttachStripsParentTmuxIdentity(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-501/default,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		nil,
+	)
+	cmd := tc.attachSessionWithoutEnvironmentCmd(
+		context.Background(),
+		"workspace",
+	)
+
+	foundUnrelated := false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "TMUX") {
+			t.Error("protected attach leaked TMUX")
+		}
+		if hasEnvName(entry, "TMUX_PANE") {
+			t.Error("protected attach leaked TMUX_PANE")
+		}
+		if hasEnvName(entry, "UNRELATED_VAR") {
+			foundUnrelated = true
+		}
+	}
+	if !foundUnrelated {
+		t.Error("protected attach dropped UNRELATED_VAR")
+	}
+}
+
 func hasEnvName(entry, name string) bool {
 	return len(entry) > len(name) && entry[:len(name)] == name && entry[len(name)] == '='
 }

@@ -214,10 +214,17 @@ func (t *TmuxCommand) attachSessionWithoutEnvironmentCmd(
 	ctx context.Context,
 	sessionName string,
 ) *exec.Cmd {
-	return t.newAttachCmd(
+	cmd := t.newAttachCmd(
 		ctx,
 		[]string{"attach-session", "-E", "-t", sessionName},
 	)
+	// This command targets the protected workspace's isolated socket. A
+	// parent TMUX value tells tmux it is already inside a client on another
+	// server, which makes tmux reject the cross-server attachment as nested.
+	cmd.Env = filteredEnviron(cmd.Env, func(name string) bool {
+		return name == "TMUX" || name == "TMUX_PANE"
+	})
+	return cmd
 }
 
 // attachSessionCmd builds the attach-session invocation through the
