@@ -138,7 +138,7 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 	want := [][]string{
 		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt", "sleep", "2147483647"},
 		expectedBootstrapCommand("s"),
-		{"show-options", "-v", "-t", "s", "default-shell"},
+		{"show-options", "-gv", "default-shell"},
 		{"respawn-pane", "-k", "-c", "/wt", "-t", "%1", "/bin/sh", "-l"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
@@ -173,7 +173,7 @@ func TestEnsureCreatesWorkspaceWithoutAttaching(t *testing.T) {
 	assert.Empty(t, m.switchedTo)
 }
 
-func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
+func TestEnsureAndAttachQueriesServerDefaultShell(t *testing.T) {
 	m := &mockWorkspaceTmux{hasSession: false, defaultShell: "/opt/homebrew/bin/fish"}
 	r := NewWorkspaceRunner(m)
 
@@ -184,8 +184,8 @@ func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, m.calls,
-		[]string{"show-options", "-v", "-t", "workspace", "default-shell"},
-		"the first pane must use the target session's effective shell")
+		[]string{"show-options", "-gv", "default-shell"},
+		"the first pane must use the target tmux server's configured shell")
 }
 
 // TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing pins

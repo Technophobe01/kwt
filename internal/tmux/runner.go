@@ -136,7 +136,7 @@ func (r *WorkspaceRunner) create(
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
 		return r.abort(session, bootCmd, err)
 	}
-	defaultShellCmd := []string{"show-options", "-v", "-t", session, "default-shell"}
+	defaultShellCmd := []string{"show-options", "-gv", "default-shell"}
 	defaultShellOut, err := r.tmux.RunCommandOutputContext(ctx, defaultShellCmd...)
 	if err != nil {
 		return r.abort(session, defaultShellCmd, err)
