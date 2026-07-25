@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -16,7 +17,9 @@ import (
 // in bootstrap.go; see TestNewCmdPreservesEditorAndVisual).
 func TestNewCmdSanitizesEnvironment(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
-	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+	t.Setenv("KWT_GITHUB_TOKEN", "secret")
+	t.Setenv("KWT_HOME", "/tmp/kwt")
+	t.Setenv("UNRELATED_VAR", "keep-me")
 
 	tc := NewTmuxCommand("tmux")
 	cmd := tc.newCmd(context.Background(), []string{"has-session", "-t", "x"})
@@ -25,15 +28,69 @@ func TestNewCmdSanitizesEnvironment(t *testing.T) {
 		if hasEnvName(entry, "TERM_PROGRAM") {
 			t.Errorf("newCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
 		}
-	}
-	found := false
-	for _, entry := range cmd.Env {
-		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
-			found = true
+		if hasEnvName(entry, "KWT_GITHUB_TOKEN") {
+			t.Errorf("newCmd().Env leaked GitHub credential: %v", cmd.Env)
 		}
 	}
-	if !found {
-		t.Errorf("newCmd().Env dropped unrelated var KWT_TEST_UNRELATED_VAR: %v", cmd.Env)
+	foundUnrelated, foundKwtHome := false, false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "UNRELATED_VAR") {
+			foundUnrelated = true
+		}
+		if hasEnvName(entry, "KWT_HOME") {
+			foundKwtHome = true
+		}
+	}
+	if !foundUnrelated {
+		t.Errorf("newCmd().Env dropped unrelated var: %v", cmd.Env)
+	}
+	if !foundKwtHome {
+		t.Errorf("newCmd().Env dropped KWT_HOME: %v", cmd.Env)
+	}
+}
+
+func TestNewCmdStripsConfiguredSensitiveEnvironmentName(t *testing.T) {
+	t.Setenv("CUSTOM_FLEET_TOKEN", "secret")
+	t.Setenv("UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommandWithStripNames(
+		"tmux",
+		[]string{"CUSTOM_FLEET_TOKEN"},
+	)
+	cmd := tc.newCmd(
+		context.Background(),
+		[]string{"has-session", "-t", "x"},
+	)
+
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "CUSTOM_FLEET_TOKEN") {
+			t.Errorf("newCmd().Env leaked configured credential: %v", cmd.Env)
+		}
+	}
+}
+
+func TestSocketCommandPrefixesEveryInvocationWithSocketName(t *testing.T) {
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	cmd := tc.newCmd(
+		context.Background(),
+		[]string{"has-session", "-t", "workspace"},
+	)
+	attach := tc.newAttachCmd(
+		context.Background(),
+		[]string{"attach-session", "-t", "workspace"},
+	)
+
+	wantPrefix := []string{"tmux", "-L", "kwt-pr-0123456789abcdef"}
+	if len(cmd.Args) < len(wantPrefix) || !slices.Equal(cmd.Args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("newCmd args = %v, want prefix %v", cmd.Args, wantPrefix)
+	}
+	if len(attach.Args) < len(wantPrefix) || !slices.Equal(attach.Args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("newAttachCmd args = %v, want prefix %v", attach.Args, wantPrefix)
 	}
 }
 
@@ -102,7 +159,7 @@ func TestNewAttachCmdStripsEditorAndVisual(t *testing.T) {
 	t.Setenv("EDITOR", "vim")
 	t.Setenv("VISUAL", "code")
 	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
-	t.Setenv("KWT_TEST_UNRELATED_VAR", "keep-me")
+	t.Setenv("UNRELATED_VAR", "keep-me")
 
 	tc := NewTmuxCommand("tmux")
 	cmd := tc.newAttachCmd(context.Background(), []string{"attach-session", "-t", "x"})
@@ -118,7 +175,7 @@ func TestNewAttachCmdStripsEditorAndVisual(t *testing.T) {
 		if hasEnvName(entry, "TERM_PROGRAM") {
 			t.Errorf("newAttachCmd().Env leaked TERM_PROGRAM: %v", cmd.Env)
 		}
-		if hasEnvName(entry, "KWT_TEST_UNRELATED_VAR") {
+		if hasEnvName(entry, "UNRELATED_VAR") {
 			foundUnrelated = true
 		}
 	}
@@ -155,6 +212,59 @@ func TestAttachPathsUseFullStripSanitizer(t *testing.T) {
 				t.Errorf("%s cmd env leaked EDITOR/VISUAL: %v", name, envs[name])
 			}
 		}
+	}
+}
+
+func TestProtectedAttachDisablesTmuxEnvironmentUpdate(t *testing.T) {
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+	)
+
+	cmd := tc.attachSessionWithoutEnvironmentCmd(
+		context.Background(),
+		"workspace",
+	)
+
+	want := []string{
+		"tmux", "-L", "kwt-pr-0123456789abcdef",
+		"attach-session", "-E", "-t", "workspace",
+	}
+	if !slices.Equal(cmd.Args, want) {
+		t.Fatalf("protected attach args = %v, want %v", cmd.Args, want)
+	}
+}
+
+func TestProtectedAttachStripsParentTmuxIdentity(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-501/default,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("UNRELATED_VAR", "keep-me")
+
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		nil,
+	)
+	cmd := tc.attachSessionWithoutEnvironmentCmd(
+		context.Background(),
+		"workspace",
+	)
+
+	foundUnrelated := false
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "TMUX") {
+			t.Error("protected attach leaked TMUX")
+		}
+		if hasEnvName(entry, "TMUX_PANE") {
+			t.Error("protected attach leaked TMUX_PANE")
+		}
+		if hasEnvName(entry, "UNRELATED_VAR") {
+			foundUnrelated = true
+		}
+	}
+	if !foundUnrelated {
+		t.Error("protected attach dropped UNRELATED_VAR")
 	}
 }
 

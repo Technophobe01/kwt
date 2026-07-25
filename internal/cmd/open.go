@@ -74,45 +74,68 @@ func runOpen(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("could not resolve repository info for %s", selected.Path)
 		}
 
-		// Only resolve the target repo's default layout (which requires
-		// finding its root and loading, and possibly trust-prompting for, its
-		// .kwt.toml) when neither flag already determines the layout. This
-		// avoids trust-prompting on, or failing over, a malformed target
-		// config whose default would be ignored anyway.
-		targetDefault := ""
-		if shouldLoadTargetDefault(openLayout, openSelectLayout) {
-			repoRoot, err := git.New(entry.Path).GetMainRepositoryPath()
-			if err != nil {
-				return fmt.Errorf("failed to find repository root: %w", err)
-			}
-			targetDefault, err = config.LoadRepoLayoutDefault(repoRoot, config.StdinInteractive())
-			if err != nil {
-				return err
-			}
-		}
-
-		layout, err := tmux.ResolveLayout(ctx.Config.Layouts, openLayout, openSelectLayout, targetDefault,
+		return openSelectedWorktree(
+			cmd.Context(),
+			ctx,
+			entry,
 			func(ls []models.Layout) (models.Layout, error) {
 				sel, err := finder.SelectLayout(ls)
 				if err != nil {
 					return models.Layout{}, err
 				}
 				return *sel, nil
-			})
-		if err != nil {
-			return err
-		}
-		layout, err = tmux.ResolvePaneCommands(layout, ctx.Config.Agents)
-		if err != nil {
-			return err
-		}
-
-		session := tmux.WorkspaceSessionName(entry.RepositoryInfo, entry.Branch, entry.Path)
-		runner := tmux.NewWorkspaceRunner(tmux.NewTmuxCommand(""))
-		return runner.EnsureAndAttach(
-			context.Background(), session, entry.Path, layout, os.Getenv("TMUX") != "",
+			},
 		)
 	})(cmd, args)
+}
+
+func openSelectedWorktree(
+	commandCtx context.Context,
+	ctx *CommandContext,
+	entry *discovery.GlobalWorktreeEntry,
+	selectLayout func([]models.Layout) (models.Layout, error),
+) error {
+	if err := rejectProtectedWorkspaceOpen(commandCtx, entry.Path); err != nil {
+		return err
+	}
+
+	// Only resolve the target repo's default layout (which requires
+	// finding its root and loading, and possibly trust-prompting for, its
+	// .kwt.toml) when neither flag already determines the layout. This
+	// avoids trust-prompting on, or failing over, a malformed target
+	// config whose default would be ignored anyway.
+	targetDefault := ""
+	if shouldLoadTargetDefault(openLayout, openSelectLayout) {
+		repoRoot, err := git.New(entry.Path).GetMainRepositoryPath()
+		if err != nil {
+			return fmt.Errorf("failed to find repository root: %w", err)
+		}
+		targetDefault, err = config.LoadRepoLayoutDefault(repoRoot, config.StdinInteractive())
+		if err != nil {
+			return err
+		}
+	}
+
+	layout, err := tmux.ResolveLayout(
+		ctx.Config.Layouts,
+		openLayout,
+		openSelectLayout,
+		targetDefault,
+		selectLayout,
+	)
+	if err != nil {
+		return err
+	}
+	layout, err = tmux.ResolvePaneCommands(layout, ctx.Config.Agents)
+	if err != nil {
+		return err
+	}
+
+	session := tmux.WorkspaceSessionName(entry.RepositoryInfo, entry.Branch, entry.Path)
+	runner := tmux.NewWorkspaceRunner(tmux.NewTmuxCommand(""))
+	return runner.EnsureAndAttach(
+		commandCtx, session, entry.Path, layout, os.Getenv("TMUX") != "",
+	)
 }
 
 // shouldLoadTargetDefault reports whether kwt open must consult the target

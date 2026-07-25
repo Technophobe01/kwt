@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -74,6 +77,12 @@ func runList(cmd *cobra.Command, args []string) error {
 
 			if listJSON {
 				enrichWorktreeIdentity(ctx.Git, ctx.Config.Projects, worktrees)
+				if err := enrichProtectedSocketIdentity(
+					cmd.Context(),
+					worktrees,
+				); err != nil {
+					return err
+				}
 				return ctx.Printer.PrintWorktreesJSON(worktrees)
 			}
 
@@ -110,11 +119,85 @@ func showGlobalWorktrees(ctx *CommandContext) error {
 	}
 
 	if listJSON {
+		if err := enrichProtectedSocketIdentity(
+			context.Background(),
+			worktrees,
+		); err != nil {
+			return err
+		}
 		return ctx.Printer.PrintWorktreesJSON(worktrees)
 	}
 
 	ctx.Printer.PrintWorktrees(worktrees, listVerbose)
 	return nil
+}
+
+func enrichProtectedSocketIdentity(
+	ctx context.Context,
+	worktrees []models.Worktree,
+) error {
+	records := make(map[string]pullrequest.Provenance)
+	if err := pullrequest.NewFileStore(prStorePath()).View(
+		ctx,
+		func(current map[string]pullrequest.Provenance) error {
+			for key, record := range current {
+				records[key] = record
+			}
+			return nil
+		},
+	); err != nil {
+		return fmt.Errorf("failed to read pull-request provenance: %w", err)
+	}
+	annotateProtectedSocketIdentity(worktrees, records)
+	return nil
+}
+
+func annotateProtectedSocketIdentity(
+	worktrees []models.Worktree,
+	records map[string]pullrequest.Provenance,
+) {
+	type workspaceIdentity struct {
+		path       string
+		branch     string
+		session    string
+		repository string
+	}
+	socketByIdentity := make(map[workspaceIdentity]string, len(records))
+	for _, record := range records {
+		workspace := record.Workspace
+		repository := workspace.Repository
+		if repository == "" {
+			repository = record.Project.Identity
+		}
+		if workspace.Path == "" ||
+			workspace.Branch == "" ||
+			workspace.SessionName == "" ||
+			repository == "" {
+			continue
+		}
+		key := workspaceIdentity{
+			path:       utils.CanonicalPath(workspace.Path),
+			branch:     workspace.Branch,
+			session:    workspace.SessionName,
+			repository: pullrequest.NormalizeRepositoryIdentity(repository),
+		}
+		socketByIdentity[key] =
+			tmux.ProtectedWorkspaceSocketName(
+				workspace.SessionName,
+				workspace.Path,
+			)
+	}
+	for i := range worktrees {
+		key := workspaceIdentity{
+			path:    utils.CanonicalPath(worktrees[i].Path),
+			branch:  worktrees[i].Branch,
+			session: worktrees[i].SessionName,
+			repository: pullrequest.NormalizeRepositoryIdentity(
+				worktrees[i].Repository,
+			),
+		}
+		worktrees[i].TmuxSocketName = socketByIdentity[key]
+	}
 }
 
 // enrichWorktreeIdentity fills the repository slug and session name for each

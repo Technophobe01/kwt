@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
@@ -2360,6 +2361,49 @@ func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, "no worktree selected", err.Error())
+}
+
+func TestTUIBackendRefusesProtectedPullRequestWorkspace(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	workspacePath := t.TempDir()
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-32"] = pullrequest.Provenance{
+				Workspace: pullrequest.Workspace{Path: workspacePath},
+			}
+			return nil
+		},
+	))
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	called := false
+	backend.ensureAndAttach = func(
+		context.Context,
+		string,
+		string,
+		models.Layout,
+		bool,
+	) error {
+		called = true
+		return nil
+	}
+
+	err := backend.attachWorkspace(
+		context.Background(),
+		dashboard.Row{
+			Workspace: &dashboard.WorkspaceInfo{
+				Name: "pr-32",
+				Path: workspacePath,
+			},
+		},
+		tmux.BlankLayoutName,
+		false,
+		false,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kwt pr attach")
+	assert.False(t, called)
 }
 
 // TestTUIBackendAttachWorkspacePassesWorkspaceRowToRunner keeps the command

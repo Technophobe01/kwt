@@ -14,6 +14,88 @@ kwt pr import github:github.com/acme/widget#17 \
   --project github.com/acme/widget --json
 ```
 
+Clients that present their own ordinary tmux client can ask kwt to establish
+the canonical workspace session without attaching kwt's process:
+
+```sh
+kwt pr import 17 --project github.com/acme/widget \
+  --start-session --json
+```
+
+`--start-session` creates or repairs the `session_name` returned by the import
+using kwt's configured default layout and workspace bootstrap, then leaves it
+detached for the caller. The response also includes `tmux_socket_name`; clients
+must attach through kwt's protected path:
+
+```sh
+kwt pr attach <workspace.path>
+```
+
+The attach command resolves the persisted workspace identity, verifies the
+recorded project clone and exact live worktree identity, validates the current
+layout configuration, and creates or repairs the session on its isolated
+server before executing `attach-session -E` so tmux cannot import client
+environment variables. This makes the command converge imports created without
+`--start-session`, imports whose startup failed, and sessions that disappeared
+after import. A parent tmux client identity is removed before attachment, so
+the command also works when invoked from a pane connected to another tmux
+server. A
+deleted project, reused path, or branch, repository, or session-name mismatch
+fails closed. Prunable entries and paths without a live Git worktree are not
+accepted. The registered project's canonical identity remains authoritative
+when its checkout's origin points to a fork, matching kwt's other inventory
+surfaces. An import created from an unregistered repository remains attachable
+when its live Git identity matches the recorded repository; ambiguous or
+conflicting registrations fail closed. Ordinary `kwt open` and dashboard open
+actions refuse imported workspaces because they use the normal tmux server;
+use `kwt pr attach <workspace.path>` instead. The protected attach path is
+idempotent for an already imported worktree or a verified session that kwt
+created for the same workspace. Kwt validates layout and agent configuration
+before import mutation. If runtime session establishment fails after the
+import becomes durable, the command still exits successfully and returns the
+imported workspace with an explicit
+`session_start_error`:
+
+```json
+{
+  "status": "created",
+  "workspace": {
+    "path": "/worktrees/pr-17",
+    "session_name": "kwt-workspace-pr-17"
+  },
+  "session_start_error": {
+    "code": "workspace_creation_failed",
+    "message": "failed to start imported workspace session",
+    "retryable": false
+  }
+}
+```
+
+Clients must retain or refresh the imported workspace when this field is
+present and present the session failure separately. `kwt pr attach
+<workspace.path>` retries session establishment directly; repeating the import
+also converges on `already_imported`.
+
+Kwt runs each protected PR workspace on a deterministic, workspace-specific
+tmux socket rather than the user's ordinary tmux server. Before invoking that
+server, kwt removes `KWT_GITHUB_TOKEN`, `KWT_FLEET_TOKEN`, and the variable
+named by `fleet.token_env` from the subprocess environment. It installs
+matching session remove-markers before any imported-workspace shell starts.
+Because tmux options are mutable by processes with socket access, filtering
+`update-environment` is defense in depth; the protected attach command always
+passes `-E` and never relies on that option for enforcement. Operational state
+such as `KWT_HOME` remains available inside the workspace.
+
+Kwt reuses an existing session on that isolated socket only when the session
+carries the matching workspace marker and both its server and session
+environments are credential-free. A rejected protected session must be
+removed before retrying.
+
+`kwt list --json` reads the same provenance store before it labels worktrees
+with `tmux_socket_name`. If that store cannot be read or decoded, listing fails
+instead of emitting an imported workspace without its safety-critical socket
+identity.
+
 `--project` accepts a repository identity from `kwt projects --json`, a
 registered project name, or its absolute canonical main-repository path.
 Identity and unique-name matching take precedence over path matching; relative
@@ -293,8 +375,10 @@ returns a conflict rather than replacing the original clone's provenance. KWT
 does not push during this check or rewrite Git remotes and routing that the
 local user changed after import.
 
-If an import fails after creating a workspace, kwt rolls it back even when the
-request context was canceled. Request cancellation, including `SIGINT` and
+If the import transaction fails after creating a workspace, kwt rolls it back
+even when the request context was canceled. Session establishment happens
+after that transaction and therefore uses the partial-success contract above
+rather than claiming rollback. Request cancellation, including `SIGINT` and
 `SIGTERM`, terminates checkout; cleanup then runs without the canceled context.
 Worktree creation retains an ownership reservation through late rollback and
 removes only the original directory identity, a clean worktree, and the
@@ -327,7 +411,7 @@ and return a stable nonzero status. For example:
 | 6    | `inaccessible_head`             | The fork or source branch is unavailable. |
 | 7    | `naming_conflict`               | The generated branch or workspace is occupied. |
 | 8    | `network_failure`               | A retryable provider or Git network failure. |
-| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, or persistence failed. |
+| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, persistence, or session-configuration preflight failed. |
 | 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
 | 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
 | 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |

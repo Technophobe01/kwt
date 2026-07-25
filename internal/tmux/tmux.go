@@ -3,11 +3,16 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// errNoServerRunning distinguishes a clean first-session launch from a tmux
+// server whose environment could not be inspected.
+var errNoServerRunning = errors.New("tmux server is not running")
 
 // TmuxInterface defines the contract for tmux operations
 type TmuxInterface interface {
@@ -36,14 +41,46 @@ type SessionManagerInterface interface {
 }
 
 type TmuxCommand struct {
-	command string
+	command         string
+	socketName      string
+	extraStripNames map[string]bool
 }
 
 func NewTmuxCommand(command string) *TmuxCommand {
+	return NewTmuxCommandWithStripNames(command, nil)
+}
+
+// NewTmuxCommandWithStripNames adds caller-owned credential names to the
+// environment variables removed from every tmux subprocess.
+func NewTmuxCommandWithStripNames(
+	command string,
+	names []string,
+) *TmuxCommand {
+	return NewTmuxCommandForSocketWithStripNames(command, "", names)
+}
+
+// NewTmuxCommandForSocketWithStripNames targets a named tmux socket for every
+// invocation. A named socket gives protected workspaces a server boundary
+// separate from the user's ordinary tmux server.
+func NewTmuxCommandForSocketWithStripNames(
+	command string,
+	socketName string,
+	names []string,
+) *TmuxCommand {
 	if command == "" {
 		command = "tmux"
 	}
-	return &TmuxCommand{command: command}
+	extra := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			extra[name] = true
+		}
+	}
+	return &TmuxCommand{
+		command:         command,
+		socketName:      strings.TrimSpace(socketName),
+		extraStripNames: extra,
+	}
 }
 
 func (t *TmuxCommand) NewSession(name, workDir string) error {
@@ -162,6 +199,34 @@ func (t *TmuxCommand) AttachSession(sessionName string) error {
 	return cmd.Run()
 }
 
+func (t *TmuxCommand) AttachSessionWithoutEnvironment(
+	ctx context.Context,
+	sessionName string,
+) error {
+	cmd := t.attachSessionWithoutEnvironmentCmd(ctx, sessionName)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (t *TmuxCommand) attachSessionWithoutEnvironmentCmd(
+	ctx context.Context,
+	sessionName string,
+) *exec.Cmd {
+	cmd := t.newAttachCmd(
+		ctx,
+		[]string{"attach-session", "-E", "-t", sessionName},
+	)
+	// This command targets the protected workspace's isolated socket. A
+	// parent TMUX value tells tmux it is already inside a client on another
+	// server, which makes tmux reject the cross-server attachment as nested.
+	cmd.Env = filteredEnviron(cmd.Env, func(name string) bool {
+		return name == "TMUX" || name == "TMUX_PANE"
+	})
+	return cmd
+}
+
 // attachSessionCmd builds the attach-session invocation through the
 // attach-class exec seam; split out so tests can pin that the attach path
 // uses the full-strip sanitizer without needing a tty to run it.
@@ -251,7 +316,15 @@ func (t *TmuxCommand) RunCommandOutputContext(ctx context.Context, args ...strin
 // when no server is running; callers treat that as "nothing to inspect" and
 // fall back to the launcher-derived strip set.
 func (t *TmuxCommand) GlobalEnvironment() (string, error) {
-	return t.RunCommandOutputContext(context.Background(), "show-environment", "-g")
+	output, err := t.RunCommandOutputContext(
+		context.Background(),
+		"show-environment",
+		"-g",
+	)
+	if err != nil && strings.Contains(err.Error(), "no server running") {
+		return "", fmt.Errorf("%w: %v", errNoServerRunning, err)
+	}
+	return output, err
 }
 
 // SessionEnvironment returns a session's own environment table via
@@ -267,6 +340,28 @@ func (t *TmuxCommand) SessionEnvironment(session string) (string, error) {
 	return t.RunCommandOutputContext(context.Background(), "show-environment", "-t", session)
 }
 
+// sessionOption reads a session-local user option without falling back to a
+// global value. Missing options return the tmux command error to the caller.
+func (t *TmuxCommand) sessionOption(session, option string) (string, error) {
+	return t.RunCommandOutputContext(
+		context.Background(),
+		"show-options",
+		"-v",
+		"-t",
+		session,
+		option,
+	)
+}
+
+func (t *TmuxCommand) globalOption(option string) (string, error) {
+	return t.RunCommandOutputContext(
+		context.Background(),
+		"show-options",
+		"-gv",
+		option,
+	)
+}
+
 // newCmd is the exec seam for every TmuxCommand method except the
 // attach-class commands (see newAttachCmd). It builds the *exec.Cmd for a
 // tmux invocation with Env set to a sanitized copy of the process environment
@@ -279,8 +374,8 @@ func (t *TmuxCommand) SessionEnvironment(session string) (string, error) {
 // reads them at server start for its default key mode. Call sites that
 // predate context plumbing pass context.Background().
 func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, t.command, args...)
-	cmd.Env = SanitizedEnviron(os.Environ())
+	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
+	cmd.Env = t.stripExtraNames(SanitizedEnviron(os.Environ()))
 	return cmd
 }
 
@@ -292,7 +387,25 @@ func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 // session table, which would override the bootstrap's remove-markers if the
 // client still carried them.
 func (t *TmuxCommand) newAttachCmd(ctx context.Context, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, t.command, args...)
-	cmd.Env = AttachSanitizedEnviron(os.Environ())
+	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
+	cmd.Env = t.stripExtraNames(AttachSanitizedEnviron(os.Environ()))
 	return cmd
+}
+
+func (t *TmuxCommand) socketArgs(args []string) []string {
+	if t.socketName == "" {
+		return args
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-L", t.socketName)
+	return append(prefixed, args...)
+}
+
+func (t *TmuxCommand) stripExtraNames(env []string) []string {
+	if len(t.extraStripNames) == 0 {
+		return env
+	}
+	return filteredEnviron(env, func(name string) bool {
+		return t.extraStripNames[name]
+	})
 }

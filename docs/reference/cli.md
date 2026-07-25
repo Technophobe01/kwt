@@ -30,7 +30,8 @@ kwt add -b fix/parser-race
 kwt open parser
 kwt status
 kwt pr list --project github.com/acme/widget --json
-kwt pr import 17 --project github.com/acme/widget --json
+kwt pr import 17 --project github.com/acme/widget \
+  --start-session --json
 kwt sync status
 kwt exec fix/parser-race -- go test ./internal/parser
 kwt workspace add ~/notes
@@ -48,11 +49,16 @@ default branch. If that remote base is unavailable, it falls back to local
 `--json` emits an array of objects with `path`, `branch`, `commit_hash`, `is_main`,
 `created_at` (worktree directory mtime), `repository` (the `host/owner/name`
 slug, or a `local/<path>` fallback for a repository without a usable remote —
-see below), and `session_name` (the tmux workspace session name kwt attaches to). To
+see below), and `session_name` (the tmux workspace session name kwt attaches to).
+An imported pull-request worktree additionally includes `tmux_socket_name` for
+its protected workspace-specific server. To
 converge on the same session, prefer an attach-only command — `tmux
-attach-session -t <session_name>` (or `switch-client -t` from inside tmux) — so
-you never create the session bare. See [Attaching from other
+attach-session -t <session_name>` on the normal server, or `kwt pr attach
+<path>` when `tmux_socket_name` is present — so you never create the session
+bare or bypass its protected attach policy. See [Attaching from other
 tools](#attaching-from-other-tools) before using `new-session`.
+`kwt open` and dashboard open actions refuse protected pull-request imports
+and direct the user through `kwt pr attach`.
 `created_at` is populated in both local and `-g` mode.
 
 ## `kwt projects`
@@ -70,6 +76,12 @@ for pull-request clients. kwt owns provider calls, ref handling, branch and
 workspace naming, normal worktree creation and setup, push configuration,
 provenance, and tmux session naming. See [Pull-request
 automation](pull-requests.md) for the JSON and exit-status contract.
+`pr import --start-session` additionally establishes that canonical session
+without attaching, for clients that provide their own ordinary tmux
+presentation. Its workspace record includes `tmux_socket_name`; attach with
+`kwt pr attach <workspace.path>`, which verifies the persisted identity,
+creates or repairs the protected session when needed, and uses
+`attach-session -E`.
 
 ### Repository identity fallback
 
@@ -131,11 +143,14 @@ explicit, documented exception, so they cannot silently drift apart:
   `EDITOR`/`VISUAL` out of every pane's shell even though the server process
   itself now keeps them.
 
-The full list: exact names `__CFBundleIdentifier`, `EDITOR`, `OLDPWD`,
-`PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`, `SHLVL`,
-`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
+The full list: exact names `__CFBundleIdentifier`, `EDITOR`,
+`KWT_GITHUB_TOKEN`, `OLDPWD`, `PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`,
+`SHLVL`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
 prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `NVM_`, `PYENV_`,
-`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. `EDITOR` and
+`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. Operational kwt
+variables such as `KWT_HOME` are preserved. PR workspace bootstrap additionally
+removes the exact variable named by `fleet.token_env`, both from tmux
+subprocesses and from the session environment. `EDITOR` and
 `VISUAL` are excluded from exec-time sanitization only, per above; every
 other name in this list is treated identically by both mechanisms.
 
@@ -171,6 +186,16 @@ already running, it re-applies the safe bootstrap subset (`default-command`
 plus the remove-markers — never construction or pane commands), so a session
 another tool created bare converges on consistent behavior for windows opened
 after that attach.
+
+PR imports use a stricter reuse boundary. `pr import --start-session` records
+the canonical workspace path when it creates the session on a deterministic,
+workspace-specific socket and reuses only a same-named session with that exact
+marker. The isolated server starts without the provider or configured fleet
+credential. The protected session also masks those names and filters them from
+`update-environment`. Clients must use `kwt pr attach <workspace.path>`;
+because tmux options are mutable, that command creates or repairs the
+configured protected session and enforces `attach-session -E` rather than
+trusting the current option value.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a

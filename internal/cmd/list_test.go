@@ -1,18 +1,108 @@
 package cmd
 
 import (
+	"context"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/ui"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestImportedWorktreeReceivesProtectedSocketIdentity(t *testing.T) {
+	worktrees := []models.Worktree{{
+		Path:        "/worktrees/pr-32",
+		Branch:      "pr-32",
+		Repository:  "github.com/acme/widget",
+		SessionName: "kwt-workspace-pr-32",
+	}}
+	annotateProtectedSocketIdentity(worktrees, map[string]pullrequest.Provenance{
+		"pr-32": {
+			Project: pullrequest.Project{
+				Identity: "github.com/acme/widget",
+			},
+			Workspace: pullrequest.Workspace{
+				Path:        "/worktrees/pr-32",
+				Branch:      "pr-32",
+				Repository:  "github.com/acme/widget",
+				SessionName: "kwt-workspace-pr-32",
+			},
+		},
+	})
+
+	want := tmux.ProtectedWorkspaceSocketName(
+		"kwt-workspace-pr-32",
+		"/worktrees/pr-32",
+	)
+	if worktrees[0].TmuxSocketName != want {
+		t.Fatalf("tmux socket = %q, want %q", worktrees[0].TmuxSocketName, want)
+	}
+}
+
+func TestStaleProvenanceDoesNotLabelReusedWorktreePath(t *testing.T) {
+	record := pullrequest.Provenance{
+		Project: pullrequest.Project{Identity: "github.com/acme/widget"},
+		Workspace: pullrequest.Workspace{
+			Path:        "/worktrees/reused",
+			Branch:      "pr-32",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-pr-32",
+		},
+	}
+	tests := []models.Worktree{
+		{
+			Path: "/worktrees/reused", Branch: "other",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-pr-32",
+		},
+		{
+			Path: "/worktrees/reused", Branch: "pr-32",
+			Repository:  "github.com/acme/other",
+			SessionName: "kwt-workspace-pr-32",
+		},
+		{
+			Path: "/worktrees/reused", Branch: "pr-32",
+			Repository:  "github.com/acme/widget",
+			SessionName: "kwt-workspace-other",
+		},
+	}
+
+	annotateProtectedSocketIdentity(tests, map[string]pullrequest.Provenance{
+		"stale": record,
+	})
+
+	for _, worktree := range tests {
+		assert.Empty(t, worktree.TmuxSocketName)
+	}
+}
+
+func TestProtectedSocketEnrichmentReportsUnreadableProvenance(t *testing.T) {
+	kwtHome := t.TempDir()
+	t.Setenv("KWT_HOME", kwtHome)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(kwtHome, "pull-requests.json"),
+		[]byte("{"),
+		0o600,
+	))
+
+	err := enrichProtectedSocketIdentity(
+		context.Background(),
+		[]models.Worktree{{Path: "/worktrees/pr-32"}},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pull-request provenance")
+}
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns
 // everything it wrote. The ui.Printer writes to os.Stdout directly, so this is

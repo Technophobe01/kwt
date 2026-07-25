@@ -24,24 +24,31 @@ import (
 // RunCommandContext (1-indexed), letting tests fail select-layout or a
 // pane-command invocation instead.
 type mockWorkspaceTmux struct {
-	hasSession        bool
-	calls             [][]string
-	paneSeq           int
-	switchedTo        string
-	attachedTo        string
-	outputErr         error
-	failOutputOnCall  int
-	outputCalls       int
-	failRunOnCall     int
-	runCalls          int
-	killSessionCalled bool
-	killedSession     string
-	defaultShell      string
-	globalEnv         string
-	globalEnvErr      error
-	sessionEnv        string
-	sessionEnvErr     error
-	sessionEnvQueried bool
+	hasSession          bool
+	calls               [][]string
+	paneSeq             int
+	switchedTo          string
+	attachedTo          string
+	protectedAttachedTo string
+	protectedAttachCtx  context.Context
+	outputErr           error
+	failOutputOnCall    int
+	outputCalls         int
+	failRunOnCall       int
+	runCalls            int
+	killSessionCalled   bool
+	killedSession       string
+	sessionDefaultShell string
+	globalDefaultShell  string
+	globalEnv           string
+	globalEnvErr        error
+	sessionEnv          string
+	sessionEnvErr       error
+	sessionEnvQueried   bool
+	sessionWorkspace    string
+	sessionUpdateEnv    string
+	globalUpdateEnv     string
+	sessionOptionErr    error
 }
 
 func (m *mockWorkspaceTmux) HasSession(string) bool {
@@ -55,6 +62,24 @@ func (m *mockWorkspaceTmux) GlobalEnvironment() (string, error) {
 func (m *mockWorkspaceTmux) SessionEnvironment(string) (string, error) {
 	m.sessionEnvQueried = true
 	return m.sessionEnv, m.sessionEnvErr
+}
+
+func (m *mockWorkspaceTmux) sessionOption(_ string, option string) (string, error) {
+	switch option {
+	case workspacePathOption:
+		return m.sessionWorkspace, m.sessionOptionErr
+	case "update-environment":
+		return m.sessionUpdateEnv, m.sessionOptionErr
+	default:
+		return "", m.sessionOptionErr
+	}
+}
+
+func (m *mockWorkspaceTmux) globalOption(option string) (string, error) {
+	if option == "update-environment" {
+		return m.globalUpdateEnv, nil
+	}
+	return "", nil
 }
 
 // expectedBootstrapCommand derives the bootstrap invocation a test should
@@ -88,10 +113,13 @@ func (m *mockWorkspaceTmux) RunCommandOutputContext(
 		return "", fmt.Errorf("boom on call %d", m.outputCalls)
 	}
 	if len(args) > 0 && args[0] == "show-options" {
-		if m.defaultShell != "" {
-			return m.defaultShell + "\n", nil
+		if len(args) > 1 && args[1] == "-gv" {
+			if m.globalDefaultShell != "" {
+				return m.globalDefaultShell + "\n", nil
+			}
+			return "/bin/sh\n", nil
 		}
-		return "/bin/sh\n", nil
+		return m.sessionDefaultShell + "\n", nil
 	}
 	m.paneSeq++
 	return fmt.Sprintf("%%%d\n", m.paneSeq), nil
@@ -104,6 +132,15 @@ func (m *mockWorkspaceTmux) SwitchClient(target string) error {
 
 func (m *mockWorkspaceTmux) AttachSession(session string) error {
 	m.attachedTo = session
+	return nil
+}
+
+func (m *mockWorkspaceTmux) AttachSessionWithoutEnvironment(
+	ctx context.Context,
+	session string,
+) error {
+	m.protectedAttachCtx = ctx
+	m.protectedAttachedTo = session
 	return nil
 }
 
@@ -139,6 +176,7 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 		{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/wt", "sleep", "2147483647"},
 		expectedBootstrapCommand("s"),
 		{"show-options", "-v", "-t", "s", "default-shell"},
+		{"show-options", "-gv", "default-shell"},
 		{"respawn-pane", "-k", "-c", "/wt", "-t", "%1", "/bin/sh", "-l"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
 		{"split-window", "-P", "-F", "#{pane_id}", "-t", "s", "-c", "/wt"},
@@ -156,8 +194,28 @@ func TestEnsureAndAttachCreatesSendsToCapturedIDsAndAttaches(t *testing.T) {
 		"the create path must not query the session table of a session that does not exist yet")
 }
 
-func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: false, defaultShell: "/opt/homebrew/bin/fish"}
+func TestEnsureCreatesWorkspaceWithoutAttaching(t *testing.T) {
+	m := &mockWorkspaceTmux{hasSession: false}
+	r := NewWorkspaceRunner(m)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, m.calls)
+	assert.Empty(t, m.attachedTo)
+	assert.Empty(t, m.switchedTo)
+}
+
+func TestEnsureAndAttachQueriesServerDefaultShell(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:         false,
+		globalDefaultShell: "/opt/homebrew/bin/fish",
+	}
 	r := NewWorkspaceRunner(m)
 
 	err := r.EnsureAndAttach(
@@ -168,7 +226,252 @@ func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
 
 	assert.Contains(t, m.calls,
 		[]string{"show-options", "-v", "-t", "workspace", "default-shell"},
-		"the first pane must use the target session's effective shell")
+		"the session-local shell must be checked first")
+	assert.Contains(t, m.calls,
+		[]string{"show-options", "-gv", "default-shell"},
+		"an inherited shell must fall back to the server value")
+	assert.Contains(t, m.calls,
+		[]string{
+			"respawn-pane", "-k", "-c", "/wt", "-t", "%1",
+			"/opt/homebrew/bin/fish", "-l",
+		})
+}
+
+func TestEnsureAndAttachPrefersSessionDefaultShell(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:          false,
+		sessionDefaultShell: "/bin/bash",
+		globalDefaultShell:  "/opt/homebrew/bin/fish",
+	}
+	r := NewWorkspaceRunner(m)
+
+	err := r.EnsureAndAttach(
+		context.Background(), "workspace", "/wt",
+		BlankLayout(), false,
+	)
+
+	require.NoError(t, err)
+	assert.NotContains(t, m.calls,
+		[]string{"show-options", "-gv", "default-shell"})
+	assert.Contains(t, m.calls,
+		[]string{
+			"respawn-pane", "-k", "-c", "/wt", "-t", "%1",
+			"/bin/bash", "-l",
+		})
+}
+
+func TestProtectedEnsureRejectsSensitiveServerEnvironment(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		globalEnv: "KWT_GITHUB_TOKEN=secret\nKWT_HOME=/tmp/kwt\n",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KWT_GITHUB_TOKEN")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRejectsUnverifiedExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession: true,
+		globalEnv:  "PATH=/bin\n",
+		sessionEnv: "PATH=/bin\n",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not verified")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRejectsSensitiveExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "CUSTOM_FLEET_TOKEN=secret\n",
+		sessionWorkspace: "/wt",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CUSTOM_FLEET_TOKEN")
+	assert.Empty(t, m.calls)
+}
+
+func TestProtectedEnsureRepairsVerifiedExistingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "PATH=/bin\n",
+		sessionWorkspace: "/wt",
+		sessionUpdateEnv: "DISPLAY SSH_AUTH_SOCK KWT_GITHUB_TOKEN CUSTOM_FLEET_TOKEN",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN", "CUSTOM_FLEET_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY SSH_AUTH_SOCK",
+	)}, m.calls)
+}
+
+func TestProtectedEnsureMarksCreatedSessionBeforeRespawn(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		globalEnv:       "PATH=/bin\n",
+		globalUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN SSH_AUTH_SOCK",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+
+	err := r.Ensure(
+		context.Background(),
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Contains(t, m.calls, buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY SSH_AUTH_SOCK",
+	))
+}
+
+func TestProtectedAttachRepairsPolicyAndDisablesEnvironmentUpdate(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		hasSession:       true,
+		globalEnv:        "PATH=/bin\n",
+		sessionEnv:       "PATH=/bin\n",
+		sessionWorkspace: "/wt",
+		sessionUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN KWT_FLEET_TOKEN",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := r.AttachProtected(
+		ctx,
+		"workspace",
+		"/wt",
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, ctx, m.protectedAttachCtx)
+	assert.Equal(t, "workspace", m.protectedAttachedTo)
+	assert.Empty(t, m.attachedTo)
+	assert.Equal(t, [][]string{buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY",
+	)}, m.calls)
+}
+
+func TestProtectedEnsureAndAttachCreatesMissingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		globalEnv:       "PATH=/bin\n",
+		globalUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := r.EnsureAndAttachProtected(
+		ctx,
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, ctx, m.protectedAttachCtx)
+	assert.Equal(t, "workspace", m.protectedAttachedTo)
+	assert.Contains(t, m.calls, BuildSessionCreateCommand(
+		"workspace",
+		"/wt",
+	))
+	assert.Contains(t, m.calls, buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY",
+	))
+}
+
+func TestProtectedWorkspaceSocketNameIsStableAndWorkspaceSpecific(t *testing.T) {
+	first := ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/a")
+
+	assert.Equal(t, first, ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/a"))
+	assert.NotEqual(t, first, ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/b"))
+	assert.Regexp(t, `^kwt-pr-[0-9a-f]{16}$`, first)
 }
 
 // TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing pins
@@ -181,7 +484,7 @@ func TestEnsureAndAttachQueriesSessionEffectiveDefaultShell(t *testing.T) {
 func TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing(t *testing.T) {
 	m := &mockWorkspaceTmux{
 		hasSession: true,
-		globalEnv:  "STARSHIP_SESSION_KEY=abc\nHOME=/home/u",
+		globalEnv:  "KWT_GITHUB_TOKEN=secret\nSTARSHIP_SESSION_KEY=abc\nHOME=/home/u",
 		sessionEnv: "VSCODE_GIT_IPC_HANDLE=/tmp/ipc\nPATH=/bin",
 	}
 	r := NewWorkspaceRunner(m)
@@ -192,7 +495,8 @@ func TestEnsureAndAttachRepairsExistingSessionBootstrapWithoutConstructing(t *te
 
 	want := [][]string{
 		expectedBootstrapCommand("s",
-			[]string{"STARSHIP_SESSION_KEY"}, []string{"VSCODE_GIT_IPC_HANDLE"}),
+			[]string{"KWT_GITHUB_TOKEN", "STARSHIP_SESSION_KEY"},
+			[]string{"VSCODE_GIT_IPC_HANDLE"}),
 	}
 	assert.Equal(t, want, m.calls, "existing session must be repaired but not re-created")
 	assert.Equal(t, 0, m.outputCalls, "repair issues no pane-capturing commands")
@@ -250,7 +554,7 @@ func TestEnsureAndAttachReturnsErrorOnCaptureFailure(t *testing.T) {
 // construction command failing must kill the now-partially-built session so
 // a subsequent EnsureAndAttach rebuilds instead of attaching to it broken.
 func TestEnsureAndAttachKillsPartialSessionOnCreateFailure(t *testing.T) {
-	m := &mockWorkspaceTmux{hasSession: false, failOutputOnCall: 3}
+	m := &mockWorkspaceTmux{hasSession: false, failOutputOnCall: 4}
 	r := NewWorkspaceRunner(m)
 	layout := models.Layout{Arrange: "even-horizontal", Panes: []string{"codex", "vim"}}
 
