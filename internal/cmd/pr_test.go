@@ -284,8 +284,36 @@ func TestRunPRImportWritesCreatedAndAlreadyImportedResults(t *testing.T) {
 			require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 			assert.Equal(t, status, got.Status)
 			assert.Equal(t, "https://github.com/acme/widget/pull/17", service.gotSelector)
+			socketName := tmux.ProtectedWorkspaceSocketName(
+				got.Workspace.SessionName,
+				got.Workspace.Path,
+			)
+			assert.Equal(t, socketName, got.Workspace.TmuxSocketName)
+			assert.Equal(
+				t,
+				socketName,
+				tryRequireWorkspace(t, got.PullRequest.Workspace).TmuxSocketName,
+			)
 		})
 	}
+}
+
+func TestProtectedPRWorkspaceSessionIgnoresConfiguredLayout(t *testing.T) {
+	cfg := &models.Config{
+		Layouts: models.LayoutsConfig{
+			Default: "project",
+			Presets: []models.Layout{{
+				Name:    "project",
+				Arrange: "tiled",
+				Panes:   []string{"make run-from-imported-checkout"},
+			}},
+		},
+	}
+
+	layout, err := preparePRWorkspaceSessionLayout(cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, tmux.BlankLayout(), layout)
 }
 
 func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
@@ -308,7 +336,16 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 		gotConfig *models.Config,
 	) (string, error) {
 		started = true
-		assert.Equal(t, workspace, got)
+		assert.Equal(t, workspace.Path, got.Path)
+		assert.Equal(t, workspace.SessionName, got.SessionName)
+		assert.Equal(
+			t,
+			tmux.ProtectedWorkspaceSocketName(
+				workspace.SessionName,
+				workspace.Path,
+			),
+			got.TmuxSocketName,
+		)
 		assert.Same(t, cfg, gotConfig)
 		return "kwt-pr-0123456789abcdef", nil
 	}

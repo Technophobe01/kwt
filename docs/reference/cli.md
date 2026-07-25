@@ -76,12 +76,13 @@ for pull-request clients. kwt owns provider calls, ref handling, branch and
 workspace naming, normal worktree creation and setup, push configuration,
 provenance, and tmux session naming. See [Pull-request
 automation](pull-requests.md) for the JSON and exit-status contract.
-`pr import --start-session` additionally establishes that canonical session
-without attaching, for clients that provide their own ordinary tmux
-presentation. Its workspace record includes `tmux_socket_name`; attach with
-`kwt pr attach <workspace.path>`, which verifies the persisted identity,
-creates or repairs the protected session when needed, and uses
-`attach-session -E`.
+Every imported workspace record includes `tmux_socket_name`.
+`pr import --start-session` additionally establishes a blank shell-only
+session without attaching, for clients that provide their own ordinary tmux
+presentation. It does not execute configured layouts or agent commands.
+Attach with `kwt pr attach <workspace.path>`, which verifies the persisted
+identity, creates or repairs that protected blank session when needed, and
+uses `attach-session -E`.
 
 ### Repository identity fallback
 
@@ -187,15 +188,15 @@ plus the remove-markers — never construction or pane commands), so a session
 another tool created bare converges on consistent behavior for windows opened
 after that attach.
 
-PR imports use a stricter reuse boundary. `pr import --start-session` records
-the canonical workspace path when it creates the session on a deterministic,
-workspace-specific socket and reuses only a same-named session with that exact
-marker. The isolated server starts without the provider or configured fleet
-credential. The protected session also masks those names and filters them from
-`update-environment`. Clients must use `kwt pr attach <workspace.path>`;
-because tmux options are mutable, that command creates or repairs the
-configured protected session and enforces `attach-session -E` rather than
-trusting the current option value.
+PR imports use a stricter reuse boundary. Every import reports a deterministic,
+workspace-specific socket. `pr import --start-session` and `pr attach` create
+one blank shell session, record the canonical workspace path, and reuse only a
+same-named session with that exact marker. They never execute configured layout
+or agent commands. The isolated server starts without the provider or
+configured fleet credential. The protected session also masks those names and
+filters them from `update-environment`. Because tmux options are mutable,
+`pr attach` enforces `attach-session -E` rather than trusting the current
+option value.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a
