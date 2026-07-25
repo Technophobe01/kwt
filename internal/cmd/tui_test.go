@@ -2612,6 +2612,60 @@ func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
 		"the workspace directory's .kwt.toml default must win over the global default")
 }
 
+func TestTUIBackendSerializesUnregisterWithFullLoad(t *testing.T) {
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: t.TempDir()},
+		Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	noEntries := func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverGlobalWorktrees = noEntries
+	backend.discoverProjectWorktrees = noEntries
+	backend.discoverLaunchWorktrees = noEntries
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.unregisterWorkspace = func(string) error { return nil }
+
+	collecting := make(chan struct{})
+	release := make(chan struct{})
+	backend.collectStatuses = func(
+		context.Context, string, []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		close(collecting)
+		<-release
+		return nil, nil
+	}
+
+	var listRows []dashboard.Row
+	var listErr error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		listRows, _, listErr = backend.List(context.Background())
+	}()
+	<-collecting
+
+	unregistered := make(chan error, 1)
+	go func() {
+		unregistered <- backend.UnregisterWorkspace(dashboard.Row{
+			Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+		})
+	}()
+
+	select {
+	case <-unregistered:
+		t.Fatal("unregister rewrote cfg.Workspaces while the full load was reading it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	<-listDone
+	require.NoError(t, listErr)
+	require.NoError(t, <-unregistered)
+	require.Len(t, listRows, 1, "the load that started first still sees the workspace")
+	assert.Equal(t, "notes", listRows[0].Workspace.Name)
+	assert.Empty(t, cfg.Workspaces)
+}
+
 func TestTUIBackendUnregisterWorkspace(t *testing.T) {
 	cfg := &models.Config{Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")

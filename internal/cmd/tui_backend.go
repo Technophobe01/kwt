@@ -1380,11 +1380,18 @@ func (b *tuiBackend) UnregisterWorkspace(row dashboard.Row) error {
 	if row.Workspace == nil {
 		return fmt.Errorf("no workspace selected")
 	}
+	// The TUI runs this concurrently with the load commands, which read
+	// cfg.Workspaces to build workspace rows and write the config file when
+	// they register the launch directory.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.unregisterWorkspace(row.Workspace.Name); err != nil {
 		return err
 	}
 	if b.cfg != nil {
-		kept := b.cfg.Workspaces[:0]
+		// A new slice, not a filter in place: rewriting the backing array is
+		// what turns a concurrent read into duplicated rows.
+		kept := make([]models.Workspace, 0, len(b.cfg.Workspaces))
 		for _, workspace := range b.cfg.Workspaces {
 			if !samePath(workspace.Path, row.Workspace.Path) {
 				kept = append(kept, workspace)
