@@ -863,6 +863,73 @@ func TestModelRejectsSecondCreateAtAPendingPath(t *testing.T) {
 	assert.Len(t, model.creating, 1)
 }
 
+// symlinkedWorktreeBase returns a base directory and a symlink to it, modelling
+// a worktree base the user reaches through a link: PreparePath keeps the link
+// spelling while Git reports the resolved one.
+func symlinkedWorktreeBase(t *testing.T) (real string, link string) {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	link = filepath.Join(t.TempDir(), "base")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symbolic links are not supported on this filesystem: %v", err)
+	}
+	return real, link
+}
+
+func TestModelMatchesPendingCreationAcrossSymlinkedPaths(t *testing.T) {
+	realBase, linkBase := symlinkedWorktreeBase(t)
+	previewPath := filepath.Join(linkBase, "feature")
+	discoveredPath := filepath.Join(realBase, "feature")
+
+	backend := &fakeBackend{createPath: previewPath}
+	model := NewModel(backend, realBase)
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	require.NotNil(t, createCmd)
+	require.Len(t, model.rows, 2)
+
+	// Git publishes the worktree and the next listing reports its resolved path
+	// while copy and setup commands are still running.
+	require.NoError(t, os.MkdirAll(discoveredPath, 0o755))
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature", discoveredPath),
+	}})
+
+	require.Len(t, model.rows, 2,
+		"the placeholder and the worktree it stands for must not both be listed")
+	index, ok := indexByPathOK(model.rows, discoveredPath)
+	require.True(t, ok)
+	assert.True(t, model.rows[index].Creating,
+		"the discovered worktree stays pending until its creation command returns")
+}
+
+func TestModelRejectsCreateAtASymlinkEquivalentPath(t *testing.T) {
+	realBase, linkBase := symlinkedWorktreeBase(t)
+	existingPath := filepath.Join(realBase, "feature")
+	require.NoError(t, os.MkdirAll(existingPath, 0o755))
+
+	backend := &fakeBackend{createPath: filepath.Join(linkBase, "feature")}
+	model := NewModel(backend, realBase)
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature", existingPath),
+	}})
+
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature"))
+	model, createCmd := updateModel(t, model, press("enter"))
+
+	assert.Nil(t, createCmd, "the destination is occupied however it is spelled")
+	assert.Contains(t, model.message, "worktree already exists at")
+	assert.Len(t, model.rows, 2)
+}
+
 func TestModelRejectsDeleteWhileWorktreeIsBeingCreated(t *testing.T) {
 	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
 	model := NewModel(backend, "/worktrees")

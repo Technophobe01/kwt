@@ -147,7 +147,7 @@ func launchPerspective(rows []Row, anchorPath string) string {
 // status's IsCurrent flag so the fast load, which has no statuses, resolves
 // the anchor as well as the full load does.
 func anchorRowIndex(rows []Row, anchorPath string) (int, bool) {
-	if index, ok := indexByPathOK(rows, anchorPath); ok {
+	if index, ok := identityRowIndex(rows, anchorPath); ok {
 		return index, true
 	}
 	if index, ok := containingRowIndex(rows, anchorPath); ok {
@@ -276,7 +276,9 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	newRows := m.filteredRows()
 
 	if m.anchorPath != "" {
-		if index, ok := indexByPathOK(newRows, m.anchorPath); ok {
+		// An anchor set by a completed action holds the path the backend
+		// computed, which Git may report back at its resolved spelling.
+		if index, ok := identityRowIndex(newRows, m.anchorPath); ok {
 			m.cursor = index
 			m.anchorPath = ""
 		} else if m.pendingRefresh {
@@ -392,25 +394,44 @@ func (m Model) startFetch() (Model, tea.Cmd) {
 // their creation command is still running. Git publishes a worktree before copy
 // and setup commands finish, so discovery alone does not mean creation is done.
 func mergeCreatingRows(rows, current []Row, creating []string) []Row {
+	// Identities cost a symlink resolution per row, so skip the merge entirely
+	// unless a creation is actually pending.
+	if len(creating) == 0 && !hasCreatingRow(current) {
+		return rows
+	}
 	inFlight := make(map[string]bool, len(creating))
 	for _, path := range creating {
-		inFlight[path] = true
+		if key := pathIdentity(path); key != "" {
+			inFlight[key] = true
+		}
 	}
 	seen := make(map[string]bool, len(rows))
 	for i := range rows {
-		path := rowPath(rows[i])
-		seen[path] = true
-		if inFlight[path] {
+		key := pathIdentity(rowPath(rows[i]))
+		if key == "" {
+			continue
+		}
+		seen[key] = true
+		if inFlight[key] {
 			rows[i].Creating = true
 		}
 	}
 	for _, row := range current {
-		path := rowPath(row)
-		if row.Creating && path != "" && !seen[path] {
+		key := pathIdentity(rowPath(row))
+		if row.Creating && key != "" && !seen[key] {
 			rows = append(rows, row)
 		}
 	}
 	return rows
+}
+
+func hasCreatingRow(rows []Row) bool {
+	for _, row := range rows {
+		if row.Creating {
+			return true
+		}
+	}
+	return false
 }
 
 func withoutPath(paths []string, path string) []string {
@@ -602,7 +623,7 @@ func (m Model) startCreateWorktree(row Row, branch string) (Model, tea.Cmd) {
 	// A second row at the same path would make the placeholder and the row it
 	// collides with indistinguishable, so a failed creation would roll back
 	// both. Git would reject the creation anyway; say so before starting it.
-	if index, ok := indexByPathOK(m.rows, pendingPath); ok {
+	if index, ok := identityRowIndex(m.rows, pendingPath); ok {
 		if m.rows[index].Creating {
 			m.message = fmt.Sprintf("%s is already being created", rowLabel(m.rows[index]))
 		} else {

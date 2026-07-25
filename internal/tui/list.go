@@ -758,6 +758,34 @@ func indexByPathOK(rows []Row, path string) (int, bool) {
 	return 0, false
 }
 
+// pathIdentity is the comparison key for rows that may be spelled differently
+// while naming one directory: a worktree created under a symlinked base
+// directory is reported by Git at its resolved path. A path that does not exist
+// yet keeps its spelling, which is what makes a planned destination compare
+// unequal to everything until Git creates it.
+func pathIdentity(path string) string {
+	if path == "" {
+		return ""
+	}
+	return utils.CanonicalPath(path)
+}
+
+// identityRowIndex finds the row naming the same directory as path, whichever
+// way either was spelled. Prefer indexByPathOK where both paths come from the
+// same source: this one resolves symlinks per row.
+func identityRowIndex(rows []Row, path string) (int, bool) {
+	key := pathIdentity(path)
+	if key == "" {
+		return 0, false
+	}
+	for i, row := range rows {
+		if pathIdentity(rowPath(row)) == key {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
 func clampCursor(cursor, length int) int {
 	if length <= 0 || cursor < 0 {
 		return 0
