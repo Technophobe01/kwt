@@ -594,8 +594,19 @@ func (m Model) startCreateWorktree(row Row, branch string) (Model, tea.Cmd) {
 		m.message = ""
 		return m, nil
 	}
-	planned.Creating = true
 	pendingPath := rowPath(planned)
+	// A second row at the same path would make the placeholder and the row it
+	// collides with indistinguishable, so a failed creation would roll back
+	// both. Git would reject the creation anyway; say so before starting it.
+	if index, ok := indexByPathOK(m.rows, pendingPath); ok {
+		if m.rows[index].Creating {
+			m.message = fmt.Sprintf("%s is already being created", rowLabel(m.rows[index]))
+		} else {
+			m.message = fmt.Sprintf("worktree already exists at %s", abbreviateHome(pendingPath))
+		}
+		return m, nil
+	}
+	planned.Creating = true
 	m.creating = append(m.creating, pendingPath)
 	m.rows = append(m.rows, planned)
 	sortRows(m.rows)

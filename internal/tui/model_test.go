@@ -814,6 +814,53 @@ func TestModelKeepsCreatingFlagWhenDiscoveryFindsPendingWorktree(t *testing.T) {
 		"the flag clears once the creation command returns")
 }
 
+func TestModelRejectsCreateAtAnExistingWorktreePath(t *testing.T) {
+	existing := "/w/kwt/feature"
+	backend := &fakeBackend{createPath: existing}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature", existing),
+	}})
+
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature"))
+	model, createCmd := updateModel(t, model, press("enter"))
+
+	assert.Nil(t, createCmd, "git would reject a worktree at an occupied path")
+	assert.Contains(t, model.message, "worktree already exists at")
+	require.Len(t, model.rows, 2, "no placeholder may share a path with an existing row")
+	index, ok := indexByPathOK(model.rows, existing)
+	require.True(t, ok)
+	assert.False(t, model.rows[index].Creating,
+		"the existing worktree must not be marked pending")
+}
+
+func TestModelRejectsSecondCreateAtAPendingPath(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kata", "main", "/w/kata/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-pending"))
+	model, _ = updateModel(t, model, press("enter"))
+	require.Len(t, model.rows, 3)
+
+	// The same destination reached from a different base repository while the
+	// first creation is still in flight.
+	model, _ = updateModel(t, model, press("G"))
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-pending"))
+	model, secondCmd := updateModel(t, model, press("enter"))
+
+	assert.Nil(t, secondCmd)
+	assert.Contains(t, model.message, "is already being created")
+	assert.Len(t, model.rows, 3, "the in-flight placeholder must not be duplicated")
+	assert.Len(t, model.creating, 1)
+}
+
 func TestModelRejectsDeleteWhileWorktreeIsBeingCreated(t *testing.T) {
 	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
 	model := NewModel(backend, "/worktrees")
