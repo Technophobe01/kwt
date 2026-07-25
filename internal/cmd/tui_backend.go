@@ -893,18 +893,19 @@ func fleetMaterializeObservation(observations []fleet.Observation, currentHost s
 	return fleet.Observation{}, false
 }
 
+// CreateWorktree resolves the destination itself rather than accepting the path
+// PreviewWorktree computed. A custom destination is treated as user input and
+// gets environment expansion, which would turn a repository-generated name
+// containing an environment reference into the referenced value.
 func (b *tuiBackend) CreateWorktree(
 	ctx context.Context,
 	row dashboard.Row,
 	branch string,
-	destination string,
 ) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(
-		branch, destination, true,
-	)
+	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
 	if err != nil {
 		return "", err
 	}

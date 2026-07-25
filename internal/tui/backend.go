@@ -69,8 +69,12 @@ type Backend interface {
 	// merged rows plus hub warnings. When sync is disabled it returns rows
 	// unchanged.
 	MergeFleet(ctx context.Context, rows []Row) ([]Row, []string)
+	// PreviewWorktree resolves where CreateWorktree will place the worktree so
+	// the dashboard can show it before Git and setup finish. The returned path
+	// is a display value only: passing it back as a destination would re-run
+	// path resolution over an already-resolved path.
 	PreviewWorktree(row Row, branch string) (Row, error)
-	CreateWorktree(ctx context.Context, row Row, branch, destination string) (string, error)
+	CreateWorktree(ctx context.Context, row Row, branch string) (string, error)
 	MaterializeWorktree(ctx context.Context, row Row) (string, error)
 	RemoveWorktree(ctx context.Context, row Row, force bool) error
 	UnregisterWorkspace(row Row) error

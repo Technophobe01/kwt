@@ -95,8 +95,12 @@ type Model struct {
 	err                 error
 	handoff             Handoff
 	anchorPath          string
-	width               int
-	height              int
+	// creating holds the destinations of worktree creations whose command has
+	// not returned yet. Git publishes a worktree before copy and setup commands
+	// finish, so a discovered row is not proof that creation is complete.
+	creating []string
+	width    int
+	height   int
 }
 
 func NewModel(backend Backend, baseDir string) Model {
@@ -128,17 +132,28 @@ func (m Model) WithInitialAnchor(path string) Model {
 }
 
 // launchPerspective resolves the project key of the row the TUI was launched
-// from: an exact anchor path match (repo root or workspace), else the row
-// whose worktree contains the launch directory. Empty when launched outside
-// any known worktree, which leaves the view unscoped.
+// from. Empty when launched outside any known worktree, which leaves the view
+// unscoped.
 func launchPerspective(rows []Row, anchorPath string) string {
-	if index, ok := indexByPathOK(rows, anchorPath); ok {
-		return rowProjectKey(rows[index])
-	}
-	if index, ok := currentRowIndex(rows); ok {
+	if index, ok := anchorRowIndex(rows, anchorPath); ok {
 		return rowProjectKey(rows[index])
 	}
 	return ""
+}
+
+// anchorRowIndex resolves the row the anchor path belongs to: an exact path
+// match (repo root or workspace), else the row whose directory contains the
+// anchor. Containment is resolved from row paths rather than the collected
+// status's IsCurrent flag so the fast load, which has no statuses, resolves
+// the anchor as well as the full load does.
+func anchorRowIndex(rows []Row, anchorPath string) (int, bool) {
+	if index, ok := indexByPathOK(rows, anchorPath); ok {
+		return index, true
+	}
+	if index, ok := containingRowIndex(rows, anchorPath); ok {
+		return index, true
+	}
+	return currentRowIndex(rows)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -248,7 +263,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	oldCursor := m.cursor
 	hadRows := len(m.rows) > 0
 	rows := append([]Row(nil), msg.rows...)
-	rows = appendMissingCreatingRows(rows, m.rows)
+	rows = mergeCreatingRows(rows, m.rows, m.creating)
 	sortRows(rows)
 	m.rows = rows
 	if !hadRows && m.anchorPath != "" {
@@ -263,10 +278,12 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 		} else if m.pendingRefresh {
 			m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
 		} else if !hadRows {
-			// An initial anchor that matches nothing keeps the first-load
-			// behavior of selecting the current worktree.
+			// An initial anchor pointing inside a worktree selects that
+			// worktree; one that matches nothing keeps the first-load behavior
+			// of selecting the current worktree.
+			anchor := m.anchorPath
 			m.anchorPath = ""
-			if index, ok := currentRowIndex(newRows); ok {
+			if index, ok := anchorRowIndex(newRows, anchor); ok {
 				m.cursor = index
 			} else {
 				m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
@@ -306,7 +323,7 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 	oldRows := m.filteredRows()
 	oldCursor := m.cursor
 	rows := append([]Row(nil), msg.rows...)
-	rows = appendMissingCreatingRows(rows, m.rows)
+	rows = mergeCreatingRows(rows, m.rows, m.creating)
 	sortRows(rows)
 	m.rows = rows
 	m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
@@ -314,6 +331,9 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
+	if msg.pendingPath != "" {
+		m.creating = withoutPath(m.creating, msg.pendingPath)
+	}
 	if msg.err != nil {
 		if msg.pendingPath != "" {
 			m.rows = removeRowByPath(m.rows, msg.pendingPath)
@@ -322,6 +342,12 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		m.message = ""
 		return m, nil
+	}
+	if msg.pendingPath != "" && msg.anchorPath != "" && msg.pendingPath != msg.anchorPath {
+		// The preview mispredicted the destination; drop the row it added so it
+		// cannot outlive the creation it stood in for.
+		m.rows = removeRowByPath(m.rows, msg.pendingPath)
+		m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
 	}
 	m.err = nil
 	m.message = msg.message
@@ -357,10 +383,22 @@ func (m Model) startFetch() (Model, tea.Cmd) {
 	return m, m.fetchFastRowsCmd()
 }
 
-func appendMissingCreatingRows(rows, current []Row) []Row {
+// mergeCreatingRows keeps pending creations visible across a listing that has
+// not discovered them yet, and re-flags the ones a listing did discover while
+// their creation command is still running. Git publishes a worktree before copy
+// and setup commands finish, so discovery alone does not mean creation is done.
+func mergeCreatingRows(rows, current []Row, creating []string) []Row {
+	inFlight := make(map[string]bool, len(creating))
+	for _, path := range creating {
+		inFlight[path] = true
+	}
 	seen := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		seen[rowPath(row)] = true
+	for i := range rows {
+		path := rowPath(rows[i])
+		seen[path] = true
+		if inFlight[path] {
+			rows[i].Creating = true
+		}
 	}
 	for _, row := range current {
 		path := rowPath(row)
@@ -369,6 +407,16 @@ func appendMissingCreatingRows(rows, current []Row) []Row {
 		}
 	}
 	return rows
+}
+
+func withoutPath(paths []string, path string) []string {
+	kept := make([]string, 0, len(paths))
+	for _, candidate := range paths {
+		if candidate != path {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
 }
 
 func removeRowByPath(rows []Row, path string) []Row {
@@ -547,11 +595,13 @@ func (m Model) startCreateWorktree(row Row, branch string) (Model, tea.Cmd) {
 		return m, nil
 	}
 	planned.Creating = true
+	pendingPath := rowPath(planned)
+	m.creating = append(m.creating, pendingPath)
 	m.rows = append(m.rows, planned)
 	sortRows(m.rows)
-	m.cursor = indexByPath(m.filteredRows(), rowPath(planned))
+	m.cursor = indexByPath(m.filteredRows(), pendingPath)
 	m.message = fmt.Sprintf("creating %s", branch)
-	return m, m.createWorktreeCmd(row, branch, rowPath(planned))
+	return m, m.createWorktreeCmd(row, branch, pendingPath)
 }
 
 func (m Model) handlePaste(msg tea.PasteMsg) (Model, tea.Cmd) {
@@ -723,6 +773,10 @@ func (m Model) cycleLayout() (Model, tea.Cmd) {
 
 func (m Model) startNewBranch() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Creating {
+		m.message = "worktree is still being created"
+		return m, nil
+	}
 	if row.Workspace != nil {
 		m.message = "not a git worktree"
 		return m, nil
@@ -808,6 +862,10 @@ func (m Model) cursorAfterProjectChange(selectedPath string) int {
 
 func (m Model) startDelete() (Model, tea.Cmd) {
 	row := m.selectedRow()
+	if row.Creating {
+		m.message = "worktree is still being created"
+		return m, nil
+	}
 	if row.Workspace != nil {
 		m.confirm = confirmState{
 			kind: confirmUnregister,
@@ -905,9 +963,7 @@ func (m Model) fleetRowsCmd(ctx context.Context, seq int, rows []Row) tea.Cmd {
 
 func (m Model) createWorktreeCmd(row Row, branch, pendingPath string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := m.backend.CreateWorktree(
-			context.Background(), row, branch, pendingPath,
-		)
+		path, err := m.backend.CreateWorktree(context.Background(), row, branch)
 		if err != nil {
 			return actionDoneMsg{err: err, pendingPath: pendingPath}
 		}

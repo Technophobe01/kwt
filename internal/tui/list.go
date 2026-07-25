@@ -723,6 +723,27 @@ func indexByPath(rows []Row, path string) int {
 	return index
 }
 
+// containingRowIndex returns the row whose directory contains path, preferring
+// the deepest match so a nested worktree wins over the repository that holds it.
+func containingRowIndex(rows []Row, target string) (int, bool) {
+	best := -1
+	bestLen := 0
+	for i, row := range rows {
+		rowDir := rowPath(row)
+		if rowDir == "" || !strings.HasPrefix(target, rowDir+string(filepath.Separator)) {
+			continue
+		}
+		if len(rowDir) > bestLen {
+			best = i
+			bestLen = len(rowDir)
+		}
+	}
+	if best < 0 {
+		return 0, false
+	}
+	return best, true
+}
+
 func indexByPathOK(rows []Row, path string) (int, bool) {
 	for i, row := range rows {
 		if rowPath(row) == path {

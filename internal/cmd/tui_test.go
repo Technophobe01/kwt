@@ -1597,16 +1597,44 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 		Path:   repoPath,
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
-	destination := filepath.Join(cfg.Worktree.BaseDir, "feature-from-tui")
 
-	path, err := backend.CreateWorktree(
-		context.Background(), row, "feature/from-tui", destination,
-	)
+	path, err := backend.CreateWorktree(context.Background(), row, "feature/from-tui")
 
 	require.NoError(t, err)
-	assert.Equal(t, destination, path)
 	assert.DirExists(t, path)
 	assert.Equal(t, 1, published)
+}
+
+func TestTUIBackendCreateWorktreeDoesNotExpandRepositoryLocalTemplate(t *testing.T) {
+	const secret = "credential-must-not-appear-in-path"
+	t.Setenv("KWT_GITHUB_TOKEN", secret)
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Naming: models.NamingConfig{
+			Template:        `{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}`,
+			RepositoryLocal: true,
+		},
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch: "main",
+		Path:   repoPath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	planned, err := backend.PreviewWorktree(row, "feature/from-tui")
+	require.NoError(t, err)
+	path, err := backend.CreateWorktree(context.Background(), row, "feature/from-tui")
+
+	require.NoError(t, err)
+	assert.NotContains(t, path, secret,
+		"a repository-generated name must not have its environment references expanded")
+	assert.Contains(t, path, "$KWT_GITHUB_TOKEN")
+	assert.Equal(t, planned.Entry.Path, path,
+		"the optimistic row's path must match where creation lands")
+	assert.DirExists(t, path)
 }
 
 func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {

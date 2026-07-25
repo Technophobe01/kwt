@@ -32,7 +32,6 @@ type fakeBackend struct {
 	mergeFleetCalls int
 	mergeCtx        context.Context
 	createCalls     []string
-	createPaths     []string
 	materializeRows []string
 	removeCalls     []string
 	removeForces    []bool
@@ -57,9 +56,8 @@ func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []stri
 	return append(append([]Row(nil), rows...), b.fleetRows...), b.fleetWarnings
 }
 
-func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch, destination string) (string, error) {
+func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
 	b.createCalls = append(b.createCalls, rowPath(row)+":"+branch)
-	b.createPaths = append(b.createPaths, destination)
 	return b.createPath, b.createErr
 }
 
@@ -717,7 +715,6 @@ func TestModelShowsNewWorktreeWhileCreateIsInFlight(t *testing.T) {
 
 	_ = createCmd()
 	assert.Equal(t, []string{"/w/kwt/main:feature-fast"}, backend.createCalls)
-	assert.Equal(t, []string{"/w/kwt/feature-fast"}, backend.createPaths)
 }
 
 func TestModelRemovesOptimisticWorktreeWhenCreateFails(t *testing.T) {
@@ -779,6 +776,79 @@ func TestModelKeepsCreatedWorktreeUntilRefreshFindsIt(t *testing.T) {
 	assert.Equal(t, "/w/kwt/feature-created", rowPath(model.selectedRow()))
 	assert.True(t, model.selectedRow().Creating,
 		"the optimistic row stays pending until a fresh listing confirms it")
+}
+
+func TestModelKeepsCreatingFlagWhenDiscoveryFindsPendingWorktree(t *testing.T) {
+	pendingPath := "/w/kwt/feature-discovered"
+	backend := &fakeBackend{createPath: pendingPath}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-discovered"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	require.NotNil(t, createCmd)
+
+	// Git publishes the worktree before copy and setup commands finish, so a
+	// listing can discover it while creation is still running.
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature-discovered", pendingPath),
+	}})
+
+	require.Equal(t, pendingPath, rowPath(model.selectedRow()))
+	assert.True(t, model.selectedRow().Creating,
+		"a discovered worktree stays pending until its creation command returns")
+
+	model, _ = updateModel(t, model, press("enter"))
+	assert.Equal(t, "worktree is still being created", model.message)
+	assert.Empty(t, backend.openCalls)
+
+	model, _ = updateModel(t, model, createCmd())
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature-discovered", pendingPath),
+	}})
+	assert.False(t, model.selectedRow().Creating,
+		"the flag clears once the creation command returns")
+}
+
+func TestModelRejectsDeleteWhileWorktreeIsBeingCreated(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-pending"))
+	model, _ = updateModel(t, model, press("enter"))
+	require.True(t, model.selectedRow().Creating)
+
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmNone, model.confirm.kind,
+		"removing a worktree mid-creation would race git worktree add and setup")
+	assert.Equal(t, "worktree is still being created", model.message)
+	assert.Empty(t, backend.removeCalls)
+}
+
+func TestModelRejectsNewBranchWhileWorktreeIsBeingCreated(t *testing.T) {
+	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-pending"))
+	model, _ = updateModel(t, model, press("enter"))
+	require.True(t, model.selectedRow().Creating)
+
+	model, _ = updateModel(t, model, press("n"))
+
+	assert.Equal(t, inputNone, model.inputMode,
+		"the pending directory has no repository to branch from yet")
+	assert.Equal(t, "worktree is still being created", model.message)
 }
 
 func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
@@ -1121,6 +1191,57 @@ func TestLaunchProjectPerspectiveFallsBackToCurrentRow(t *testing.T) {
 	rows := model.filteredRows()
 	require.Len(t, rows, 1, "launching from inside a worktree must filter to its repo")
 	assert.Equal(t, "/w/kata/feature", rowPath(rows[0]))
+}
+
+// The fast load carries no collected statuses, so IsCurrent is never set on its
+// rows. Containment has to come from the row paths or launching from a
+// subdirectory loses both the perspective and the selection.
+func TestFastLoadResolvesAnchorInsideWorktreeWithoutStatuses(t *testing.T) {
+	other := testRow("kwt", "main", "/w/kwt/main")
+	other.Status.LastActivity = time.Now()
+	launch := testRow("kata", "feature", "/w/kata/feature")
+	launch.Status.IsCurrent = false
+	backend := &fakeBackend{rows: []Row{other, launch}}
+	model := NewModel(backend, "/worktrees").WithInitialAnchor("/w/kata/feature/sub/dir")
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: backend.rows})
+
+	rows := model.filteredRows()
+	require.Len(t, rows, 1, "the fast load must scope the view to the launch repo")
+	assert.Equal(t, "/w/kata/feature", rowPath(rows[0]))
+	assert.Equal(t, "/w/kata/feature", rowPath(model.selectedRow()))
+
+	// The full load that follows keeps the resolved selection.
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{other, launch}})
+	assert.Equal(t, "/w/kata/feature", rowPath(model.selectedRow()))
+}
+
+func TestAnchorPrefersDeepestContainingWorktree(t *testing.T) {
+	// The containing repository sorts first, so only depth-preferring
+	// containment can select the nested worktree.
+	repo := testRow("kwt", "main", "/w/kwt/main")
+	repo.Status.LastActivity = time.Now()
+	nested := testRow("dep", "main", "/w/kwt/main/vendor/dep")
+	model := NewModel(&fakeBackend{}, "/worktrees").
+		WithInitialAnchor("/w/kwt/main/vendor/dep/internal")
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{repo, nested}})
+
+	assert.Equal(t, "/w/kwt/main/vendor/dep", rowPath(model.selectedRow()),
+		"a nested worktree must win over the repository that contains it")
+}
+
+func TestAnchorIgnoresSiblingPathPrefix(t *testing.T) {
+	sibling := testRow("kwt", "feat", "/w/kwt/feat")
+	unrelated := testRow("kata", "main", "/w/kata/main")
+	model := NewModel(&fakeBackend{}, "/worktrees").
+		WithInitialAnchor("/w/kwt/feat-two/sub")
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{sibling, unrelated}})
+
+	assert.Empty(t, model.projectPerspective,
+		"/w/kwt/feat must not be treated as containing /w/kwt/feat-two/sub")
+	assert.Len(t, model.filteredRows(), 2)
 }
 
 func TestNoLaunchProjectPerspectiveOutsideAnyRepo(t *testing.T) {
