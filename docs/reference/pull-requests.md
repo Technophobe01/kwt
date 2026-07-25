@@ -22,24 +22,26 @@ kwt pr import 17 --project github.com/acme/widget \
   --start-session --json
 ```
 
-`--start-session` creates or repairs the `session_name` returned by the import
-using kwt's configured default layout and workspace bootstrap, then leaves it
-detached for the caller. The response also includes `tmux_socket_name`; clients
-must attach through kwt's protected path:
+Every successful import response includes the deterministic
+`tmux_socket_name`, whether or not a session was started. `--start-session`
+creates or repairs the returned `session_name` as a single blank shell session
+and leaves it detached for the caller. It never runs configured layouts, agent
+commands, or commands from the imported checkout. Clients must attach through
+kwt's protected path:
 
 ```sh
 kwt pr attach <workspace.path>
 ```
 
 The attach command resolves the persisted workspace identity, verifies the
-recorded project clone and exact live worktree identity, validates the current
-layout configuration, and creates or repairs the session on its isolated
-server before executing `attach-session -E` so tmux cannot import client
-environment variables. This makes the command converge imports created without
-`--start-session`, imports whose startup failed, and sessions that disappeared
-after import. A parent tmux client identity is removed before attachment, so
-the command also works when invoked from a pane connected to another tmux
-server. A
+recorded project clone and exact live worktree identity, and creates or repairs
+a single blank shell session on its isolated server before executing
+`attach-session -E` so tmux cannot import client environment variables. It
+never runs configured layout or agent commands. This makes the command converge
+imports created without `--start-session`, imports whose startup failed, and
+sessions that disappeared after import. A parent tmux client identity is
+removed before attachment, so the command also works when invoked from a pane
+connected to another tmux server. A
 deleted project, reused path, or branch, repository, or session-name mismatch
 fails closed. Prunable entries and paths without a live Git worktree are not
 accepted. The registered project's canonical identity remains authoritative
@@ -50,10 +52,9 @@ conflicting registrations fail closed. Ordinary `kwt open` and dashboard open
 actions refuse imported workspaces because they use the normal tmux server;
 use `kwt pr attach <workspace.path>` instead. The protected attach path is
 idempotent for an already imported worktree or a verified session that kwt
-created for the same workspace. Kwt validates layout and agent configuration
-before import mutation. If runtime session establishment fails after the
-import becomes durable, the command still exits successfully and returns the
-imported workspace with an explicit
+created for the same workspace. If runtime session establishment fails after
+the import becomes durable, the command still exits successfully and returns
+the imported workspace with an explicit
 `session_start_error`:
 
 ```json
