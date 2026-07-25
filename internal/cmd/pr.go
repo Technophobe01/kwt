@@ -552,6 +552,10 @@ func defaultAttachPRWorkspaceSession(
 		strings.TrimSpace(workspace.SessionName) == "" {
 		return fmt.Errorf("imported workspace has no tmux identity")
 	}
+	layout, err := preparePRWorkspaceSessionLayout(cfg)
+	if err != nil {
+		return err
+	}
 	stripNames := protectedCredentialNames(cfg)
 	socketName := tmux.ProtectedWorkspaceSocketName(
 		workspace.SessionName,
@@ -565,10 +569,11 @@ func defaultAttachPRWorkspaceSession(
 	return tmux.NewProtectedWorkspaceRunner(
 		tmuxCommand,
 		stripNames,
-	).AttachProtected(
+	).EnsureAndAttachProtected(
 		ctx,
 		workspace.SessionName,
 		workspace.Path,
+		layout,
 	)
 }
 

@@ -162,6 +162,26 @@ func (r *WorkspaceRunner) AttachProtected(
 	return r.tmux.AttachSessionWithoutEnvironment(ctx, session)
 }
 
+// EnsureAndAttachProtected creates or repairs a protected workspace session
+// before attaching without tmux's client-environment update. This is the
+// convergent open path for persisted PR imports: the isolated session may not
+// exist yet when import omitted startup, or may have disappeared since import.
+func (r *WorkspaceRunner) EnsureAndAttachProtected(
+	ctx context.Context,
+	session, worktreeDir string,
+	layout models.Layout,
+) error {
+	if !r.protected {
+		return fmt.Errorf(
+			"protected attachment requires a protected workspace runner",
+		)
+	}
+	if err := r.Ensure(ctx, session, worktreeDir, layout); err != nil {
+		return err
+	}
+	return r.tmux.AttachSessionWithoutEnvironment(ctx, session)
+}
+
 func (r *WorkspaceRunner) validateProtectedState(
 	session, worktreeDir string,
 	sessionExists bool,

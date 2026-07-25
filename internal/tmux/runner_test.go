@@ -428,6 +428,44 @@ func TestProtectedAttachRepairsPolicyAndDisablesEnvironmentUpdate(t *testing.T) 
 	)}, m.calls)
 }
 
+func TestProtectedEnsureAndAttachCreatesMissingSession(t *testing.T) {
+	m := &mockWorkspaceTmux{
+		globalEnv:       "PATH=/bin\n",
+		globalUpdateEnv: "DISPLAY KWT_GITHUB_TOKEN",
+	}
+	r := NewProtectedWorkspaceRunner(
+		m,
+		[]string{"KWT_GITHUB_TOKEN"},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := r.EnsureAndAttachProtected(
+		ctx,
+		"workspace",
+		"/wt",
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, ctx, m.protectedAttachCtx)
+	assert.Equal(t, "workspace", m.protectedAttachedTo)
+	assert.Contains(t, m.calls, BuildSessionCreateCommand(
+		"workspace",
+		"/wt",
+	))
+	assert.Contains(t, m.calls, buildProtectedSessionBootstrapCommand(
+		"workspace",
+		"/wt",
+		MergeStripNames(
+			CanonicalStripExactNames(),
+			[]string{"KWT_GITHUB_TOKEN"},
+			StripEnvNames(os.Environ()),
+		),
+		"DISPLAY",
+	))
+}
+
 func TestProtectedWorkspaceSocketNameIsStableAndWorkspaceSpecific(t *testing.T) {
 	first := ProtectedWorkspaceSocketName("kwt-workspace-a", "/worktrees/a")
 

@@ -79,8 +79,9 @@ automation](pull-requests.md) for the JSON and exit-status contract.
 `pr import --start-session` additionally establishes that canonical session
 without attaching, for clients that provide their own ordinary tmux
 presentation. Its workspace record includes `tmux_socket_name`; attach with
-`kwt pr attach <workspace.path>`, which verifies the persisted identity and
-uses `attach-session -E`.
+`kwt pr attach <workspace.path>`, which verifies the persisted identity,
+creates or repairs the protected session when needed, and uses
+`attach-session -E`.
 
 ### Repository identity fallback
 
@@ -192,8 +193,9 @@ workspace-specific socket and reuses only a same-named session with that exact
 marker. The isolated server starts without the provider or configured fleet
 credential. The protected session also masks those names and filters them from
 `update-environment`. Clients must use `kwt pr attach <workspace.path>`;
-because tmux options are mutable, that command repairs the policy and enforces
-`attach-session -E` rather than trusting the current option value.
+because tmux options are mutable, that command creates or repairs the
+configured protected session and enforces `attach-session -E` rather than
+trusting the current option value.
 
 The repair path deliberately does not rewrite panes in an externally created
 session that is already running; it only makes future windows consistent. In a
