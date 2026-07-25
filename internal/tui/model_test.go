@@ -1219,6 +1219,72 @@ func TestModelQueuesActionRefreshWhileFetchInFlight(t *testing.T) {
 	assert.IsType(t, fastRowsMsg{}, msg)
 }
 
+func TestFastRefreshKeepsEnrichmentWhenFullLoadFails(t *testing.T) {
+	enriched := testRow("kwt", "feature", "/w/kwt/feature")
+	enriched.Status.GitStatus.Modified = 3
+	enriched.Status.LastActivity = time.Now()
+	enriched.Fleet = &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		Hosts:           []string{"host-b"},
+	}
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+		CanMaterialize:  true,
+	}}
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{enriched}})
+	model, _ = updateModel(t, model, fleetRowsMsg{seq: model.loadSeq, rows: []Row{enriched, remoteOnly}})
+	require.Len(t, model.rows, 2)
+
+	// A refresh repaints from the fast load, which reports the worktree with no
+	// status and no hub state at all.
+	bare := testRow("kwt", "feature", "/w/kwt/feature")
+	bare.Status.GitStatus = models.GitStatus{}
+	bare.Status.LastActivity = time.Time{}
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{bare}})
+	model, _ = updateModel(t, model, rowsMsg{err: errors.New("status collection failed")})
+
+	require.Len(t, model.rows, 2, "the remote-only row must outlive a failed full load")
+	index, ok := indexByPathOK(model.rows, "/w/kwt/feature")
+	require.True(t, ok)
+	assert.Equal(t, 3, model.rows[index].Status.GitStatus.Modified,
+		"the last collected status is better than none while the load is broken")
+	assert.NotNil(t, model.rows[index].Fleet, "fleet metadata must survive the fast repaint")
+	assert.Contains(t, stripANSI(viewContent(model)), "status collection failed")
+}
+
+func TestFastRefreshDropsRemoteRowThatBecameLocal(t *testing.T) {
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+		CanMaterialize:  true,
+	}}
+	local := testRow("kwt", "feature/remote", "/w/kwt/feature-remote")
+	local.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+	require.Len(t, model.rows, 1)
+
+	// Materializing it makes the next fast load report it as a local worktree.
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{local}})
+
+	require.Len(t, model.rows, 1,
+		"a materialized worktree must not appear as both a local and a remote row")
+	assert.NotNil(t, model.rows[0].Entry)
+}
+
 func TestModelKeepsQueuedActionRefreshWhenFastLoadFails(t *testing.T) {
 	backend := &fakeBackend{
 		rows: []Row{testRow("kwt", "feature", "/w/kwt/feature")},

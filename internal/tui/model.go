@@ -237,7 +237,11 @@ func (m Model) filteredRows() []Row {
 func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 	pendingRefresh := m.pendingRefresh
 	m.pendingRefresh = false
-	next, _ := m.applyRows(rowsMsg(msg))
+	next, _ := m.applyRows(rowsMsg{
+		rows:     carryEnrichment(msg.rows, m.rows),
+		warnings: msg.warnings,
+		err:      msg.err,
+	})
 	next = next.cancelFleetMerge()
 	next.fleetPending = false
 	if msg.err != nil {
@@ -253,6 +257,48 @@ func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 	}
 	next.fetching = true
 	return next, next.fetchRowsCmd()
+}
+
+// carryEnrichment keeps what a fast load cannot know. ListFast is authoritative
+// about which worktrees exist locally, but it collects no statuses and no hub
+// state, so rows it lists keep the status and fleet overlay the last full load
+// gave them, and remote-only rows survive until a fleet merge revises them.
+// Without this a refresh would strip a populated dashboard back to bare rows,
+// and a full load that then failed would leave it that way.
+func carryEnrichment(fast, previous []Row) []Row {
+	if len(previous) == 0 || len(fast) == 0 {
+		return fast
+	}
+	enriched := make(map[string]Row, len(previous))
+	for _, row := range previous {
+		if path := rowPath(row); path != "" {
+			enriched[path] = row
+		}
+	}
+
+	rows := make([]Row, 0, len(fast))
+	discovered := make(map[string]bool, len(fast))
+	for _, row := range fast {
+		if identity := fleetIdentity(row); identity != "" {
+			discovered[identity] = true
+		}
+		if before, ok := enriched[rowPath(row)]; ok {
+			if before.Status != nil {
+				row.Status = before.Status
+			}
+			row.Fleet = before.Fleet
+		}
+		rows = append(rows, row)
+	}
+
+	for _, row := range previous {
+		// A remote-only row whose worktree the fast load just found on disk has
+		// become local; the local row carries it now.
+		if isRemoteOnly(row) && !discovered[fleetIdentity(row)] {
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {

@@ -63,6 +63,24 @@ func rowBranch(row Row) string {
 	return ""
 }
 
+// fleetIdentity keys one worktree across its local and remote-only shapes: the
+// same branch of the same project is one worktree whether it was found on disk
+// or reported by the hub. Empty when a row carries too little to be matched.
+func fleetIdentity(row Row) string {
+	project := rowProjectKey(row)
+	branch := rowBranch(row)
+	if project == "" || branch == "" {
+		return ""
+	}
+	return project + "\x00" + branch
+}
+
+// isRemoteOnly reports whether a row exists only as hub state, with nothing on
+// this machine behind it.
+func isRemoteOnly(row Row) bool {
+	return row.Entry == nil && row.Workspace == nil && row.Fleet != nil
+}
+
 func rowPath(row Row) string {
 	if row.Workspace != nil {
 		return row.Workspace.Path
