@@ -723,19 +723,24 @@ func indexByPath(rows []Row, path string) int {
 	return index
 }
 
-// containingRowIndex returns the row whose directory contains path, preferring
-// the deepest match so a nested worktree wins over the repository that holds it.
+// containingRowIndex returns the row whose directory contains target,
+// preferring the deepest match so a nested worktree wins over the repository
+// that holds it. Containment uses the same canonicalizing comparison the status
+// collector uses to set IsCurrent, so the statusless fast load resolves a
+// launch directory exactly as the full load would.
 func containingRowIndex(rows []Row, target string) (int, bool) {
 	best := -1
-	bestLen := 0
+	bestDepth := 0
 	for i, row := range rows {
 		rowDir := rowPath(row)
-		if rowDir == "" || !strings.HasPrefix(target, rowDir+string(filepath.Separator)) {
+		if rowDir == "" || !utils.IsSameOrChildPath(target, rowDir) {
 			continue
 		}
-		if len(rowDir) > bestLen {
+		// Rank on the canonical form: raw lengths would compare spellings
+		// rather than depth.
+		if depth := len(utils.CanonicalPath(rowDir)); depth > bestDepth {
 			best = i
-			bestLen = len(rowDir)
+			bestDepth = depth
 		}
 	}
 	if best < 0 {

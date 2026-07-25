@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1307,6 +1309,34 @@ func TestAnchorPrefersDeepestContainingWorktree(t *testing.T) {
 
 	assert.Equal(t, "/w/kwt/main/vendor/dep", rowPath(model.selectedRow()),
 		"a nested worktree must win over the repository that contains it")
+}
+
+// The launch directory is symlink-resolved before it becomes the anchor, but
+// discovered row paths are not, so the two spellings of one directory only
+// match under a canonicalizing comparison.
+func TestAnchorResolvesWorktreeReachedThroughSymlink(t *testing.T) {
+	realDir := t.TempDir()
+	worktreeDir := filepath.Join(realDir, "kata-feature")
+	launchDir := filepath.Join(worktreeDir, "internal")
+	require.NoError(t, os.MkdirAll(launchDir, 0o755))
+
+	linkRoot := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkRoot); err != nil {
+		t.Skipf("symbolic links are not supported on this filesystem: %v", err)
+	}
+	resolvedLaunch, err := filepath.EvalSymlinks(launchDir)
+	require.NoError(t, err)
+
+	other := testRow("kwt", "main", "/w/kwt/main")
+	other.Status.LastActivity = time.Now()
+	// The row path reaches the same directory through the symlink.
+	launch := testRow("kata", "feature", filepath.Join(linkRoot, "kata-feature"))
+
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor(resolvedLaunch)
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{other, launch}})
+
+	assert.Equal(t, rowPath(launch), rowPath(model.selectedRow()),
+		"a symlinked ancestor must not hide the worktree containing the launch directory")
 }
 
 func TestAnchorIgnoresSiblingPathPrefix(t *testing.T) {
