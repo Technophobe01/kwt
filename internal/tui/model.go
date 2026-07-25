@@ -342,8 +342,7 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 	}
 	if msg.err != nil {
 		if msg.pendingPath != "" {
-			m.rows = removeRowByPath(m.rows, msg.pendingPath)
-			m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+			m = m.dropPendingRow(msg.pendingPath)
 		}
 		m.err = msg.err
 		m.message = ""
@@ -352,8 +351,7 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 	if msg.pendingPath != "" && msg.anchorPath != "" && msg.pendingPath != msg.anchorPath {
 		// The preview mispredicted the destination; drop the row it added so it
 		// cannot outlive the creation it stood in for.
-		m.rows = removeRowByPath(m.rows, msg.pendingPath)
-		m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+		m = m.dropPendingRow(msg.pendingPath)
 	}
 	m.err = nil
 	m.message = msg.message
@@ -368,6 +366,19 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 		return m.startFetch()
 	}
 	return m, nil
+}
+
+// dropPendingRow removes an optimistic creation row and supersedes any fleet
+// overlay still in flight. That overlay carries the rows it was dispatched
+// with, so applying it afterwards would put the row back — and with nothing
+// left in creating to retire it, its creating flag would never clear.
+func (m Model) dropPendingRow(path string) Model {
+	m.rows = removeRowByPath(m.rows, path)
+	m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
+	m = m.cancelFleetMerge()
+	m.fleetPending = false
+	m.loadSeq++
+	return m
 }
 
 func (m Model) startPendingRefresh() (Model, tea.Cmd) {

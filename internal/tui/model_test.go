@@ -737,6 +737,38 @@ func TestModelRemovesOptimisticWorktreeWhenCreateFails(t *testing.T) {
 	assert.Contains(t, stripANSI(viewContent(model)), "creation failed")
 }
 
+func TestModelDropsFailedCreationFromInFlightFleetMerge(t *testing.T) {
+	pendingPath := "/w/kwt/feature-broken"
+	backend := &fakeBackend{createPath: pendingPath}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature-broken"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	require.NotNil(t, createCmd)
+
+	// A load lands while the creation is still running, so the fleet merge it
+	// dispatches snapshots the placeholder.
+	model, fleetCmd := updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	require.NotNil(t, fleetCmd)
+	staleFleetMsg := fleetCmd()
+
+	backend.createErr = errors.New("creation failed")
+	model, _ = updateModel(t, model, createCmd())
+	require.Len(t, model.rows, 1, "the failed creation's row is removed")
+
+	model, _ = updateModel(t, model, staleFleetMsg)
+
+	assert.Len(t, model.rows, 1,
+		"a fleet merge holding the failed placeholder must not restore it")
+	_, restored := indexByPathOK(model.rows, pendingPath)
+	assert.False(t, restored, "the removed placeholder would never clear its creating flag")
+}
+
 func TestModelKeepsCreatingWorktreeAcrossFleetRefresh(t *testing.T) {
 	backend := &fakeBackend{createPath: "/w/kwt/feature-pending"}
 	model := NewModel(backend, "/worktrees")
