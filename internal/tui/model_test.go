@@ -1118,6 +1118,37 @@ func TestModelQueuesActionRefreshWhileFetchInFlight(t *testing.T) {
 	assert.IsType(t, fastRowsMsg{}, msg)
 }
 
+func TestModelKeepsQueuedActionRefreshWhenFastLoadFails(t *testing.T) {
+	backend := &fakeBackend{
+		rows: []Row{testRow("kwt", "feature", "/w/kwt/feature")},
+	}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: backend.rows})
+
+	model, refreshCmd := updateModel(t, model, press("r"))
+	require.NotNil(t, refreshCmd)
+	require.True(t, model.fetching)
+
+	model, actionCmd := updateModel(t, model, actionDoneMsg{
+		message: "removed kwt:feature",
+		refresh: true,
+	})
+	require.Nil(t, actionCmd)
+
+	// Nothing else retries the queued refresh, so losing it here would leave the
+	// removed worktree on screen until the user refreshes by hand.
+	model, queuedRefreshCmd := updateModel(t, model, fastRowsMsg{
+		err: errors.New("discovery failed"),
+	})
+
+	require.NotNil(t, queuedRefreshCmd, "a failed fast load must still run the queued refresh")
+	assert.False(t, model.pendingRefresh, "the queued refresh is consumed, not re-queued")
+	before := backend.fastListCalls
+	msg := queuedRefreshCmd()
+	assert.Equal(t, before+1, backend.fastListCalls)
+	assert.IsType(t, fastRowsMsg{}, msg)
+}
+
 func TestModelPreservesCreateAnchorAcrossQueuedRefresh(t *testing.T) {
 	staleRows := []Row{testRow("kwt", "feature", "/w/kwt/feature")}
 	newPath := "/w/kwt/new-feature"

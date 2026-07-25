@@ -241,7 +241,11 @@ func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 	next = next.cancelFleetMerge()
 	next.fleetPending = false
 	if msg.err != nil {
-		return next, nil
+		// applyRows could not act on the queued refresh because it was cleared
+		// above, and no full load follows a failed fast load, so run it here or
+		// the completed action's result never reaches the dashboard.
+		next.pendingRefresh = pendingRefresh
+		return next.startPendingRefresh()
 	}
 	if pendingRefresh {
 		next.pendingRefresh = false
