@@ -149,6 +149,11 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
+	result.Workspace.TmuxSocketName = tmux.ProtectedWorkspaceSocketName(
+		result.Workspace.SessionName,
+		result.Workspace.Path,
+	)
+	result.PullRequest.Workspace = &result.Workspace
 	if prStartSession {
 		socketName, startErr := startPRWorkspaceSession(
 			cmd.Context(),
@@ -167,11 +172,9 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 				false,
 				startErr,
 			)
-			result.PullRequest.Workspace = &result.Workspace
 			return writePRJSON(cmd, result)
 		}
 		result.Workspace.TmuxSocketName = socketName
-		result.PullRequest.Workspace = &result.Workspace
 	}
 	return writePRJSON(cmd, result)
 }
@@ -520,24 +523,14 @@ func defaultValidatePRWorkspaceSessionConfig(
 func preparePRWorkspaceSessionLayout(
 	cfg *models.Config,
 ) (models.Layout, error) {
-	if err := tmux.ValidateLayouts(cfg.Layouts, cfg.Agents); err != nil {
-		return models.Layout{}, err
+	if cfg == nil {
+		return models.Layout{}, fmt.Errorf("kwt configuration is unavailable")
 	}
-	layout, err := tmux.ResolveLayout(
-		cfg.Layouts,
-		"",
-		false,
-		"",
-		nil,
-	)
-	if err != nil {
-		return models.Layout{}, err
-	}
-	layout, err = tmux.ResolvePaneCommands(layout, cfg.Agents)
-	if err != nil {
-		return models.Layout{}, err
-	}
-	return layout, nil
+	// Imported contributor-controlled content must never trigger configured
+	// layout or agent commands merely because a client imported or opened it.
+	// A protected PR workspace starts as one ordinary login shell; the user
+	// may explicitly run anything else after inspecting the checkout.
+	return tmux.BlankLayout(), nil
 }
 
 func defaultAttachPRWorkspaceSession(
