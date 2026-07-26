@@ -339,6 +339,87 @@ func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {
 	assert.True(t, rows[1].Status.IsCurrent)
 }
 
+func TestTUIBackendListFastSkipsStatusCollection(t *testing.T) {
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	entry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host: "github.com", Owner: "example", Repository: "kwt",
+		},
+		Branch: "main",
+		Path:   "/global/github.com/example/kwt/main",
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{entry}, nil
+	}
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.collectStatuses = func(
+		context.Context,
+		string,
+		[]*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		t.Fatal("fast listing must not collect Git status")
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+
+	rows, _, err := backend.ListFast(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, models.WorktreeStatusUnknown, rows[0].Status.Status)
+}
+
+func TestTUIBackendListFastRunsIndependentDiscoveryConcurrently(t *testing.T) {
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Projects: []models.Project{{Path: "/registered"}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "/launch")
+	stubTUIProjectRegistration(backend)
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	block := func(name string) {
+		started <- name
+		<-release
+	}
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		block("global")
+		return nil, nil
+	}
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		block("registered")
+		return nil, nil
+	}
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		block("launch")
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) {
+		block("sessions")
+		return nil, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := backend.ListFast(context.Background())
+		done <- err
+	}()
+
+	for range 4 {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			close(release)
+			t.Fatal("independent startup discovery ran serially")
+		}
+	}
+	close(release)
+	require.NoError(t, <-done)
+}
+
 func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 	cfg := &models.Config{
 		Worktree: models.WorktreeConfig{BaseDir: "/global"},
@@ -957,6 +1038,48 @@ func TestTUIBackendListRegistersLaunchRepositoryBestEffort(t *testing.T) {
 	assert.Equal(t, "/repos/other", registered[0].Path)
 }
 
+func TestTUIBackendRegistersLaunchRepositoryOnceAcrossStagedLoad(t *testing.T) {
+	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
+	launchEntry := &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{
+			Host: "github.com", Owner: "example", Repository: "kwt",
+		},
+		Branch: "main",
+		Path:   "/repos/kwt",
+		IsMain: true,
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, launchEntry.Path)
+	backend.discoverGlobalWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.discoverProjectWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.discoverLaunchWorktrees = func(string) ([]*discovery.GlobalWorktreeEntry, error) {
+		return []*discovery.GlobalWorktreeEntry{launchEntry}, nil
+	}
+	registrations := 0
+	backend.registerProject = func(models.Project) error {
+		registrations++
+		return nil
+	}
+	backend.collectStatuses = func(
+		context.Context,
+		string,
+		[]*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+
+	_, _, err := backend.ListFast(context.Background())
+	require.NoError(t, err)
+	_, _, err = backend.List(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, registrations)
+}
+
 func TestTUIBackendListAddsLaunchRepositoryToInMemoryProjects(t *testing.T) {
 	cfg := &models.Config{Worktree: models.WorktreeConfig{BaseDir: "/global"}}
 	launchEntry := &discovery.GlobalWorktreeEntry{
@@ -1481,6 +1604,38 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	require.NoError(t, err)
 	assert.DirExists(t, path)
 	assert.Equal(t, 1, published)
+}
+
+func TestTUIBackendCreateWorktreeDoesNotExpandRepositoryLocalTemplate(t *testing.T) {
+	const secret = "credential-must-not-appear-in-path"
+	t.Setenv("KWT_GITHUB_TOKEN", secret)
+
+	repoPath := newTUITestRepo(t)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "https://github.com/example/kwt.git")
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: filepath.Join(t.TempDir(), "worktrees"), AutoMkdir: true},
+		Naming: models.NamingConfig{
+			Template:        `{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}`,
+			RepositoryLocal: true,
+		},
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch: "main",
+		Path:   repoPath,
+	}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	planned, err := backend.PreviewWorktree(row, "feature/from-tui")
+	require.NoError(t, err)
+	path, err := backend.CreateWorktree(context.Background(), row, "feature/from-tui")
+
+	require.NoError(t, err)
+	assert.NotContains(t, path, secret,
+		"a repository-generated name must not have its environment references expanded")
+	assert.Contains(t, path, "$KWT_GITHUB_TOKEN")
+	assert.Equal(t, planned.Entry.Path, path,
+		"the optimistic row's path must match where creation lands")
+	assert.DirExists(t, path)
 }
 
 func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) {
@@ -2499,6 +2654,140 @@ func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "focus", layout.Name,
 		"the workspace directory's .kwt.toml default must win over the global default")
+}
+
+// The merge matches hub rows to local ones case-insensitively, so two hub rows
+// differing only in identity casing would both claim the same local row and the
+// last one would erase the earlier host's observation.
+// Choosing the project by a case-insensitive comparison would run
+// `git worktree add` inside a different repository than the one the hub row
+// names, on a host where the two names are distinct repositories.
+func TestTUIBackendRefusesSyncForCaseDistinctRepositoryOnUnknownHost(t *testing.T) {
+	cfg := &models.Config{
+		Fleet: models.FleetConfig{Enabled: true, HostID: "local-host"},
+		Projects: []models.Project{{
+			Repository: "git.example.com/srv/kwt",
+			Name:       "kwt",
+			Path:       t.TempDir(),
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "git.example.com/srv/KWT",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		CanMaterialize:  true,
+	}}
+
+	_, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.Error(t, err, "a differently-cased identity is a different repository here")
+	assert.Contains(t, err.Error(), "no local project configured")
+}
+
+func TestTUIBackendSyncMatchesRepositoryIdentityCaseOnKnownHost(t *testing.T) {
+	cfg := &models.Config{
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       t.TempDir(),
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	project, ok := backend.projectForFleetInfo(&dashboard.FleetInfo{
+		ProjectIdentity: "github.com/Example/KWT",
+	})
+
+	require.True(t, ok, "GitHub resolves these names to one repository")
+	assert.Equal(t, "github.com/example/kwt", project.Repository)
+}
+
+func TestTUIBackendMergeKeepsEveryHostForOneWorktree(t *testing.T) {
+	cfg := &models.Config{Fleet: models.FleetConfig{Enabled: true, HostID: "local-host"}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	backend.now = func() time.Time { return time.Unix(1700000000, 0) }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		// One row, as the hub now groups it, carrying both remote hosts.
+		return fleet.FleetState{Rows: []fleet.FleetRow{{
+			ProjectIdentity: "github.com/example/kwt",
+			ProjectName:     "kwt",
+			Kind:            "branch",
+			Ref:             "feature",
+			Branch:          "feature",
+			Observations: []fleet.Observation{
+				{HostID: "host-a", Path: "/w/host-a/feature", Head: "aaa"},
+				{HostID: "host-b", Path: "/w/host-b/feature", Head: "bbb"},
+			},
+		}}}, nil
+	}
+	local := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{FullPath: "github.com/example/kwt", Repository: "kwt"},
+		Branch:         "feature",
+		Path:           "/w/local/feature",
+	}}
+
+	rows, _ := backend.MergeFleet(context.Background(), []dashboard.Row{local})
+
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].Fleet)
+	assert.ElementsMatch(t, []string{"host-a", "host-b", "local"}, rows[0].Fleet.Hosts,
+		"every host holding this worktree must stay visible on its row")
+}
+
+func TestTUIBackendSerializesUnregisterWithFullLoad(t *testing.T) {
+	cfg := &models.Config{
+		Worktree:   models.WorktreeConfig{BaseDir: t.TempDir()},
+		Workspaces: []models.Workspace{{Name: "notes", Path: "/Users/me/notes"}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	noEntries := func(string) ([]*discovery.GlobalWorktreeEntry, error) { return nil, nil }
+	backend.discoverGlobalWorktrees = noEntries
+	backend.discoverProjectWorktrees = noEntries
+	backend.discoverLaunchWorktrees = noEntries
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.unregisterWorkspace = func(string) error { return nil }
+
+	collecting := make(chan struct{})
+	release := make(chan struct{})
+	backend.collectStatuses = func(
+		context.Context, string, []*discovery.GlobalWorktreeEntry,
+	) (map[string]*models.WorktreeStatus, error) {
+		close(collecting)
+		<-release
+		return nil, nil
+	}
+
+	var listRows []dashboard.Row
+	var listErr error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		listRows, _, listErr = backend.List(context.Background())
+	}()
+	<-collecting
+
+	unregistered := make(chan error, 1)
+	go func() {
+		unregistered <- backend.UnregisterWorkspace(dashboard.Row{
+			Workspace: &dashboard.WorkspaceInfo{Name: "notes", Path: "/Users/me/notes"},
+		})
+	}()
+
+	select {
+	case <-unregistered:
+		t.Fatal("unregister rewrote cfg.Workspaces while the full load was reading it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	<-listDone
+	require.NoError(t, listErr)
+	require.NoError(t, <-unregistered)
+	require.Len(t, listRows, 1, "the load that started first still sees the workspace")
+	assert.Equal(t, "notes", listRows[0].Workspace.Name)
+	assert.Empty(t, cfg.Workspaces)
 }
 
 func TestTUIBackendUnregisterWorkspace(t *testing.T) {

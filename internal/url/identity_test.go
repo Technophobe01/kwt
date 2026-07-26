@@ -278,3 +278,68 @@ func TestCanonicalRepositoryIdentityRejectsCredentialBearingRemotes(t *testing.T
 		}
 	}
 }
+
+func TestFoldRepositoryIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity string
+		expected string
+	}{
+		{
+			name:     "Case-insensitive host folds owner and repository",
+			identity: "GitHub.com/Kenn-Io/KWT",
+			expected: "github.com/kenn-io/kwt",
+		},
+		{
+			name:     "GitLab subgroups fold too",
+			identity: "gitlab.com/Group/SubGroup/Project",
+			expected: "gitlab.com/group/subgroup/project",
+		},
+		{
+			name:     "Unknown host keeps its path case",
+			identity: "Git.Example.Com/srv/git/Repo",
+			expected: "git.example.com/srv/git/Repo",
+		},
+		{
+			name:     "Self-hosted forge is treated as case-sensitive",
+			identity: "gitlab.internal.example/Group/Project",
+			expected: "gitlab.internal.example/Group/Project",
+		},
+		{
+			name:     "Explicit port does not defeat host matching",
+			identity: "GitHub.com:443/Kenn-Io/KWT",
+			expected: "github.com:443/kenn-io/kwt",
+		},
+		{
+			name:     "Host without a path still folds",
+			identity: "GitHub.com",
+			expected: "github.com",
+		},
+		{
+			name:     "Empty stays empty",
+			identity: "   ",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FoldRepositoryIdentity(tt.identity); got != tt.expected {
+				t.Errorf("FoldRepositoryIdentity(%q) = %q, want %q", tt.identity, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFoldRepositoryIdentityIsIdempotent(t *testing.T) {
+	for _, identity := range []string{
+		"GitHub.com/Kenn-Io/KWT",
+		"Git.Example.Com/srv/git/Repo",
+		"GitHub.com:443/Kenn-Io/KWT",
+	} {
+		once := FoldRepositoryIdentity(identity)
+		if twice := FoldRepositoryIdentity(once); twice != once {
+			t.Errorf("FoldRepositoryIdentity(%q) is not idempotent: %q then %q", identity, once, twice)
+		}
+	}
+}

@@ -35,6 +35,7 @@ type tuiBackend struct {
 	cfg                       *models.Config
 	tmux                      *tmux.TmuxCommand
 	launchDir                 string
+	launchProjectRegistered   bool
 	launchWorkspaceRegistered bool
 	discoverGlobalWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	discoverProjectWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
@@ -79,34 +80,70 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 	}
 }
 
+func (b *tuiBackend) ListFast(ctx context.Context) ([]dashboard.Row, []string, error) {
+	return b.list(ctx, false)
+}
+
 func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
+	return b.list(ctx, true)
+}
+
+func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	entries, err := b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", err)
+	var (
+		entries           []*discovery.GlobalWorktreeEntry
+		registeredEntries []*discovery.GlobalWorktreeEntry
+		launchEntries     []*discovery.GlobalWorktreeEntry
+		sessions          []string
+		discoveryErr      error
+		launchErr         error
+		sessionsErr       error
+		startup           sync.WaitGroup
+	)
+	startup.Add(4)
+	go func() {
+		defer startup.Done()
+		entries, discoveryErr = b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
+	}()
+	go func() {
+		defer startup.Done()
+		registeredEntries = b.discoverRegisteredProjectWorktrees()
+	}()
+	go func() {
+		defer startup.Done()
+		launchEntries, launchErr = b.discoverLaunchWorktrees(b.launchDir)
+	}()
+	go func() {
+		defer startup.Done()
+		sessions, sessionsErr = b.listSessions()
+	}()
+	startup.Wait()
+
+	if discoveryErr != nil {
+		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", discoveryErr)
+	}
+	if launchErr != nil {
+		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", launchErr)
+	}
+	if sessionsErr != nil {
+		return nil, nil, sessionsErr
 	}
 
-	entries = mergeTUIEntries(entries, b.discoverRegisteredProjectWorktrees())
-
-	launchEntries, err := b.discoverLaunchWorktrees(b.launchDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", err)
-	}
+	entries = mergeTUIEntries(entries, registeredEntries)
 	b.registerLaunchProject(launchEntries)
 	b.registerLaunchWorkspace(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
-	statusByPath, err := b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
-	if err != nil {
-		return nil, nil, err
+	var statusByPath map[string]*models.WorktreeStatus
+	if includeStatuses {
+		statusByPath, discoveryErr = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
+		if discoveryErr != nil {
+			return nil, nil, discoveryErr
+		}
 	}
 
-	sessions, err := b.listSessions()
-	if err != nil {
-		return nil, nil, err
-	}
 	liveSessions := make(map[string]bool, len(sessions))
 	for _, session := range sessions {
 		liveSessions[session] = true
@@ -153,7 +190,7 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) (
 
 	byKey := make(map[string]int, len(rows))
 	for i := range rows {
-		if key := tuiFleetKeyForRow(rows[i]); key != "" {
+		if key := dashboard.FleetKeyForRow(rows[i]); key != "" {
 			byKey[key] = i
 		}
 	}
@@ -163,7 +200,7 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) (
 		// Local presence is decided by the rows just discovered on disk, not
 		// by hub observations for this host, which can be stale when a
 		// publish fails.
-		rowIndex, local := byKey[tuiFleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
+		rowIndex, local := byKey[dashboard.FleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
 		var localRow dashboard.Row
 		if local {
 			localRow = rows[rowIndex]
@@ -279,14 +316,18 @@ func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWor
 	return entries
 }
 
+// registerLaunchProject persists the launch repository at most once per TUI
+// run. Both stages discover it, but rewriting config during each load would
+// put bookkeeping back on the startup and refresh paths.
 func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEntry) {
-	if b.registerProject == nil {
+	if b.launchProjectRegistered || b.registerProject == nil {
 		return
 	}
 	project, ok := projectFromEntries(entries, b.launchDir)
 	if !ok {
 		return
 	}
+	b.launchProjectRegistered = true
 	if existing, found := b.projectByPath(project.Path); found {
 		if reusable, ok := reusableExistingProject(existing, project); ok {
 			project = reusable
@@ -465,7 +506,7 @@ func sameRegisteredProject(a, b models.Project) bool {
 		return true
 	}
 	if a.Repository != "" && b.Repository != "" {
-		return strings.EqualFold(a.Repository, b.Repository)
+		return equalRepositoryIdentity(a.Repository, b.Repository)
 	}
 	return false
 }
@@ -745,38 +786,6 @@ func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetStat
 	return state, nil
 }
 
-func tuiFleetKeyForRow(row dashboard.Row) string {
-	if row.Fleet != nil {
-		return tuiFleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
-	}
-	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
-		return ""
-	}
-	identity := row.Entry.RepositoryInfo.FullPath
-	if identity == "" && row.Entry.RepositoryInfo.Host != "" && row.Entry.RepositoryInfo.Owner != "" && row.Entry.RepositoryInfo.Repository != "" {
-		identity = path.Join(row.Entry.RepositoryInfo.Host, row.Entry.RepositoryInfo.Owner, row.Entry.RepositoryInfo.Repository)
-	}
-	if identity == "" {
-		return ""
-	}
-	branch := strings.TrimSpace(row.Entry.Branch)
-	if branch == "" || branch == "HEAD" {
-		// Hub manifests key detached worktrees by commit SHA.
-		return tuiFleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
-	}
-	return tuiFleetKey(identity, "branch", branch)
-}
-
-func tuiFleetKey(projectIdentity string, kind string, ref string) string {
-	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
-	kind = strings.ToLower(strings.TrimSpace(kind))
-	ref = strings.TrimSpace(ref)
-	if projectIdentity == "" || kind == "" || ref == "" {
-		return ""
-	}
-	return projectIdentity + "\x00" + kind + "\x00" + ref
-}
-
 func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string, local bool) *dashboard.FleetInfo {
 	ref := fleetRowRef(row)
 	if row.ProjectIdentity == "" || row.Kind == "" || ref == "" {
@@ -852,7 +861,15 @@ func fleetMaterializeObservation(observations []fleet.Observation, currentHost s
 	return fleet.Observation{}, false
 }
 
-func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, branch string) (string, error) {
+// CreateWorktree resolves the destination itself rather than accepting the path
+// PreviewWorktree computed. A custom destination is treated as user input and
+// gets environment expansion, which would turn a repository-generated name
+// containing an environment reference into the referenced value.
+func (b *tuiBackend) CreateWorktree(
+	ctx context.Context,
+	row dashboard.Row,
+	branch string,
+) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
@@ -862,6 +879,28 @@ func (b *tuiBackend) CreateWorktree(ctx context.Context, row dashboard.Row, bran
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
+}
+
+func (b *tuiBackend) PreviewWorktree(row dashboard.Row, branch string) (dashboard.Row, error) {
+	if row.Entry == nil {
+		return dashboard.Row{}, fmt.Errorf("no worktree selected")
+	}
+	manager := worktree.New(git.New(row.Entry.Path), b.cfg)
+	worktreePath, err := manager.PreparePath("", branch)
+	if err != nil {
+		return dashboard.Row{}, err
+	}
+
+	entry := *row.Entry
+	entry.Branch = branch
+	entry.Path = worktreePath
+	entry.CommitHash = ""
+	entry.IsMain = false
+	entry.CreatedAt = time.Time{}
+	return dashboard.Row{
+		Entry:  &entry,
+		Status: unknownStatusForEntry(&entry),
+	}, nil
 }
 
 func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {
@@ -971,18 +1010,26 @@ func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Proj
 	return models.Project{}, false
 }
 
-func sameRepositoryIdentity(left string, right string) bool {
+// equalRepositoryIdentity compares two repository identities with the host-aware
+// fold. A plain EqualFold would let a case-sensitive server's two repositories
+// match each other, and this decides which checkout a mutation runs against.
+func equalRepositoryIdentity(left string, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
 	if left == "" || right == "" {
 		return false
 	}
-	if strings.EqualFold(left, right) {
+	return url.FoldRepositoryIdentity(left) == url.FoldRepositoryIdentity(right)
+}
+
+func sameRepositoryIdentity(left string, right string) bool {
+	if equalRepositoryIdentity(left, right) {
 		return true
 	}
 	normalizedLeft, leftErr := fleet.NormalizeRepositoryIdentity(left)
 	normalizedRight, rightErr := fleet.NormalizeRepositoryIdentity(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(normalizedLeft, normalizedRight)
+	return leftErr == nil && rightErr == nil &&
+		equalRepositoryIdentity(normalizedLeft, normalizedRight)
 }
 
 func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, force bool) error {
@@ -1051,13 +1098,16 @@ func projectMatchesRow(project models.Project, row dashboard.Row) bool {
 	info := row.Entry.RepositoryInfo
 	stableCandidates := rowRepositoryIdentityCandidates(info)
 	for _, candidate := range stableCandidates {
-		if candidate != "" && strings.EqualFold(project.Repository, candidate) {
+		if equalRepositoryIdentity(project.Repository, candidate) {
 			return true
 		}
 	}
 	if len(stableCandidates) > 0 {
 		return false
 	}
+	// Below here the row has no stable identity, so these compare bare
+	// repository names rather than identities; host case-sensitivity does not
+	// apply to a name with no host attached.
 	if project.Repository != "" && info.Repository != "" && strings.EqualFold(project.Repository, info.Repository) {
 		return true
 	}
@@ -1312,11 +1362,18 @@ func (b *tuiBackend) UnregisterWorkspace(row dashboard.Row) error {
 	if row.Workspace == nil {
 		return fmt.Errorf("no workspace selected")
 	}
+	// The TUI runs this concurrently with the load commands, which read
+	// cfg.Workspaces to build workspace rows and write the config file when
+	// they register the launch directory.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.unregisterWorkspace(row.Workspace.Name); err != nil {
 		return err
 	}
 	if b.cfg != nil {
-		kept := b.cfg.Workspaces[:0]
+		// A new slice, not a filter in place: rewriting the backing array is
+		// what turns a concurrent read into duplicated rows.
+		kept := make([]models.Workspace, 0, len(b.cfg.Workspaces))
 		for _, workspace := range b.cfg.Workspaces {
 			if !samePath(workspace.Path, row.Workspace.Path) {
 				kept = append(kept, workspace)

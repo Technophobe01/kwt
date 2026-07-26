@@ -34,6 +34,65 @@ func TestStorePutLatestAndBuildStateGroupsRows(t *testing.T) {
 	assert.NotEmpty(t, state.StateVersion)
 }
 
+// Each host derives the project identity from its own clone's remote, so two of
+// them can publish one repository under different capitalization.
+func TestStoreGroupsRowsAcrossProjectIdentityCasing(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	first := testManifest("host-a", "Host-A", "darwin/arm64", "github.com/kenn-io/KWT", "branch", "feature/fleet", "aaa")
+	second := testManifest("host-b", "Host-B", "darwin/arm64", "github.com/kenn-io/kwt", "branch", "feature/fleet", "bbb")
+
+	require.NoError(t, store.Put(context.Background(), first))
+	require.NoError(t, store.Put(context.Background(), second))
+	state, err := store.State(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, state.Rows, 1,
+		"one worktree must not become a row per spelling of its repository")
+	assert.ElementsMatch(t, []string{"host-a", "host-b"}, observationHosts(state.Rows[0]),
+		"both hosts' observations belong to the single row")
+}
+
+// A plain Git server on a case-sensitive filesystem can hold two repositories
+// whose identities differ only in case, so their observations must stay apart.
+func TestStoreKeepsCaseSensitiveHostIdentitiesSeparate(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	first := testManifest("host-a", "Host-A", "darwin/arm64", "git.example.com/srv/KWT", "branch", "feature/fleet", "aaa")
+	second := testManifest("host-b", "Host-B", "darwin/arm64", "git.example.com/srv/kwt", "branch", "feature/fleet", "bbb")
+
+	require.NoError(t, store.Put(context.Background(), first))
+	require.NoError(t, store.Put(context.Background(), second))
+	state, err := store.State(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, state.Rows, 2,
+		"an unrecognized host may distinguish repositories by case")
+	assert.Equal(t, []string{"host-a"}, observationHosts(state.Rows[0]))
+	assert.Equal(t, []string{"host-b"}, observationHosts(state.Rows[1]))
+}
+
+func TestStoreGroupsRowsAcrossProjectIdentityCasingRegardlessOfOrder(t *testing.T) {
+	// The surviving spelling must not depend on which host published first.
+	identities := func(lowerFirst bool) string {
+		store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+		a, b := "github.com/kenn-io/KWT", "github.com/kenn-io/kwt"
+		if lowerFirst {
+			a, b = b, a
+		}
+		require.NoError(t, store.Put(context.Background(),
+			testManifest("host-a", "Host-A", "darwin/arm64", a, "branch", "feature/fleet", "aaa")))
+		require.NoError(t, store.Put(context.Background(),
+			testManifest("host-b", "Host-B", "darwin/arm64", b, "branch", "feature/fleet", "bbb")))
+		state, err := store.State(context.Background())
+		require.NoError(t, err)
+		require.Len(t, state.Rows, 1)
+		return state.Rows[0].ProjectIdentity
+	}
+
+	assert.Equal(t, "github.com/kenn-io/KWT", identities(false))
+	assert.Equal(t, "github.com/kenn-io/kwt", identities(true),
+		"the first host in sorted order supplies the displayed spelling")
+}
+
 func TestStoreProjectNameUsesLaterMatchingProjectManifest(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
