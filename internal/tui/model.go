@@ -281,10 +281,10 @@ func carryEnrichment(fast, previous []Row) []Row {
 	rows := make([]Row, 0, len(fast))
 	discovered := make(map[string]bool, len(fast))
 	for _, row := range fast {
-		if identity := fleetIdentity(row); identity != "" {
-			discovered[identity] = true
+		if key := FleetKeyForRow(row); key != "" {
+			discovered[key] = true
 		}
-		if before, ok := enriched[rowPath(row)]; ok {
+		if before, ok := enriched[rowPath(row)]; ok && sameCheckout(before, row) {
 			if before.Status != nil {
 				row.Status = before.Status
 			}
@@ -296,11 +296,33 @@ func carryEnrichment(fast, previous []Row) []Row {
 	for _, row := range previous {
 		// A remote-only row whose worktree the fast load just found on disk has
 		// become local; the local row carries it now.
-		if isRemoteOnly(row) && !discovered[fleetIdentity(row)] {
+		if isRemoteOnly(row) && !discovered[FleetKeyForRow(row)] {
 			rows = append(rows, row)
 		}
 	}
 	return rows
+}
+
+// sameCheckout reports whether two rows sharing a path describe the same
+// checkout. A worktree that switched branches keeps its path, so matching on
+// path alone would hand the new branch the previous one's status and hub state.
+func sameCheckout(before, now Row) bool {
+	branch := rowBranch(now)
+	if branch != rowBranch(before) {
+		return false
+	}
+	if branch == "" || branch == "HEAD" {
+		// Detached: the commit is what distinguishes one checkout from another.
+		return entryCommit(before) == entryCommit(now)
+	}
+	return true
+}
+
+func entryCommit(row Row) string {
+	if row.Entry == nil {
+		return ""
+	}
+	return row.Entry.CommitHash
 }
 
 func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
@@ -503,10 +525,18 @@ func withoutPath(paths []string, path string) []string {
 	return kept
 }
 
+// removeRowByPath drops every row naming the given directory. It compares by
+// identity because a discovery pass can replace a placeholder's path with Git's
+// resolved spelling of it, and a row left behind here keeps its creating flag
+// forever.
 func removeRowByPath(rows []Row, path string) []Row {
+	key := pathIdentity(path)
+	if key == "" {
+		return rows
+	}
 	filtered := rows[:0]
 	for _, row := range rows {
-		if rowPath(row) != path {
+		if pathIdentity(rowPath(row)) != key {
 			filtered = append(filtered, row)
 		}
 	}

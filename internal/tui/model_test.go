@@ -1336,6 +1336,89 @@ func TestFastRefreshDropsRemoteRowDifferingOnlyInIdentityCase(t *testing.T) {
 	assert.NotNil(t, model.rows[0].Entry)
 }
 
+// A detached worktree is keyed by commit, not by the literal branch "HEAD",
+// so its local and remote-only shapes have to agree.
+func TestFastRefreshDropsDetachedRemoteRowThatBecameLocal(t *testing.T) {
+	const commit = "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4"
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "detached",
+		Ref:             commit,
+	}}
+	local := testRow("kwt", "HEAD", "/w/kwt/detached")
+	local.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+	local.Entry.CommitHash = commit
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+	require.Len(t, model.rows, 1)
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{local}})
+
+	require.Len(t, model.rows, 1,
+		"a detached worktree must not appear as both a local and a remote row")
+	assert.NotNil(t, model.rows[0].Entry)
+}
+
+func TestFastRefreshDropsEnrichmentWhenTheWorktreeSwitchedBranches(t *testing.T) {
+	before := testRow("kwt", "feature", "/w/kwt/feature")
+	before.Status.GitStatus.Modified = 4
+	before.Fleet = &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		Hosts:           []string{"host-b"},
+	}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{before}})
+
+	// git switch inside the worktree: same path, different branch.
+	switched := testRow("kwt", "other", "/w/kwt/feature")
+	switched.Status.GitStatus = models.GitStatus{}
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{switched}})
+
+	require.Len(t, model.rows, 1)
+	assert.Zero(t, model.rows[0].Status.GitStatus.Modified,
+		"another branch's uncommitted changes must not be attributed to this one")
+	assert.Nil(t, model.rows[0].Fleet,
+		"hub state belongs to the branch it was collected for")
+}
+
+func TestModelRemovesFailedCreationDiscoveredAtItsResolvedPath(t *testing.T) {
+	realBase, linkBase := symlinkedWorktreeBase(t)
+	previewPath := filepath.Join(linkBase, "feature")
+	discoveredPath := filepath.Join(realBase, "feature")
+
+	backend := &fakeBackend{createPath: previewPath}
+	model := NewModel(backend, realBase)
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+	model, _ = updateModel(t, model, press("n"))
+	model, _ = updateModel(t, model, paste("feature"))
+	model, createCmd := updateModel(t, model, press("enter"))
+	require.NotNil(t, createCmd)
+
+	// Git published the worktree, so discovery replaces the placeholder's link
+	// spelling with the resolved one before setup fails and rolls it back.
+	require.NoError(t, os.MkdirAll(discoveredPath, 0o755))
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+		testRow("kwt", "feature", discoveredPath),
+	}})
+	require.Len(t, model.rows, 2)
+
+	backend.createErr = errors.New("setup command failed")
+	model, _ = updateModel(t, model, createCmd())
+
+	assert.Len(t, model.rows, 1,
+		"the rolled-back worktree must not survive under its resolved spelling")
+	_, ok := indexByPathOK(model.rows, discoveredPath)
+	assert.False(t, ok, "a row left here would stay marked creating forever")
+}
+
 func TestFastRefreshKeepsRemoteRowWithDifferentBranchCase(t *testing.T) {
 	remoteOnly := Row{Fleet: &FleetInfo{
 		ProjectIdentity: "github.com/example/kwt",

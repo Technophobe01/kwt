@@ -190,7 +190,7 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) (
 
 	byKey := make(map[string]int, len(rows))
 	for i := range rows {
-		if key := tuiFleetKeyForRow(rows[i]); key != "" {
+		if key := dashboard.FleetKeyForRow(rows[i]); key != "" {
 			byKey[key] = i
 		}
 	}
@@ -200,7 +200,7 @@ func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) (
 		// Local presence is decided by the rows just discovered on disk, not
 		// by hub observations for this host, which can be stale when a
 		// publish fails.
-		rowIndex, local := byKey[tuiFleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
+		rowIndex, local := byKey[dashboard.FleetKey(fleetRow.ProjectIdentity, fleetRow.Kind, fleetRowRef(fleetRow))]
 		var localRow dashboard.Row
 		if local {
 			localRow = rows[rowIndex]
@@ -784,38 +784,6 @@ func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetStat
 		return fleet.FleetState{}, nil
 	}
 	return state, nil
-}
-
-func tuiFleetKeyForRow(row dashboard.Row) string {
-	if row.Fleet != nil {
-		return tuiFleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
-	}
-	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
-		return ""
-	}
-	identity := row.Entry.RepositoryInfo.FullPath
-	if identity == "" && row.Entry.RepositoryInfo.Host != "" && row.Entry.RepositoryInfo.Owner != "" && row.Entry.RepositoryInfo.Repository != "" {
-		identity = path.Join(row.Entry.RepositoryInfo.Host, row.Entry.RepositoryInfo.Owner, row.Entry.RepositoryInfo.Repository)
-	}
-	if identity == "" {
-		return ""
-	}
-	branch := strings.TrimSpace(row.Entry.Branch)
-	if branch == "" || branch == "HEAD" {
-		// Hub manifests key detached worktrees by commit SHA.
-		return tuiFleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
-	}
-	return tuiFleetKey(identity, "branch", branch)
-}
-
-func tuiFleetKey(projectIdentity string, kind string, ref string) string {
-	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
-	kind = strings.ToLower(strings.TrimSpace(kind))
-	ref = strings.TrimSpace(ref)
-	if projectIdentity == "" || kind == "" || ref == "" {
-		return ""
-	}
-	return projectIdentity + "\x00" + kind + "\x00" + ref
 }
 
 func dashboardFleetInfo(row fleet.FleetRow, rendered fleet.StatusRow, currentHost string, local bool) *dashboard.FleetInfo {

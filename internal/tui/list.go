@@ -63,22 +63,45 @@ func rowBranch(row Row) string {
 	return ""
 }
 
-// fleetIdentity keys one worktree across its local and remote-only shapes: the
-// same branch of the same project is one worktree whether it was found on disk
-// or reported by the hub. Empty when a row carries too little to be matched.
-//
-// The project half is case-folded and the branch half is not, matching how the
-// backend keys hub rows against local ones — a local clone and a hub manifest
-// can spell one forge identity with different capitalization, while branch
-// names are case-sensitive. Keep this in step with tuiFleetKey; the packages
-// cannot share it without a cycle.
-func fleetIdentity(row Row) string {
-	project := strings.ToLower(strings.TrimSpace(rowProjectKey(row)))
-	branch := strings.TrimSpace(rowBranch(row))
-	if project == "" || branch == "" {
+// FleetKey identifies one worktree for matching hub state against what is on
+// disk. The project half is case-folded because a clone's remote URL and a hub
+// manifest can spell one forge identity differently; the ref half is not,
+// because branch names are case-sensitive.
+func FleetKey(projectIdentity string, kind string, ref string) string {
+	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	ref = strings.TrimSpace(ref)
+	if projectIdentity == "" || kind == "" || ref == "" {
 		return ""
 	}
-	return project + "\x00" + branch
+	return projectIdentity + "\x00" + kind + "\x00" + ref
+}
+
+// FleetKeyForRow derives FleetKey from a row in whichever shape it arrived:
+// reported by the hub, or discovered on disk. Both shapes of one worktree
+// produce the same key, which is what lets a remote-only row be recognized once
+// it becomes local. Empty when a row carries too little to be matched.
+func FleetKeyForRow(row Row) string {
+	if row.Fleet != nil {
+		return FleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
+	}
+	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
+		return ""
+	}
+	identity := row.Entry.RepositoryInfo.FullPath
+	info := row.Entry.RepositoryInfo
+	if identity == "" && info.Host != "" && info.Owner != "" && info.Repository != "" {
+		identity = path.Join(info.Host, info.Owner, info.Repository)
+	}
+	if identity == "" {
+		return ""
+	}
+	branch := strings.TrimSpace(row.Entry.Branch)
+	if branch == "" || branch == "HEAD" {
+		// Hub manifests key detached worktrees by commit SHA.
+		return FleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
+	}
+	return FleetKey(identity, "branch", branch)
 }
 
 // isRemoteOnly reports whether a row exists only as hub state, with nothing on
