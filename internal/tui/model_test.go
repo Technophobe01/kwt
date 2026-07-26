@@ -1261,6 +1261,32 @@ func TestFastRefreshKeepsEnrichmentWhenFullLoadFails(t *testing.T) {
 	assert.Contains(t, stripANSI(viewContent(model)), "status collection failed")
 }
 
+func TestFastRefreshKeepsRemoteRowsWithNoLocalWorktrees(t *testing.T) {
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+		CanMaterialize:  true,
+	}}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+	require.Len(t, model.rows, 1)
+
+	// Nothing is checked out on this machine, so the fast load reports no rows.
+	model, _ = updateModel(t, model, fastRowsMsg{rows: nil})
+	require.Len(t, model.rows, 1,
+		"an empty local snapshot says nothing about worktrees on other hosts")
+
+	// The full load then fails, so no fleet merge follows to put them back.
+	model, _ = updateModel(t, model, rowsMsg{err: errors.New("discovery failed")})
+
+	require.Len(t, model.rows, 1)
+	assert.True(t, isRemoteOnly(model.rows[0]))
+	assert.Equal(t, "feature/remote", model.rows[0].Fleet.Branch)
+}
+
 func TestFastRefreshDropsRemoteRowThatBecameLocal(t *testing.T) {
 	remoteOnly := Row{Fleet: &FleetInfo{
 		ProjectIdentity: "github.com/example/kwt",

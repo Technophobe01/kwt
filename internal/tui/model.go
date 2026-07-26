@@ -266,7 +266,9 @@ func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 // Without this a refresh would strip a populated dashboard back to bare rows,
 // and a full load that then failed would leave it that way.
 func carryEnrichment(fast, previous []Row) []Row {
-	if len(previous) == 0 || len(fast) == 0 {
+	// An empty fast load is not a shortcut: a machine with nothing checked out
+	// locally still knows the remote-only rows it learned from the hub.
+	if len(previous) == 0 {
 		return fast
 	}
 	enriched := make(map[string]Row, len(previous))
