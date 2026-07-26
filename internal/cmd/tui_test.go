@@ -2612,6 +2612,41 @@ func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
 		"the workspace directory's .kwt.toml default must win over the global default")
 }
 
+// The merge matches hub rows to local ones case-insensitively, so two hub rows
+// differing only in identity casing would both claim the same local row and the
+// last one would erase the earlier host's observation.
+func TestTUIBackendMergeKeepsEveryHostForOneWorktree(t *testing.T) {
+	cfg := &models.Config{Fleet: models.FleetConfig{Enabled: true, HostID: "local-host"}}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	backend.now = func() time.Time { return time.Unix(1700000000, 0) }
+	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
+		// One row, as the hub now groups it, carrying both remote hosts.
+		return fleet.FleetState{Rows: []fleet.FleetRow{{
+			ProjectIdentity: "github.com/example/kwt",
+			ProjectName:     "kwt",
+			Kind:            "branch",
+			Ref:             "feature",
+			Branch:          "feature",
+			Observations: []fleet.Observation{
+				{HostID: "host-a", Path: "/w/host-a/feature", Head: "aaa"},
+				{HostID: "host-b", Path: "/w/host-b/feature", Head: "bbb"},
+			},
+		}}}, nil
+	}
+	local := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		RepositoryInfo: &url.RepositoryInfo{FullPath: "github.com/example/kwt", Repository: "kwt"},
+		Branch:         "feature",
+		Path:           "/w/local/feature",
+	}}
+
+	rows, _ := backend.MergeFleet(context.Background(), []dashboard.Row{local})
+
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].Fleet)
+	assert.ElementsMatch(t, []string{"host-a", "host-b", "local"}, rows[0].Fleet.Hosts,
+		"every host holding this worktree must stay visible on its row")
+}
+
 func TestTUIBackendSerializesUnregisterWithFullLoad(t *testing.T) {
 	cfg := &models.Config{
 		Worktree:   models.WorktreeConfig{BaseDir: t.TempDir()},

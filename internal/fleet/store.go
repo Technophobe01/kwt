@@ -241,7 +241,12 @@ func buildFleetState(file storeFile) (FleetState, error) {
 		projectNames := projectNamesByIdentity(manifest.Projects)
 		for _, worktree := range manifest.Worktrees {
 			key := rowKey{
-				projectIdentity: worktree.ProjectIdentity,
+				// Hosts derive this identity from their own clone's remote, so
+				// two of them can spell one repository differently. Grouping on
+				// the verbatim spelling would split a worktree into a row per
+				// spelling, and consumers that match case-insensitively then
+				// keep only whichever row they see last.
+				projectIdentity: strings.ToLower(worktree.ProjectIdentity),
 				kind:            worktree.Kind,
 				ref:             worktree.Ref,
 			}
