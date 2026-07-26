@@ -2615,6 +2615,51 @@ func TestTUIBackendResolveLayoutUsesWorkspacePathForDefault(t *testing.T) {
 // The merge matches hub rows to local ones case-insensitively, so two hub rows
 // differing only in identity casing would both claim the same local row and the
 // last one would erase the earlier host's observation.
+// Choosing the project by a case-insensitive comparison would run
+// `git worktree add` inside a different repository than the one the hub row
+// names, on a host where the two names are distinct repositories.
+func TestTUIBackendRefusesSyncForCaseDistinctRepositoryOnUnknownHost(t *testing.T) {
+	cfg := &models.Config{
+		Fleet: models.FleetConfig{Enabled: true, HostID: "local-host"},
+		Projects: []models.Project{{
+			Repository: "git.example.com/srv/kwt",
+			Name:       "kwt",
+			Path:       t.TempDir(),
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	row := dashboard.Row{Fleet: &dashboard.FleetInfo{
+		ProjectIdentity: "git.example.com/srv/KWT",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		CanMaterialize:  true,
+	}}
+
+	_, err := backend.MaterializeWorktree(context.Background(), row)
+
+	require.Error(t, err, "a differently-cased identity is a different repository here")
+	assert.Contains(t, err.Error(), "no local project configured")
+}
+
+func TestTUIBackendSyncMatchesRepositoryIdentityCaseOnKnownHost(t *testing.T) {
+	cfg := &models.Config{
+		Projects: []models.Project{{
+			Repository: "github.com/example/kwt",
+			Name:       "kwt",
+			Path:       t.TempDir(),
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+
+	project, ok := backend.projectForFleetInfo(&dashboard.FleetInfo{
+		ProjectIdentity: "github.com/Example/KWT",
+	})
+
+	require.True(t, ok, "GitHub resolves these names to one repository")
+	assert.Equal(t, "github.com/example/kwt", project.Repository)
+}
+
 func TestTUIBackendMergeKeepsEveryHostForOneWorktree(t *testing.T) {
 	cfg := &models.Config{Fleet: models.FleetConfig{Enabled: true, HostID: "local-host"}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")

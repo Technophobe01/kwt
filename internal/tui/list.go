@@ -211,9 +211,12 @@ func filterProjectPerspectiveRows(rows []Row, project string) []Row {
 		return append([]Row(nil), rows...)
 	}
 
+	// Fold as the fleet key does, so scoping to a project cannot pull in a
+	// different repository that a case-sensitive host distinguishes.
+	project = url.FoldRepositoryIdentity(project)
 	filtered := make([]Row, 0, len(rows))
 	for _, row := range rows {
-		if strings.EqualFold(rowProjectKey(row), project) {
+		if url.FoldRepositoryIdentity(rowProjectKey(row)) == project {
 			filtered = append(filtered, row)
 		}
 	}

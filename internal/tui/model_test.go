@@ -1419,6 +1419,63 @@ func TestModelRemovesFailedCreationDiscoveredAtItsResolvedPath(t *testing.T) {
 	assert.False(t, ok, "a row left here would stay marked creating forever")
 }
 
+func TestFastRefreshProjectsDeletedLocalWorktreeStillHeldElsewhere(t *testing.T) {
+	shared := testRow("kwt", "feature", "/w/kwt/feature")
+	shared.Fleet = &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		Hosts:           []string{"local", "host-b"},
+		Local:           true,
+	}
+	other := testRow("kata", "main", "/w/kata/main")
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{shared, other}})
+	require.Len(t, model.rows, 2)
+
+	// The worktree is deleted locally but still exists on host-b, and the full
+	// load that would refresh hub state then fails.
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{other}})
+	model, _ = updateModel(t, model, rowsMsg{err: errors.New("discovery failed")})
+
+	require.Len(t, model.rows, 2,
+		"deleting the local copy must not hide the hosts that still have it")
+	index, ok := indexByPathOK(model.rows, "")
+	require.True(t, ok, "the surviving row is remote-only, so it has no local path")
+	projected := model.rows[index]
+	assert.Nil(t, projected.Entry, "no local entry survives a worktree that is gone")
+	assert.Nil(t, projected.Status)
+	require.NotNil(t, projected.Fleet)
+	assert.Equal(t, []string{"host-b"}, projected.Fleet.Hosts)
+	assert.False(t, projected.Fleet.Local)
+	assert.False(t, projected.Fleet.CanMaterialize,
+		"syncing from a reading this stale needs a fresh merge to confirm it first")
+}
+
+func TestFastRefreshDropsDeletedWorktreeHeldNowhereElse(t *testing.T) {
+	onlyLocal := testRow("kwt", "feature", "/w/kwt/feature")
+	onlyLocal.Fleet = &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		Kind:            "branch",
+		Ref:             "feature",
+		Branch:          "feature",
+		Hosts:           []string{"local"},
+		Local:           true,
+	}
+	other := testRow("kata", "main", "/w/kata/main")
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{onlyLocal, other}})
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{other}})
+
+	assert.Len(t, model.rows, 1,
+		"a worktree no host holds is simply gone, not remote")
+}
+
 func TestFastRefreshKeepsRemoteRowOnCaseSensitiveHost(t *testing.T) {
 	remoteOnly := Row{Fleet: &FleetInfo{
 		ProjectIdentity: "git.example.com/srv/KWT",

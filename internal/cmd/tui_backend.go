@@ -506,7 +506,7 @@ func sameRegisteredProject(a, b models.Project) bool {
 		return true
 	}
 	if a.Repository != "" && b.Repository != "" {
-		return strings.EqualFold(a.Repository, b.Repository)
+		return equalRepositoryIdentity(a.Repository, b.Repository)
 	}
 	return false
 }
@@ -1010,18 +1010,26 @@ func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Proj
 	return models.Project{}, false
 }
 
-func sameRepositoryIdentity(left string, right string) bool {
+// equalRepositoryIdentity compares two repository identities with the host-aware
+// fold. A plain EqualFold would let a case-sensitive server's two repositories
+// match each other, and this decides which checkout a mutation runs against.
+func equalRepositoryIdentity(left string, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
 	if left == "" || right == "" {
 		return false
 	}
-	if strings.EqualFold(left, right) {
+	return url.FoldRepositoryIdentity(left) == url.FoldRepositoryIdentity(right)
+}
+
+func sameRepositoryIdentity(left string, right string) bool {
+	if equalRepositoryIdentity(left, right) {
 		return true
 	}
 	normalizedLeft, leftErr := fleet.NormalizeRepositoryIdentity(left)
 	normalizedRight, rightErr := fleet.NormalizeRepositoryIdentity(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(normalizedLeft, normalizedRight)
+	return leftErr == nil && rightErr == nil &&
+		equalRepositoryIdentity(normalizedLeft, normalizedRight)
 }
 
 func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, force bool) error {
@@ -1090,13 +1098,16 @@ func projectMatchesRow(project models.Project, row dashboard.Row) bool {
 	info := row.Entry.RepositoryInfo
 	stableCandidates := rowRepositoryIdentityCandidates(info)
 	for _, candidate := range stableCandidates {
-		if candidate != "" && strings.EqualFold(project.Repository, candidate) {
+		if equalRepositoryIdentity(project.Repository, candidate) {
 			return true
 		}
 	}
 	if len(stableCandidates) > 0 {
 		return false
 	}
+	// Below here the row has no stable identity, so these compare bare
+	// repository names rather than identities; host case-sensitivity does not
+	// apply to a name with no host attached.
 	if project.Repository != "" && info.Repository != "" && strings.EqualFold(project.Repository, info.Repository) {
 		return true
 	}

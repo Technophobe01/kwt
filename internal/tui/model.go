@@ -280,9 +280,13 @@ func carryEnrichment(fast, previous []Row) []Row {
 
 	rows := make([]Row, 0, len(fast))
 	discovered := make(map[string]bool, len(fast))
+	onDisk := make(map[string]bool, len(fast))
 	for _, row := range fast {
 		if key := FleetKeyForRow(row); key != "" {
 			discovered[key] = true
+		}
+		if path := rowPath(row); path != "" {
+			onDisk[path] = true
 		}
 		if before, ok := enriched[rowPath(row)]; ok && sameCheckout(before, row) {
 			if before.Status != nil {
@@ -294,13 +298,55 @@ func carryEnrichment(fast, previous []Row) []Row {
 	}
 
 	for _, row := range previous {
-		// A remote-only row whose worktree the fast load just found on disk has
-		// become local; the local row carries it now.
-		if isRemoteOnly(row) && !discovered[FleetKeyForRow(row)] {
+		// A row the fast load just found needs nothing carried: its local shape
+		// supersedes whatever the hub said about it.
+		if discovered[FleetKeyForRow(row)] {
+			continue
+		}
+		if isRemoteOnly(row) {
 			rows = append(rows, row)
+			continue
+		}
+		// Matching on path, not on the fleet key: the key is derived from Fleet
+		// for a row that has one and from the entry otherwise, so the two shapes
+		// of one worktree do not always agree. Its path does.
+		if onDisk[rowPath(row)] {
+			continue
+		}
+		if projected, ok := remoteProjection(row); ok {
+			rows = append(rows, projected)
 		}
 	}
 	return rows
+}
+
+// remoteProjection reduces a row that was local to what the hub still says about
+// it, for use when the fast load no longer finds it on disk. Deleting the local
+// worktree of something that also lives on other hosts should not hide those
+// hosts, which is what dropping the row outright would do until a fleet merge
+// re-derived it — and none follows a full load that fails.
+//
+// The projection keeps no local state and offers no sync: the hub reading it
+// came from is now a load older than the row it replaced, so it is worth
+// displaying but not worth acting on until the next merge confirms it.
+func remoteProjection(row Row) (Row, bool) {
+	if row.Fleet == nil {
+		return Row{}, false
+	}
+	hosts := make([]string, 0, len(row.Fleet.Hosts))
+	for _, host := range row.Fleet.Hosts {
+		if host != "" && host != "local" {
+			hosts = append(hosts, host)
+		}
+	}
+	if len(hosts) == 0 {
+		return Row{}, false
+	}
+	fleetInfo := *row.Fleet
+	fleetInfo.Hosts = hosts
+	fleetInfo.Local = false
+	fleetInfo.CanMaterialize = false
+	return Row{Fleet: &fleetInfo}, true
 }
 
 // sameCheckout reports whether two rows sharing a path describe the same
