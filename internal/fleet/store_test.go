@@ -52,6 +52,24 @@ func TestStoreGroupsRowsAcrossProjectIdentityCasing(t *testing.T) {
 		"both hosts' observations belong to the single row")
 }
 
+// A plain Git server on a case-sensitive filesystem can hold two repositories
+// whose identities differ only in case, so their observations must stay apart.
+func TestStoreKeepsCaseSensitiveHostIdentitiesSeparate(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	first := testManifest("host-a", "Host-A", "darwin/arm64", "git.example.com/srv/KWT", "branch", "feature/fleet", "aaa")
+	second := testManifest("host-b", "Host-B", "darwin/arm64", "git.example.com/srv/kwt", "branch", "feature/fleet", "bbb")
+
+	require.NoError(t, store.Put(context.Background(), first))
+	require.NoError(t, store.Put(context.Background(), second))
+	state, err := store.State(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, state.Rows, 2,
+		"an unrecognized host may distinguish repositories by case")
+	assert.Equal(t, []string{"host-a"}, observationHosts(state.Rows[0]))
+	assert.Equal(t, []string{"host-b"}, observationHosts(state.Rows[1]))
+}
+
 func TestStoreGroupsRowsAcrossProjectIdentityCasingRegardlessOfOrder(t *testing.T) {
 	// The surviving spelling must not depend on which host published first.
 	identities := func(lowerFirst bool) string {

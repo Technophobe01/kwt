@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	repositoryurl "go.kenn.io/kwt/internal/url"
 )
 
 // Store persists fleet manifests and returns the grouped fleet state.
@@ -244,9 +246,10 @@ func buildFleetState(file storeFile) (FleetState, error) {
 				// Hosts derive this identity from their own clone's remote, so
 				// two of them can spell one repository differently. Grouping on
 				// the verbatim spelling would split a worktree into a row per
-				// spelling, and consumers that match case-insensitively then
-				// keep only whichever row they see last.
-				projectIdentity: strings.ToLower(worktree.ProjectIdentity),
+				// spelling, and consumers that fold identities then keep only
+				// whichever row they see last. Folding is per host: where names
+				// really are case-sensitive the spellings stay separate rows.
+				projectIdentity: repositoryurl.FoldRepositoryIdentity(worktree.ProjectIdentity),
 				kind:            worktree.Kind,
 				ref:             worktree.Ref,
 			}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-runewidth"
+	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -64,18 +65,15 @@ func rowBranch(row Row) string {
 }
 
 // FleetKey identifies one worktree for matching hub state against what is on
-// disk. The project half is case-folded because a clone's remote URL and a hub
-// manifest can spell one forge identity differently; the ref half is not,
-// because branch names are case-sensitive.
+// disk. The project half is folded per host, because a clone's remote URL and a
+// hub manifest can spell one forge identity differently while a case-sensitive
+// server can spell two repositories that way. The ref half is never folded:
+// branch names are case-sensitive everywhere.
 //
-// The fold is deliberately provider-agnostic. Every forge kwt targets treats
-// owner and repository as case-insensitive, so folding only for github.com
-// would split rows for GitLab, Bitbucket and Gitea users instead. It does mean
-// a bare Git server on a case-sensitive filesystem could have two repositories
-// that differ only in case treated as one; that trade was made knowingly, and
-// distinguishing them needs per-host case-sensitivity that nothing asks for yet.
+// This must fold identities exactly as the hub groups them, or a local worktree
+// stops matching its own hub row.
 func FleetKey(projectIdentity string, kind string, ref string) string {
-	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
+	projectIdentity = url.FoldRepositoryIdentity(projectIdentity)
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	ref = strings.TrimSpace(ref)
 	if projectIdentity == "" || kind == "" || ref == "" {

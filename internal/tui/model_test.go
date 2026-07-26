@@ -1419,6 +1419,27 @@ func TestModelRemovesFailedCreationDiscoveredAtItsResolvedPath(t *testing.T) {
 	assert.False(t, ok, "a row left here would stay marked creating forever")
 }
 
+func TestFastRefreshKeepsRemoteRowOnCaseSensitiveHost(t *testing.T) {
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "git.example.com/srv/KWT",
+		ProjectName:     "KWT",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+		CanMaterialize:  true,
+	}}
+	local := testRow("kwt", "feature/remote", "/w/kwt/feature-remote")
+	local.Entry.RepositoryInfo.FullPath = "git.example.com/srv/kwt"
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{local}})
+
+	assert.Len(t, model.rows, 2,
+		"an unrecognized host may distinguish these repositories by case")
+}
+
 func TestFastRefreshKeepsRemoteRowWithDifferentBranchCase(t *testing.T) {
 	remoteOnly := Row{Fleet: &FleetInfo{
 		ProjectIdentity: "github.com/example/kwt",
