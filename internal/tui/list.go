@@ -67,6 +67,13 @@ func rowBranch(row Row) string {
 // disk. The project half is case-folded because a clone's remote URL and a hub
 // manifest can spell one forge identity differently; the ref half is not,
 // because branch names are case-sensitive.
+//
+// The fold is deliberately provider-agnostic. Every forge kwt targets treats
+// owner and repository as case-insensitive, so folding only for github.com
+// would split rows for GitLab, Bitbucket and Gitea users instead. It does mean
+// a bare Git server on a case-sensitive filesystem could have two repositories
+// that differ only in case treated as one; that trade was made knowingly, and
+// distinguishing them needs per-host case-sensitivity that nothing asks for yet.
 func FleetKey(projectIdentity string, kind string, ref string) string {
 	projectIdentity = strings.ToLower(strings.TrimSpace(projectIdentity))
 	kind = strings.ToLower(strings.TrimSpace(kind))
