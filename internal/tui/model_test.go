@@ -1311,6 +1311,52 @@ func TestFastRefreshDropsRemoteRowThatBecameLocal(t *testing.T) {
 	assert.NotNil(t, model.rows[0].Entry)
 }
 
+// A hub manifest and a local clone can spell one forge identity differently;
+// only the branch half of the key is case-sensitive.
+func TestFastRefreshDropsRemoteRowDifferingOnlyInIdentityCase(t *testing.T) {
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/Example/KWT",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "feature/remote",
+		Branch:          "feature/remote",
+		CanMaterialize:  true,
+	}}
+	local := testRow("kwt", "feature/remote", "/w/kwt/feature-remote")
+	local.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+	require.Len(t, model.rows, 1)
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{local}})
+
+	require.Len(t, model.rows, 1,
+		"owner and repository casing must not split one worktree into two rows")
+	assert.NotNil(t, model.rows[0].Entry)
+}
+
+func TestFastRefreshKeepsRemoteRowWithDifferentBranchCase(t *testing.T) {
+	remoteOnly := Row{Fleet: &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "Feature/Remote",
+		Branch:          "Feature/Remote",
+		CanMaterialize:  true,
+	}}
+	local := testRow("kwt", "feature/remote", "/w/kwt/feature-remote")
+	local.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{remoteOnly}})
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{local}})
+
+	assert.Len(t, model.rows, 2,
+		"branch names are case-sensitive, so these are two different worktrees")
+}
+
 func TestModelKeepsQueuedActionRefreshWhenFastLoadFails(t *testing.T) {
 	backend := &fakeBackend{
 		rows: []Row{testRow("kwt", "feature", "/w/kwt/feature")},

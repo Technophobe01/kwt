@@ -66,9 +66,15 @@ func rowBranch(row Row) string {
 // fleetIdentity keys one worktree across its local and remote-only shapes: the
 // same branch of the same project is one worktree whether it was found on disk
 // or reported by the hub. Empty when a row carries too little to be matched.
+//
+// The project half is case-folded and the branch half is not, matching how the
+// backend keys hub rows against local ones — a local clone and a hub manifest
+// can spell one forge identity with different capitalization, while branch
+// names are case-sensitive. Keep this in step with tuiFleetKey; the packages
+// cannot share it without a cycle.
 func fleetIdentity(row Row) string {
-	project := rowProjectKey(row)
-	branch := rowBranch(row)
+	project := strings.ToLower(strings.TrimSpace(rowProjectKey(row)))
+	branch := strings.TrimSpace(rowBranch(row))
 	if project == "" || branch == "" {
 		return ""
 	}
