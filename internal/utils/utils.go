@@ -107,6 +107,20 @@ func CanonicalPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// IsSameOrChildPath reports whether path names parent or a directory nested
+// inside it. Both sides are canonicalized first, so a launch directory reached
+// through a symlink still matches the worktree that contains it.
+func IsSameOrChildPath(path, parent string) bool {
+	if path == "" || parent == "" {
+		return false
+	}
+	rel, err := filepath.Rel(CanonicalPath(parent), CanonicalPath(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 // TildePath replaces the home directory portion of a path with ~.
 // If the path doesn't start with the home directory, it returns the original path.
 func TildePath(path string) string {

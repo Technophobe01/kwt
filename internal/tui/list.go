@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-runewidth"
+	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -61,6 +62,57 @@ func rowBranch(row Row) string {
 		return row.Status.Branch
 	}
 	return ""
+}
+
+// FleetKey identifies one worktree for matching hub state against what is on
+// disk. The project half is folded per host, because a clone's remote URL and a
+// hub manifest can spell one forge identity differently while a case-sensitive
+// server can spell two repositories that way. The ref half is never folded:
+// branch names are case-sensitive everywhere.
+//
+// This must fold identities exactly as the hub groups them, or a local worktree
+// stops matching its own hub row.
+func FleetKey(projectIdentity string, kind string, ref string) string {
+	projectIdentity = url.FoldRepositoryIdentity(projectIdentity)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	ref = strings.TrimSpace(ref)
+	if projectIdentity == "" || kind == "" || ref == "" {
+		return ""
+	}
+	return projectIdentity + "\x00" + kind + "\x00" + ref
+}
+
+// FleetKeyForRow derives FleetKey from a row in whichever shape it arrived:
+// reported by the hub, or discovered on disk. Both shapes of one worktree
+// produce the same key, which is what lets a remote-only row be recognized once
+// it becomes local. Empty when a row carries too little to be matched.
+func FleetKeyForRow(row Row) string {
+	if row.Fleet != nil {
+		return FleetKey(row.Fleet.ProjectIdentity, row.Fleet.Kind, row.Fleet.Ref)
+	}
+	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
+		return ""
+	}
+	identity := row.Entry.RepositoryInfo.FullPath
+	info := row.Entry.RepositoryInfo
+	if identity == "" && info.Host != "" && info.Owner != "" && info.Repository != "" {
+		identity = path.Join(info.Host, info.Owner, info.Repository)
+	}
+	if identity == "" {
+		return ""
+	}
+	branch := strings.TrimSpace(row.Entry.Branch)
+	if branch == "" || branch == "HEAD" {
+		// Hub manifests key detached worktrees by commit SHA.
+		return FleetKey(identity, "detached", strings.TrimSpace(row.Entry.CommitHash))
+	}
+	return FleetKey(identity, "branch", branch)
+}
+
+// isRemoteOnly reports whether a row exists only as hub state, with nothing on
+// this machine behind it.
+func isRemoteOnly(row Row) bool {
+	return row.Entry == nil && row.Workspace == nil && row.Fleet != nil
 }
 
 func rowPath(row Row) string {
@@ -159,9 +211,12 @@ func filterProjectPerspectiveRows(rows []Row, project string) []Row {
 		return append([]Row(nil), rows...)
 	}
 
+	// Fold as the fleet key does, so scoping to a project cannot pull in a
+	// different repository that a case-sensitive host distinguishes.
+	project = url.FoldRepositoryIdentity(project)
 	filtered := make([]Row, 0, len(rows))
 	for _, row := range rows {
-		if strings.EqualFold(rowProjectKey(row), project) {
+		if url.FoldRepositoryIdentity(rowProjectKey(row)) == project {
 			filtered = append(filtered, row)
 		}
 	}
@@ -264,6 +319,9 @@ func formatPushPullStatus(status *models.WorktreeStatus) (string, bool) {
 }
 
 func formatRowChanges(row Row) string {
+	if row.Creating {
+		return "creating…"
+	}
 	if row.Workspace != nil {
 		return "-"
 	}
@@ -344,6 +402,9 @@ func compactFleetDirtySummary(summary string) string {
 }
 
 func formatRowSync(row Row) string {
+	if row.Creating {
+		return "-"
+	}
 	if row.Workspace != nil {
 		return "-"
 	}
@@ -681,6 +742,9 @@ func padRight(s string, width int) string {
 }
 
 func formatWorkspace(row Row) string {
+	if row.Creating {
+		return "pending"
+	}
 	if row.Entry == nil && row.Fleet != nil {
 		return "remote"
 	}
@@ -714,9 +778,63 @@ func indexByPath(rows []Row, path string) int {
 	return index
 }
 
+// containingRowIndex returns the row whose directory contains target,
+// preferring the deepest match so a nested worktree wins over the repository
+// that holds it. Containment uses the same canonicalizing comparison the status
+// collector uses to set IsCurrent, so the statusless fast load resolves a
+// launch directory exactly as the full load would.
+func containingRowIndex(rows []Row, target string) (int, bool) {
+	best := -1
+	bestDepth := 0
+	for i, row := range rows {
+		rowDir := rowPath(row)
+		if rowDir == "" || !utils.IsSameOrChildPath(target, rowDir) {
+			continue
+		}
+		// Rank on the canonical form: raw lengths would compare spellings
+		// rather than depth.
+		if depth := len(utils.CanonicalPath(rowDir)); depth > bestDepth {
+			best = i
+			bestDepth = depth
+		}
+	}
+	if best < 0 {
+		return 0, false
+	}
+	return best, true
+}
+
 func indexByPathOK(rows []Row, path string) (int, bool) {
 	for i, row := range rows {
 		if rowPath(row) == path {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// pathIdentity is the comparison key for rows that may be spelled differently
+// while naming one directory: a worktree created under a symlinked base
+// directory is reported by Git at its resolved path. A path that does not exist
+// yet keeps its spelling, which is what makes a planned destination compare
+// unequal to everything until Git creates it.
+func pathIdentity(path string) string {
+	if path == "" {
+		return ""
+	}
+	return utils.CanonicalPath(path)
+}
+
+// identityRowIndex finds the row naming the same directory as path, whichever
+// way either was spelled. Prefer indexByPathOK where both paths come from the
+// same source: this one resolves symlinks per row.
+func identityRowIndex(rows []Row, path string) (int, bool) {
+	key := pathIdentity(path)
+	if key == "" {
+		return 0, false
+	}
+	for i, row := range rows {
+		if pathIdentity(rowPath(row)) == key {
 			return i, true
 		}
 	}

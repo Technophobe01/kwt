@@ -322,3 +322,47 @@ func TestEscapeForShell(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSameOrChildPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		parent   string
+		expected bool
+	}{
+		{name: "Same directory", path: "/w/kwt/main", parent: "/w/kwt/main", expected: true},
+		{name: "Direct child", path: "/w/kwt/main/internal", parent: "/w/kwt/main", expected: true},
+		{name: "Nested descendant", path: "/w/kwt/main/a/b/c", parent: "/w/kwt/main", expected: true},
+		{name: "Unclean input", path: "/w/kwt/main/./a/../a", parent: "/w/kwt/main/", expected: true},
+		{name: "Sibling sharing a name prefix", path: "/w/kwt/feat-two", parent: "/w/kwt/feat"},
+		{name: "Parent of the directory", path: "/w/kwt", parent: "/w/kwt/main"},
+		{name: "Unrelated directory", path: "/w/kata/main", parent: "/w/kwt/main"},
+		{name: "Empty path", path: "", parent: "/w/kwt/main"},
+		{name: "Empty parent", path: "/w/kwt/main", parent: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSameOrChildPath(tt.path, tt.parent); got != tt.expected {
+				t.Errorf("IsSameOrChildPath(%q, %q) = %v, want %v",
+					tt.path, tt.parent, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsSameOrChildPathResolvesSymlinkedAncestor(t *testing.T) {
+	realDir := t.TempDir()
+	child := filepath.Join(realDir, "worktree", "internal")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("failed to create child directory: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symbolic links are not supported on this filesystem: %v", err)
+	}
+
+	if !IsSameOrChildPath(child, filepath.Join(link, "worktree")) {
+		t.Errorf("a parent reached through a symlink must still contain %q", child)
+	}
+}

@@ -15,8 +15,8 @@ import (
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/status"
-	"go.kenn.io/kwt/internal/utils"
 	repositoryurl "go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 

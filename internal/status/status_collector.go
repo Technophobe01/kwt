@@ -74,7 +74,7 @@ func (c *StatusCollector) CollectAll(ctx context.Context, worktrees []*models.Wo
 				return
 			}
 
-			if isSameOrChildPath(currentPath, worktree.Path) {
+			if utils.IsSameOrChildPath(currentPath, worktree.Path) {
 				status.IsCurrent = true
 			}
 
@@ -96,23 +96,6 @@ func (c *StatusCollector) CollectAll(ctx context.Context, worktrees []*models.Wo
 	}
 
 	return validStatuses, nil
-}
-
-func isSameOrChildPath(path, parent string) bool {
-	if path == "" || parent == "" {
-		return false
-	}
-	path = cleanPathForContainment(path)
-	parent = cleanPathForContainment(parent)
-	rel, err := filepath.Rel(parent, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-}
-
-func cleanPathForContainment(path string) string {
-	return utils.CanonicalPath(path)
 }
 
 func (c *StatusCollector) collectOne(ctx context.Context, worktree *models.Worktree) (*models.WorktreeStatus, error) {

@@ -119,6 +119,52 @@ func CanonicalRepositoryInfoFromRemote(raw string) (*RepositoryInfo, bool) {
 // passesCanonicalIdentityPrechecks applies the shared precondition of both
 // canonical bars: the value must be a plausible identity candidate and must
 // not carry a credential-shaped authority or SCP path.
+// caseInsensitiveRepositoryPathHosts are the hosts known to treat owner and
+// repository names case-insensitively, so two spellings there name one
+// repository. Hosts absent from this set are assumed case-sensitive, which is
+// the safe default: mistakenly folding a case-sensitive host silently credits
+// one repository's state to another, while mistakenly preserving a
+// case-insensitive one merely shows a repository twice. Self-hosted forges
+// cannot be recognized from a hostname and land on the safe side.
+var caseInsensitiveRepositoryPathHosts = map[string]bool{
+	"bitbucket.org": true,
+	"codeberg.org":  true,
+	"github.com":    true,
+	"gitlab.com":    true,
+}
+
+// FoldRepositoryIdentity normalizes a canonical repository identity for
+// comparison between spellings that name the same repository. The host is
+// always folded because DNS is case-insensitive; the owner and repository path
+// is folded only for hosts that resolve names case-insensitively, so a plain
+// Git server on a case-sensitive filesystem keeps two repositories differing
+// only in case distinct.
+//
+// Callers that compare identities must all fold them the same way, or one side
+// stops recognizing the other's spelling.
+func FoldRepositoryIdentity(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ""
+	}
+	authority, remainder, ok := strings.Cut(identity, "/")
+	authority = strings.ToLower(authority)
+	if !ok {
+		return authority
+	}
+	if caseInsensitiveRepositoryPathHosts[hostWithoutPort(authority)] {
+		remainder = strings.ToLower(remainder)
+	}
+	return authority + "/" + remainder
+}
+
+func hostWithoutPort(authority string) string {
+	if host, _, err := net.SplitHostPort(authority); err == nil {
+		return host
+	}
+	return authority
+}
+
 func passesCanonicalIdentityPrechecks(raw string) bool {
 	return isCanonicalIdentityCandidate(raw) &&
 		!hasCredentialBearingAuthoritySlug(raw) &&

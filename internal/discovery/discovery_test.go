@@ -356,6 +356,73 @@ func TestDiscoverGlobalWorktrees_DoesNotDescendIntoMainRepo(t *testing.T) {
 	}
 }
 
+func TestDiscoverGlobalWorktrees_DoesNotDescendIntoLinkedWorktree(t *testing.T) {
+	baseDir := t.TempDir()
+	mainDir := filepath.Join(baseDir, "repo", "main")
+	repo := initRepoAt(t, mainDir, "https://github.com/user/repo.git")
+	repo.CreateBranch(t, "feature")
+	linkedDir := filepath.Join(baseDir, "repo", "feature")
+	repo.CreateWorktree(t, linkedDir, "feature")
+
+	// Linked worktrees can contain dependency checkouts or other nested Git
+	// repositories. Those implementation details are not kwt worktrees.
+	nestedDir := filepath.Join(linkedDir, ".build", "checkouts", "dependency")
+	initRepoAt(t, nestedDir, "https://github.com/example/dependency.git")
+
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
+
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Expected main and linked worktrees only, got %d entries", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.Path == nestedDir {
+			t.Fatal("discovery descended into a linked worktree")
+		}
+	}
+}
+
+func TestExtractWorktreeCandidatesRunsConcurrentlyAndPreservesOrder(t *testing.T) {
+	candidates := []worktreeCandidate{
+		{path: "/worktrees/first"},
+		{path: "/worktrees/second"},
+	}
+	started := make(chan string, len(candidates))
+	release := make(chan struct{})
+	done := make(chan []*GlobalWorktreeEntry, 1)
+
+	go func() {
+		done <- extractWorktreeCandidates(
+			candidates,
+			nil,
+			func(path string, _ []models.Project) (*GlobalWorktreeEntry, error) {
+				started <- path
+				<-release
+				return &GlobalWorktreeEntry{Path: path}, nil
+			},
+		)
+	}()
+
+	for range candidates {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("candidate extraction ran serially")
+		}
+	}
+	close(release)
+
+	entries := <-done
+	if len(entries) != 2 {
+		t.Fatalf("Expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Path != candidates[0].path || entries[1].Path != candidates[1].path {
+		t.Fatalf("Candidate order changed: %#v", entries)
+	}
+}
+
 func TestGetCurrentBranch_InvalidPath(t *testing.T) {
 	_, err := getCurrentBranch("/nonexistent/path")
 	if err == nil {

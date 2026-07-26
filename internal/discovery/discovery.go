@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.kenn.io/kwt/internal/git"
@@ -25,6 +26,11 @@ type GlobalWorktreeEntry struct {
 	CommitHash     string
 	IsMain         bool
 	CreatedAt      time.Time // Worktree directory modification time
+}
+
+type worktreeCandidate struct {
+	path   string
+	isMain bool
 }
 
 // DiscoverGlobalWorktrees finds all worktrees in the configured base
@@ -49,7 +55,7 @@ func DiscoverGlobalWorktrees(baseDir string, projects []models.Project) ([]*Glob
 		return []*GlobalWorktreeEntry{}, nil
 	}
 
-	var entries []*GlobalWorktreeEntry
+	var candidates []worktreeCandidate
 
 	err = filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -73,12 +79,7 @@ func DiscoverGlobalWorktrees(baseDir string, projects []models.Project) ([]*Glob
 
 		if gitInfo.IsDir() {
 			// Main worktree (.git is a directory)
-			entry, err := extractWorktreeInfo(path, projects)
-			if err != nil {
-				return filepath.SkipDir // Skip broken repos but don't walk into them
-			}
-			entry.IsMain = true
-			entries = append(entries, entry)
+			candidates = append(candidates, worktreeCandidate{path: path, isMain: true})
 			return filepath.SkipDir // Don't descend into the repo
 		}
 
@@ -99,19 +100,58 @@ func DiscoverGlobalWorktrees(baseDir string, projects []models.Project) ([]*Glob
 			return nil
 		}
 
-		entry, err := extractWorktreeInfo(path, projects)
-		if err != nil {
-			return nil
-		}
-		entries = append(entries, entry)
-		return nil
+		candidates = append(candidates, worktreeCandidate{path: path})
+		return filepath.SkipDir
 	})
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
-	return entries, nil
+	return extractWorktreeCandidates(candidates, projects, extractWorktreeInfo), nil
+}
+
+func extractWorktreeCandidates(
+	candidates []worktreeCandidate,
+	projects []models.Project,
+	extract func(string, []models.Project) (*GlobalWorktreeEntry, error),
+) []*GlobalWorktreeEntry {
+	if len(candidates) == 0 {
+		return []*GlobalWorktreeEntry{}
+	}
+
+	const maxWorkers = 16
+	workerCount := min(len(candidates), maxWorkers)
+	results := make([]*GlobalWorktreeEntry, len(candidates))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				entry, err := extract(candidates[index].path, projects)
+				if err != nil {
+					continue
+				}
+				entry.IsMain = candidates[index].isMain
+				results[index] = entry
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+
+	entries := make([]*GlobalWorktreeEntry, 0, len(results))
+	for _, entry := range results {
+		if entry != nil {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }
 
 // extractWorktreeInfo extracts worktree information from a worktree directory.
