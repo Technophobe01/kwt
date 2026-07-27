@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/git"
@@ -344,4 +348,156 @@ func TestRunProjectsJSONEmptyIsArray(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("expected empty array, got %d entries", len(got))
 	}
+}
+
+func TestRunProjectsAddJSONRegistersCanonicalProject(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	canonicalRepoPath, err := filepath.EvalSymlinks(repoPath)
+	require.NoError(t, err)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", "git@github.com:acme/widget.git")
+	linkedPath := filepath.Join(t.TempDir(), "linked")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "linked", linkedPath)
+
+	originalRegister := registerProject
+	t.Cleanup(func() { registerProject = originalRegister })
+	var registered models.Project
+	registerProject = func(project models.Project) error {
+		registered = project
+		return nil
+	}
+	projectsAddJSON = true
+	t.Cleanup(func() { projectsAddJSON = false })
+	stdout := &bytes.Buffer{}
+	projectsAddCmd.SetOut(stdout)
+
+	require.NoError(t, runProjectsAdd(projectsAddCmd, []string{linkedPath}))
+
+	var response struct {
+		Status  string         `json:"status"`
+		Project models.Project `json:"project"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "registered", response.Status)
+	assert.Equal(t, "github.com/acme/widget", response.Project.Repository)
+	assert.Equal(t, canonicalRepoPath, response.Project.Path)
+	assert.NotEmpty(t, response.Project.LastTouched)
+	assert.Equal(t, response.Project, registered)
+}
+
+func TestRunProjectsAddJSONWritesStableInvalidRepositoryError(t *testing.T) {
+	projectsAddJSON = true
+	t.Cleanup(func() { projectsAddJSON = false })
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	projectsAddCmd.SetOut(stdout)
+	projectsAddCmd.SetErr(stderr)
+
+	err := runProjectsAdd(
+		projectsAddCmd,
+		[]string{filepath.Join(t.TempDir(), "missing")},
+	)
+
+	var exitErr interface{ ExitCode() int }
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 2, exitErr.ExitCode())
+	var response struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "invalid_repository", response.Error.Code)
+	assert.False(t, response.Error.Retryable)
+	assert.NotEmpty(t, response.Error.Message)
+	assert.Contains(t, stderr.String(), "invalid_repository")
+}
+
+func TestProjectsAddArgumentValidationUsesStructuredErrors(t *testing.T) {
+	projectsAddJSON = true
+	t.Cleanup(func() { projectsAddJSON = false })
+	cmd, stdout, stderr := projectsTestCommand()
+
+	err := projectsExactArgs(1)(cmd, nil)
+
+	var exitErr *projectCommandError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 2, exitErr.ExitCode())
+	var envelope projectCommandErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, "invalid_repository", envelope.Error.Code)
+	assert.Contains(t, stderr.String(), "invalid_repository")
+}
+
+func TestProjectsAddUnknownFlagBeforeJSONUsesStructuredError(t *testing.T) {
+	if os.Getenv("KWT_TEST_PROJECTS_UNKNOWN_FLAG") == "1" {
+		os.Args = []string{
+			os.Args[0],
+			"projects",
+			"add",
+			"--bogus",
+			"--json",
+		}
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stderr)
+		Execute()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestProjectsAddUnknownFlagBeforeJSONUsesStructuredError$")
+	cmd.Env = append(os.Environ(), "KWT_TEST_PROJECTS_UNKNOWN_FLAG=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 2, exitErr.ExitCode())
+	var envelope projectCommandErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, "invalid_repository", envelope.Error.Code)
+	assert.Contains(t, stderr.String(), "invalid_repository")
+}
+
+func TestProjectsConfigInitializationFailureUsesJSONContract(t *testing.T) {
+	if os.Getenv("KWT_TEST_PROJECTS_CONFIG_INIT_FAILURE") == "1" {
+		rootCmd.SetArgs([]string{"projects", "add", "/missing", "--json"})
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stderr)
+		Execute()
+		return
+	}
+
+	kwtHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(kwtHome, "config.toml"), []byte("invalid = [\n"), 0o600))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestProjectsConfigInitializationFailureUsesJSONContract$")
+	cmd.Env = append(os.Environ(),
+		"KWT_TEST_PROJECTS_CONFIG_INIT_FAILURE=1",
+		"KWT_HOME="+kwtHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	var envelope projectCommandErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, "registration_failed", envelope.Error.Code)
+	assert.Contains(t, stderr.String(), "registration_failed")
+}
+
+func projectsTestCommand() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
+	cmd := &cobra.Command{}
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	return cmd, stdout, stderr
 }
