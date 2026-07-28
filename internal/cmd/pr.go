@@ -34,6 +34,7 @@ var (
 	loadPRConfig                     = config.Load
 	loadPRTargetConfig               = config.LoadForTarget
 	newPRService                     = defaultNewPRService
+	newPRGitHubProvider              = pullrequest.NewAuthenticatedGitHubProvider
 	validatePRProjectRoot            = defaultValidatePRProjectRoot
 	inspectPRProjectClone            = defaultInspectPRProjectClone
 	validatePRWorkspaceSessionConfig = defaultValidatePRWorkspaceSessionConfig
@@ -107,7 +108,7 @@ func runPRList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	service, _, err := preparePRService(cmd.Context(), project)
+	service, _, project, err := preparePRService(cmd.Context(), project)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -128,12 +129,19 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	if _, err := pullrequest.ParseSelector(args[0], project.Identity); err != nil {
-		return writePRError(cmd, err)
-	}
-	service, cfg, err := preparePRService(cmd.Context(), project)
+	number, err := pullrequest.ParseSelectorNumber(args[0])
 	if err != nil {
 		return writePRError(cmd, err)
+	}
+	registeredIdentity := project.Identity
+	service, cfg, project, err := preparePRService(cmd.Context(), project)
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	if _, err := pullrequest.ParseSelector(args[0], registeredIdentity); err != nil {
+		if _, resolvedErr := pullrequest.ParseSelector(args[0], project.Identity); resolvedErr != nil {
+			return writePRError(cmd, resolvedErr)
+		}
 	}
 	if prStartSession {
 		if err := validatePRWorkspaceSessionConfig(cfg); err != nil {
@@ -145,7 +153,7 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			))
 		}
 	}
-	result, err := service.Import(cmd.Context(), project, args[0])
+	result, err := service.Import(cmd.Context(), project, fmt.Sprintf("%d", number))
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -255,7 +263,7 @@ func importedWorkspaceProvenance(
 	record := matches[0]
 	liveProject, liveWorkspaces, err := inspectPRProjectClone(
 		ctx,
-		record.Project,
+		record,
 	)
 	if err != nil {
 		return pullrequest.Provenance{}, pullrequest.NewError(
@@ -265,8 +273,8 @@ func importedWorkspaceProvenance(
 			err,
 		)
 	}
-	if !samePRProjectClone(record.Project, liveProject) ||
-		!containsPRWorkspace(liveWorkspaces, record.Workspace) {
+	if !samePRProjectClone(record, liveProject) ||
+		!containsPRWorkspace(liveWorkspaces, record) {
 		return pullrequest.Provenance{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation,
 			"workspace no longer matches its pull-request provenance",
@@ -312,12 +320,12 @@ func rejectProtectedWorkspaceOpen(
 
 func defaultInspectPRProjectClone(
 	ctx context.Context,
-	recorded pullrequest.Project,
+	recorded pullrequest.Provenance,
 ) (pullrequest.Project, []pullrequest.Workspace, error) {
 	if err := ctx.Err(); err != nil {
 		return pullrequest.Project{}, nil, err
 	}
-	project, err := validatePRProjectRoot(recorded)
+	project, err := validatePRProjectRoot(recorded.Project)
 	if err != nil {
 		return pullrequest.Project{}, nil, err
 	}
@@ -331,7 +339,7 @@ func defaultInspectPRProjectClone(
 	registered := make([]models.Project, 0, 1)
 	for _, candidate := range cfg.Projects {
 		if utils.CanonicalPath(candidate.Path) !=
-			utils.CanonicalPath(recorded.Path) {
+			utils.CanonicalPath(recorded.Project.Path) {
 			continue
 		}
 		registered = append(registered, candidate)
@@ -344,7 +352,11 @@ func defaultInspectPRProjectClone(
 	if len(registered) == 1 &&
 		!pullrequest.EqualRepositoryIdentity(
 			publishableProjectRepository(registered[0]),
-			recorded.Identity,
+			recorded.Project.Identity,
+		) &&
+		!pullrequest.ProvenanceHasRepositoryIdentity(
+			recorded,
+			publishableProjectRepository(registered[0]),
 		) {
 		return pullrequest.Project{}, nil, fmt.Errorf(
 			"registered project conflicts with recorded identity",
@@ -372,6 +384,17 @@ func defaultInspectPRProjectClone(
 		return pullrequest.Project{}, nil, err
 	}
 	project.Identity = pullrequest.NormalizeRepositoryIdentity(info.FullPath)
+	if !pullrequest.EqualRepositoryIdentity(
+		recorded.Project.Identity,
+		project.Identity,
+	) && !pullrequest.ProvenanceHasRepositoryIdentity(
+		recorded,
+		project.Identity,
+	) {
+		return pullrequest.Project{}, nil, fmt.Errorf(
+			"live project conflicts with recorded identity",
+		)
+	}
 	return project, livePRWorkspaces(info, project, live), nil
 }
 
@@ -409,31 +432,73 @@ func liveGitWorktreePath(path string) bool {
 }
 
 func samePRProjectClone(
-	left, right pullrequest.Project,
+	recorded pullrequest.Provenance,
+	live pullrequest.Project,
 ) bool {
-	return pullrequest.EqualRepositoryIdentity(
-		left.Identity,
-		right.Identity,
-	) && utils.CanonicalPath(left.Path) == utils.CanonicalPath(right.Path)
+	if utils.CanonicalPath(recorded.Project.Path) !=
+		utils.CanonicalPath(live.Path) {
+		return false
+	}
+	if pullrequest.EqualRepositoryIdentity(
+		recorded.Project.Identity,
+		live.Identity,
+	) {
+		return true
+	}
+	return pullrequest.ProvenanceHasRepositoryIdentity(
+		recorded,
+		recorded.Project.Identity,
+	) && pullrequest.ProvenanceHasRepositoryIdentity(
+		recorded,
+		live.Identity,
+	)
 }
 
 func containsPRWorkspace(
 	live []pullrequest.Workspace,
-	recorded pullrequest.Workspace,
+	recorded pullrequest.Provenance,
 ) bool {
 	for _, candidate := range live {
 		if utils.CanonicalPath(candidate.Path) ==
-			utils.CanonicalPath(recorded.Path) &&
-			candidate.Branch == recorded.Branch &&
-			pullrequest.EqualRepositoryIdentity(
-				candidate.Repository,
-				recorded.Repository,
-			) &&
-			candidate.SessionName == recorded.SessionName {
+			utils.CanonicalPath(recorded.Workspace.Path) &&
+			candidate.Branch == recorded.Workspace.Branch &&
+			prWorkspaceIdentityMatches(candidate, recorded) {
 			return true
 		}
 	}
 	return false
+}
+
+func prWorkspaceIdentityMatches(
+	live pullrequest.Workspace,
+	recorded pullrequest.Provenance,
+) bool {
+	if pullrequest.EqualRepositoryIdentity(
+		live.Repository,
+		recorded.Workspace.Repository,
+	) {
+		return live.SessionName == recorded.Workspace.SessionName
+	}
+	if !pullrequest.ProvenanceHasRepositoryIdentity(
+		recorded,
+		live.Repository,
+	) || !pullrequest.ProvenanceHasRepositoryIdentity(
+		recorded,
+		recorded.Workspace.Repository,
+	) {
+		return false
+	}
+	info, ok := urlutil.CanonicalRepositoryInfo(
+		recorded.Workspace.Repository,
+	)
+	if !ok {
+		return false
+	}
+	return recorded.Workspace.SessionName == tmux.WorkspaceSessionName(
+		info,
+		recorded.Workspace.Branch,
+		recorded.Workspace.Path,
+	)
 }
 
 func preparePRProject() (pullrequest.Project, error) {
@@ -452,21 +517,21 @@ func preparePRProject() (pullrequest.Project, error) {
 func preparePRService(
 	ctx context.Context,
 	project pullrequest.Project,
-) (prService, *models.Config, error) {
+) (prService, *models.Config, pullrequest.Project, error) {
 	project, err := validatePRProjectRoot(project)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, project, err
 	}
 	cfg, err := loadPRTargetConfig(project.Path, false)
 	if err != nil {
-		return nil, nil, pullrequest.NewError(
+		return nil, nil, project, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation, "failed to load selected project configuration", false, err)
 	}
-	service, err := newPRService(ctx, cfg, project)
+	service, project, err := newPRService(ctx, cfg, project)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, project, err
 	}
-	return service, cfg, nil
+	return service, cfg, project, nil
 }
 
 func defaultStartPRWorkspaceSession(
@@ -588,17 +653,36 @@ func protectedCredentialNames(cfg *models.Config) []string {
 	return protected
 }
 
-func defaultNewPRService(ctx context.Context, cfg *models.Config, project pullrequest.Project) (prService, error) {
-	provider, err := pullrequest.NewAuthenticatedGitHubProvider(ctx)
+func defaultNewPRService(
+	ctx context.Context,
+	cfg *models.Config,
+	project pullrequest.Project,
+) (prService, pullrequest.Project, error) {
+	requestedRepository, err := pullrequest.RepositoryFromProject(project)
 	if err != nil {
-		return nil, err
+		return nil, project, err
 	}
+	provider, err := newPRGitHubProvider(ctx)
+	if err != nil {
+		return nil, project, err
+	}
+	repository, err := provider.ResolveRepository(ctx, requestedRepository)
+	if err != nil {
+		return nil, project, err
+	}
+	project.Identity = repository.Identity
 	g := gitadapter.New(project.Path)
 	manager := worktree.New(g, cfg)
 	backend := pullrequest.NewGitBackend(
 		g, manager, project, cfg.Fleet.TokenEnv,
 	)
-	return pullrequest.NewService(provider, backend, pullrequest.NewFileStore(prStorePath())), nil
+	return pullrequest.NewService(
+		provider,
+		backend,
+		pullrequest.NewFileStore(prStorePath()),
+		requestedRepository.Identity,
+		repository.Identity,
+	), project, nil
 }
 
 func resolvePRProject(cfg *models.Config, selector string) (pullrequest.Project, error) {

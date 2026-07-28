@@ -106,6 +106,23 @@ multiple projects, kwt returns `repository_mismatch`; callers must use the
 repository identity or path. `--state` accepts `open`, `closed`, or `all` and
 defaults to `open`.
 
+Before listing or importing pull requests, kwt resolves the selected repository
+through GitHub and uses the current canonical identity for the provider request,
+workspace, and provenance. GitHub repository transfers and renames therefore
+continue to work when the project registry still contains the previous
+identity. This resolution is operation-local and does not rewrite the
+registered project, whose identity may intentionally name an upstream
+repository while the checkout's origin points to a fork. Import selectors may
+use either the registered or resolved repository URL during that transition.
+Existing imports from the same project clone remain discoverable through the
+verified alias pair; the next import migrates their repository, project,
+same-repository source, workspace, and record-key identities to the resolved
+repository atomically. Provenance retains the canonical alias history so later
+transfers remain connected through a previously verified identity. Protected
+attachment requires that history to overlap the live registered identity and
+validates the recorded deterministic session against its own historical
+repository identity.
+
 ## Authentication
 
 GitHub API authentication is resolved without prompting:
@@ -403,19 +420,19 @@ and return a stable nonzero status. For example:
 }
 ```
 
-| Exit | Error code                     | Meaning |
-| ---: | ------------------------------ | ------- |
-| 2    | `invalid_pull_request_selector` | Invalid state, URL, opaque ID, or number. |
-| 3    | `authentication_failed`         | GitHub API or Git authentication failed. |
-| 4    | `repository_mismatch` / `unsupported_provider` | Project selection or provider mismatch. |
-| 5    | `pull_request_not_found`        | The selected PR or repository is missing. |
-| 6    | `inaccessible_head`             | The fork or source branch is unavailable. |
-| 7    | `naming_conflict`               | The generated branch or workspace is occupied. |
-| 8    | `network_failure`               | A retryable provider or Git network failure. |
-| 9    | `workspace_creation_failed`     | Worktree creation, setup, push config, persistence, or session-configuration preflight failed. |
-| 10   | `malformed_provider_response`   | GitHub returned an invalid success response. |
-| 11   | `import_conflict`               | Concurrent state or the selected head SHA changed. |
-| 12   | `unsupported_git_version`        | Git is too old for isolated per-worktree push configuration. |
+| Exit | Error code                                     | Meaning                                                                                        |
+| ---: | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+|    2 | `invalid_pull_request_selector`                | Invalid state, URL, opaque ID, or number.                                                      |
+|    3 | `authentication_failed`                        | GitHub API or Git authentication failed.                                                       |
+|    4 | `repository_mismatch` / `unsupported_provider` | Project selection or provider mismatch.                                                        |
+|    5 | `pull_request_not_found`                       | The selected PR or repository is missing.                                                      |
+|    6 | `inaccessible_head`                            | The fork or source branch is unavailable.                                                      |
+|    7 | `naming_conflict`                              | The generated branch or workspace is occupied.                                                 |
+|    8 | `network_failure`                              | A retryable provider or Git network failure.                                                   |
+|    9 | `workspace_creation_failed`                    | Worktree creation, setup, push config, persistence, or session-configuration preflight failed. |
+|   10 | `malformed_provider_response`                  | GitHub returned an invalid success response.                                                   |
+|   11 | `import_conflict`                              | Concurrent state or the selected head SHA changed.                                             |
+|   12 | `unsupported_git_version`                      | Git is too old for isolated per-worktree push configuration.                                   |
 
 GitHub primary and secondary rate limits, including HTTP 429 responses, use
 `network_failure` with `retryable: true`.

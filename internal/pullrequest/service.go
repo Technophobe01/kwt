@@ -30,17 +30,34 @@ type Store interface {
 }
 
 type Service struct {
-	provider Provider
-	backend  WorkspaceBackend
-	store    Store
+	provider          Provider
+	backend           WorkspaceBackend
+	store             Store
+	projectIdentities []string
 }
 
-func NewService(provider Provider, backend WorkspaceBackend, store Store) *Service {
-	return &Service{provider: provider, backend: backend, store: store}
+func NewService(
+	provider Provider,
+	backend WorkspaceBackend,
+	store Store,
+	projectIdentities ...string,
+) *Service {
+	service := &Service{provider: provider, backend: backend, store: store}
+	for _, identity := range projectIdentities {
+		repository, err := RepositoryFromProject(Project{Identity: identity})
+		if err != nil || service.hasProjectIdentity(repository.Identity) {
+			continue
+		}
+		service.projectIdentities = append(
+			service.projectIdentities,
+			repository.Identity,
+		)
+	}
+	return service
 }
 
 func (s *Service) List(ctx context.Context, project Project, state string) ([]PullRequest, error) {
-	repository, err := repositoryFromProject(project)
+	repository, err := RepositoryFromProject(project)
 	if err != nil {
 		return nil, err
 	}
@@ -68,9 +85,9 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 	}
 	for i := range prs {
 		prs[i].Source.IsFork = !EqualRepositoryIdentity(prs[i].Source.Repository.Identity, prs[i].Repository.Identity)
-		_, record, ok := findProvenance(records, prs[i])
-		if ok && sameProjectClone(record.Project, project) &&
-			provenanceSourceMatches(record, prs[i]) {
+		_, record, ok := s.findProvenance(records, prs[i])
+		if ok && s.sameProjectClone(record, project) &&
+			s.provenanceSourceMatches(record, prs[i]) {
 			if workspace, live := matchingProvenanceWorkspace(paths, record); live {
 				prs[i].Imported = true
 				prs[i].Workspace = &workspace
@@ -81,7 +98,7 @@ func (s *Service) List(ctx context.Context, project Project, state string) ([]Pu
 }
 
 func (s *Service) Import(ctx context.Context, project Project, selector string) (result ImportResult, err error) {
-	repository, err := repositoryFromProject(project)
+	repository, err := RepositoryFromProject(project)
 	if err != nil {
 		return result, err
 	}
@@ -116,9 +133,9 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 		for _, workspace := range workspaces {
 			byPath[utils.CanonicalPath(workspace.Path)] = workspace
 		}
-		recordKey, record, ok := findProvenance(records, pr)
+		recordKey, record, ok := s.findProvenance(records, pr)
 		if ok {
-			if !sameProjectClone(record.Project, project) {
+			if !s.sameProjectClone(record, project) {
 				return NewError(
 					CodeConflict,
 					"pull request is recorded for a different project clone",
@@ -130,18 +147,23 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 					return NewError(CodeConflict,
 						"existing import has incomplete source provenance", false, nil)
 				}
-				if !provenanceSourceMatches(record, pr) {
+				if !s.provenanceSourceMatches(record, pr) {
 					return NewError(CodeConflict,
 						"pull-request source repository or branch changed after import", false, nil)
 				}
 				if recordKey != pr.ID {
 					delete(records, recordKey)
 				}
+				aliases := s.mergedRepositoryAliases(record)
 				record.PullRequestID = pr.ID
-				record.Repository = NormalizeRepositoryIdentity(record.Repository)
+				record.Provider = pr.Provider
+				record.Repository = pr.Repository.Identity
+				record.RepositoryAliases = aliases
+				record.Number = pr.Number
+				record.URL = pr.URL
 				record.SourceRepo = NormalizeRepositoryIdentity(pr.Source.Repository.Identity)
 				record.SourceBranch = pr.Source.Name
-				record.Project.Identity = NormalizeRepositoryIdentity(record.Project.Identity)
+				record.Project.Identity = project.Identity
 				record.Workspace = workspace
 				records[pr.ID] = record
 				result = ImportResult{Status: ImportExisting, PullRequest: pr, Project: project, Workspace: workspace}
@@ -176,6 +198,9 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 
 		newRecord := Provenance{
 			PullRequestID: pr.ID, Provider: pr.Provider, Repository: pr.Repository.Identity,
+			RepositoryAliases: s.mergedRepositoryAliases(Provenance{
+				Repository: pr.Repository.Identity,
+			}),
 			Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
 			SourceRepo: pr.Source.Repository.Identity, SourceBranch: pr.Source.Name,
 			Project: project, Workspace: workspace,
@@ -209,12 +234,16 @@ func (s *Service) Import(ctx context.Context, project Project, selector string) 
 	return result, err
 }
 
-func findProvenance(records map[string]Provenance, pr PullRequest) (string, Provenance, bool) {
+func (s *Service) findProvenance(
+	records map[string]Provenance,
+	pr PullRequest,
+) (string, Provenance, bool) {
 	if record, ok := records[pr.ID]; ok {
 		return pr.ID, record, true
 	}
 	for key, record := range records {
-		if record.Number != pr.Number || !EqualRepositoryIdentity(record.Repository, pr.Repository.Identity) {
+		if record.Number != pr.Number ||
+			!s.recordRepositoryMatches(record, pr.Repository.Identity) {
 			continue
 		}
 		if record.Provider != "" && !strings.EqualFold(record.Provider, pr.Provider) {
@@ -225,9 +254,20 @@ func findProvenance(records map[string]Provenance, pr PullRequest) (string, Prov
 	return "", Provenance{}, false
 }
 
-func sameProjectClone(left, right Project) bool {
-	return EqualRepositoryIdentity(left.Identity, right.Identity) &&
-		utils.CanonicalPath(left.Path) == utils.CanonicalPath(right.Path)
+func (s *Service) sameProjectClone(record Provenance, current Project) bool {
+	if utils.CanonicalPath(record.Project.Path) !=
+		utils.CanonicalPath(current.Path) {
+		return false
+	}
+	if EqualRepositoryIdentity(record.Project.Identity, current.Identity) {
+		return true
+	}
+	return ProvenanceHasRepositoryIdentity(
+		record,
+		record.Project.Identity,
+	) && s.hasProjectIdentity(
+		current.Identity,
+	) && s.recordAliasesConnected(record)
 }
 
 func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance) (Workspace, bool) {
@@ -238,19 +278,137 @@ func matchingProvenanceWorkspace(byPath map[string]Workspace, record Provenance)
 	return workspace, true
 }
 
-func provenanceSourceMatches(record Provenance, pr PullRequest) bool {
-	if !provenanceSourceComplete(record) ||
-		!EqualRepositoryIdentity(record.SourceRepo, pr.Source.Repository.Identity) {
+func (s *Service) provenanceSourceMatches(record Provenance, pr PullRequest) bool {
+	if !provenanceSourceComplete(record) || record.SourceBranch != pr.Source.Name {
 		return false
 	}
-	return record.SourceBranch == pr.Source.Name
+	if EqualRepositoryIdentity(record.SourceRepo, pr.Source.Repository.Identity) {
+		return true
+	}
+	return ProvenanceHasRepositoryIdentity(
+		record,
+		record.SourceRepo,
+	) && EqualRepositoryIdentity(
+		pr.Source.Repository.Identity,
+		pr.Repository.Identity,
+	) && s.hasProjectIdentity(
+		pr.Repository.Identity,
+	) && s.recordAliasesConnected(record)
 }
 
 func provenanceSourceComplete(record Provenance) bool {
 	return strings.TrimSpace(record.SourceRepo) != "" && strings.TrimSpace(record.SourceBranch) != ""
 }
 
-func repositoryFromProject(project Project) (Repository, error) {
+func (s *Service) recordRepositoryMatches(
+	record Provenance,
+	current string,
+) bool {
+	if EqualRepositoryIdentity(record.Repository, current) {
+		return true
+	}
+	return ProvenanceHasRepositoryIdentity(
+		record,
+		record.Repository,
+	) && s.hasProjectIdentity(
+		current,
+	) && s.recordAliasesConnected(record)
+}
+
+func (s *Service) hasProjectIdentity(identity string) bool {
+	for _, candidate := range s.projectIdentities {
+		if EqualRepositoryIdentity(candidate, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) recordAliasesConnected(record Provenance) bool {
+	for _, identity := range provenanceRepositoryIdentities(record) {
+		if s.hasProjectIdentity(identity) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) mergedRepositoryAliases(record Provenance) []string {
+	identities := provenanceRepositoryIdentities(record)
+	for _, identity := range s.projectIdentities {
+		identities = appendCanonicalRepositoryIdentity(
+			identities,
+			identity,
+		)
+	}
+	if len(identities) < 2 {
+		return nil
+	}
+	return identities
+}
+
+// ProvenanceHasRepositoryIdentity reports whether identity belongs to the
+// canonical repository alias history recorded for an import.
+func ProvenanceHasRepositoryIdentity(
+	record Provenance,
+	identity string,
+) bool {
+	for _, candidate := range provenanceRepositoryIdentities(record) {
+		if EqualRepositoryIdentity(candidate, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+func provenanceRepositoryIdentities(record Provenance) []string {
+	repository, err := RepositoryFromProject(Project{
+		Identity: record.Repository,
+	})
+	if err != nil {
+		return nil
+	}
+	if len(record.RepositoryAliases) == 0 {
+		return []string{repository.Identity}
+	}
+	var identities []string
+	for _, identity := range record.RepositoryAliases {
+		identities = appendCanonicalRepositoryIdentity(
+			identities,
+			identity,
+		)
+	}
+	foundRepository := false
+	for _, identity := range identities {
+		if EqualRepositoryIdentity(identity, repository.Identity) {
+			foundRepository = true
+			break
+		}
+	}
+	if !foundRepository {
+		return nil
+	}
+	return identities
+}
+
+func appendCanonicalRepositoryIdentity(
+	identities []string,
+	identity string,
+) []string {
+	repository, err := RepositoryFromProject(Project{Identity: identity})
+	if err != nil {
+		return identities
+	}
+	for _, candidate := range identities {
+		if EqualRepositoryIdentity(candidate, repository.Identity) {
+			return identities
+		}
+	}
+	return append(identities, repository.Identity)
+}
+
+// RepositoryFromProject validates and parses a GitHub project identity.
+func RepositoryFromProject(project Project) (Repository, error) {
 	identity := NormalizeRepositoryIdentity(project.Identity)
 	parts := strings.Split(identity, "/")
 	if len(parts) != 3 || parts[0] != "github.com" || parts[1] == "" || parts[2] == "" {
@@ -263,29 +421,70 @@ func repositoryFromProject(project Project) (Repository, error) {
 }
 
 func ParseSelector(selector, repository string) (int, error) {
+	number, selectorRepository, err := parseSelector(selector)
+	if err != nil {
+		return 0, err
+	}
+	if selectorRepository != "" &&
+		!EqualRepositoryIdentity(selectorRepository, repository) {
+		return 0, NewError(
+			CodeInvalidSelector,
+			"pull-request selector does not match the selected repository",
+			false,
+			nil,
+		)
+	}
+	return number, nil
+}
+
+// ParseSelectorNumber validates a selector's provider syntax and returns its
+// pull-request number without authorizing its repository identity.
+func ParseSelectorNumber(selector string) (int, error) {
+	number, _, err := parseSelector(selector)
+	return number, err
+}
+
+func parseSelector(selector string) (int, string, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		return 0, NewError(CodeInvalidSelector, "pull-request selector is empty", false, nil)
+		return 0, "", NewError(
+			CodeInvalidSelector,
+			"pull-request selector is empty",
+			false,
+			nil,
+		)
 	}
 	if number, err := strconv.Atoi(selector); err == nil && number > 0 {
-		return number, nil
+		return number, "", nil
 	}
-	prefix := "github:" + NormalizeRepositoryIdentity(repository) + "#"
-	if strings.HasPrefix(strings.ToLower(selector), prefix) {
-		if number, err := strconv.Atoi(selector[len(prefix):]); err == nil && number > 0 {
-			return number, nil
+	if strings.HasPrefix(strings.ToLower(selector), "github:") {
+		identity, numberText, ok := strings.Cut(selector[len("github:"):], "#")
+		parts := strings.Split(NormalizeRepositoryIdentity(identity), "/")
+		if ok && len(parts) == 3 && parts[0] == "github.com" &&
+			parts[1] != "" && parts[2] != "" {
+			if number, err := strconv.Atoi(numberText); err == nil && number > 0 {
+				return number, strings.Join(parts, "/"), nil
+			}
 		}
 	}
 	parsed, err := url.Parse(selector)
 	if err == nil && strings.EqualFold(parsed.Host, "github.com") {
 		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) == 4 && strings.EqualFold(parts[2], "pull") && EqualRepositoryIdentity("github.com/"+parts[0]+"/"+parts[1], repository) {
+		if len(parts) == 4 && parts[0] != "" && parts[1] != "" &&
+			strings.EqualFold(parts[2], "pull") {
 			if number, convertErr := strconv.Atoi(parts[3]); convertErr == nil && number > 0 {
-				return number, nil
+				return number, NormalizeRepositoryIdentity(
+					"github.com/" + parts[0] + "/" + parts[1],
+				), nil
 			}
 		}
 	}
-	return 0, NewError(CodeInvalidSelector, "pull-request selector does not match the selected repository", false, nil)
+	return 0, "", NewError(
+		CodeInvalidSelector,
+		"pull-request selector does not match the selected repository",
+		false,
+		nil,
+	)
 }
 
 func importBranchName(pr PullRequest) string {
