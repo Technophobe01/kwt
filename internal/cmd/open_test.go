@@ -2,15 +2,38 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/pullrequest"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+type recordingOpenWorkspaceRunner struct {
+	ensured  bool
+	attached bool
+}
+
+func (r *recordingOpenWorkspaceRunner) Ensure(
+	context.Context, string, string, models.Layout,
+) error {
+	r.ensured = true
+	return nil
+}
+
+func (r *recordingOpenWorkspaceRunner) EnsureAndAttach(
+	context.Context, string, string, models.Layout, bool,
+) error {
+	r.attached = true
+	return nil
+}
 
 func TestFindEntryByPath(t *testing.T) {
 	a := &discovery.GlobalWorktreeEntry{
@@ -45,6 +68,33 @@ func TestShouldLoadTargetDefault(t *testing.T) {
 	}
 }
 
+func TestOpenStartSessionFlagGroups(t *testing.T) {
+	startSession := openCmd.Flags().Lookup("start-session")
+	selectLayout := openCmd.Flags().Lookup("select-layout")
+	layout := openCmd.Flags().Lookup("layout")
+	require.NotNil(t, startSession)
+	require.NotNil(t, selectLayout)
+	require.NotNil(t, layout)
+
+	oldStartSessionChanged := startSession.Changed
+	oldSelectLayoutChanged := selectLayout.Changed
+	oldLayoutChanged := layout.Changed
+	t.Cleanup(func() {
+		startSession.Changed = oldStartSessionChanged
+		selectLayout.Changed = oldSelectLayoutChanged
+		layout.Changed = oldLayoutChanged
+	})
+
+	startSession.Changed = true
+	selectLayout.Changed = true
+	layout.Changed = false
+	require.Error(t, openCmd.ValidateFlagGroups())
+
+	selectLayout.Changed = false
+	layout.Changed = true
+	require.NoError(t, openCmd.ValidateFlagGroups())
+}
+
 func TestOpenSelectedWorktreeRefusesProtectedPullRequestWorkspace(
 	t *testing.T,
 ) {
@@ -70,10 +120,99 @@ func TestOpenSelectedWorktreeRefusesProtectedPullRequestWorkspace(
 			},
 		},
 		nil,
+		false,
+		false,
 	)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kwt pr attach")
+}
+
+func TestOpenSelectedWorktreeStartsSessionWithoutAttaching(t *testing.T) {
+	runner := &recordingOpenWorkspaceRunner{}
+	oldNewRunner := newOpenWorkspaceRunner
+	oldLayout := openLayout
+	oldSelectLayout := openSelectLayout
+	t.Cleanup(func() {
+		newOpenWorkspaceRunner = oldNewRunner
+		openLayout = oldLayout
+		openSelectLayout = oldSelectLayout
+	})
+	newOpenWorkspaceRunner = func() openWorkspaceRunner { return runner }
+	openLayout = tmux.BlankLayoutName
+	openSelectLayout = false
+
+	err := openSelectedWorktree(
+		context.Background(),
+		&CommandContext{Config: &models.Config{}},
+		&discovery.GlobalWorktreeEntry{
+			Path:   t.TempDir(),
+			Branch: "feature",
+			RepositoryInfo: &url.RepositoryInfo{
+				FullPath: "github.com/acme/widget",
+			},
+		},
+		nil,
+		true,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, runner.ensured)
+	assert.False(t, runner.attached)
+}
+
+func TestOpenSelectedWorktreeStartSessionDoesNotPromptForTargetTrust(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	repo := t.TempDir()
+	gitInit := exec.Command("git", "init", "-b", "main", repo)
+	require.NoError(t, gitInit.Run())
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repo, ".kwt.toml"),
+		[]byte("[layouts]\ndefault = \"focus\"\n"),
+		0o644,
+	))
+
+	runner := &recordingOpenWorkspaceRunner{}
+	oldNewRunner := newOpenWorkspaceRunner
+	oldLayout := openLayout
+	oldSelectLayout := openSelectLayout
+	t.Cleanup(func() {
+		newOpenWorkspaceRunner = oldNewRunner
+		openLayout = oldLayout
+		openSelectLayout = oldSelectLayout
+	})
+	newOpenWorkspaceRunner = func() openWorkspaceRunner { return runner }
+	openLayout = ""
+	openSelectLayout = false
+
+	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+	require.NoError(t, err)
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	err = openSelectedWorktree(
+		context.Background(),
+		&CommandContext{Config: &models.Config{}},
+		&discovery.GlobalWorktreeEntry{
+			Path:   repo,
+			Branch: "feature",
+			RepositoryInfo: &url.RepositoryInfo{
+				FullPath: "github.com/acme/widget",
+			},
+		},
+		nil,
+		true,
+		true,
+	)
+	os.Stderr = oldStderr
+	require.NoError(t, stderr.Close())
+	output, readErr := os.ReadFile(stderr.Name())
+	require.NoError(t, readErr)
+
+	require.NoError(t, err)
+	assert.NotContains(t, string(output), "Trust this file and load it?")
+	assert.True(t, runner.ensured)
+	assert.False(t, runner.attached)
 }
 
 // TestOpenCmdIsolatesFromCwdConfig guards the config-isolation invariant:

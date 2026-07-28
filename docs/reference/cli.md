@@ -7,11 +7,11 @@ stable command surface.
 | ---------------- | ------------------------------------------------------ |
 | `kwt`, `kwt tui` | Open the cross-project and multi-machine dashboard.    |
 | `kwt add`        | Create a worktree and optionally launch its workspace. |
-| `kwt open`       | Fuzzy-pick and attach to a workspace.                  |
+| `kwt open`       | Open or establish a worktree workspace session.        |
 | `kwt list`       | List worktrees.                                        |
 | `kwt status`     | Show Git status, sync state, and activity.             |
 | `kwt projects`   | List registered project repositories.                  |
-| `kwt pr`         | Discover and import pull requests through JSON.         |
+| `kwt pr`         | Discover and import pull requests through JSON.        |
 | `kwt get`        | Print a matching worktree path.                        |
 | `kwt cd`         | Open a shell in a matching worktree.                   |
 | `kwt exec`       | Run a command in a matching worktree.                  |
@@ -28,6 +28,7 @@ stable command surface.
 ```sh
 kwt add -b fix/parser-race
 kwt open parser
+kwt open /path/to/worktree --start-session
 kwt status
 kwt pr list --project github.com/acme/widget --json
 kwt pr import 17 --project github.com/acme/widget \
@@ -44,6 +45,20 @@ When `kwt add -b` creates a branch, it fetches `origin` and starts from its
 default branch. If that remote base is unavailable, it falls back to local
 `main`, then `master`, then the branch checked out in the primary worktree.
 
+## `kwt open`
+
+With no argument, `kwt open` fuzzy-picks a worktree. A pattern narrows the
+cross-project list and opens the sole match directly. Kwt creates or repairs
+the canonical tmux workspace with its resolved layout before attaching.
+
+`kwt open <exact-worktree-path> --start-session` performs the same layout and
+session bootstrap without attaching a client. Use it before an external
+ordinary tmux client attaches to a session that may not exist yet. The exact
+path is resolved directly from Git rather than the global worktree base, which
+keeps this automation mode noninteractive and supports linked worktrees stored
+outside that base.
+Protected pull-request imports remain restricted to `kwt pr attach`.
+
 ## `kwt list`
 
 `--json` emits an array of objects with `path`, `branch`, `commit_hash`, `is_main`,
@@ -51,11 +66,11 @@ default branch. If that remote base is unavailable, it falls back to local
 slug, or a `local/<path>` fallback for a repository without a usable remote —
 see below), and `session_name` (the tmux workspace session name kwt attaches to).
 An imported pull-request worktree additionally includes `tmux_socket_name` for
-its protected workspace-specific server. To
-converge on the same session, prefer an attach-only command — `tmux
-attach-session -t <session_name>` on the normal server, or `kwt pr attach
-<path>` when `tmux_socket_name` is present — so you never create the session
-bare or bypass its protected attach policy. See [Attaching from other
+its protected workspace-specific server. To converge on the same session, run
+`kwt open <path> --start-session` before an ordinary attach-only client, or
+`kwt pr attach <path>` when `tmux_socket_name` is present. This lets kwt create
+the session when needed without a client creating it bare or bypassing its
+protected attach policy. See [Attaching from other
 tools](#attaching-from-other-tools) before using `new-session`.
 `kwt open` and dashboard open actions refuse protected pull-request imports
 and direct the user through `kwt pr attach`.
@@ -194,7 +209,7 @@ pane applications resolving tmux's own `TERM`.
 
 ### Attaching from other tools
 
-kwt applies this bootstrap when it *creates* a session. A session that some
+kwt applies this bootstrap when it _creates_ a session. A session that some
 other tool created — for example with `tmux new-session -A -s <session_name>`,
 which attaches if the session exists but otherwise creates it bare — starts
 without the `default-command` and remove-markers, so its windows would not
@@ -203,7 +218,7 @@ match kwt's until repaired.
 Two rules keep external tools consistent with kwt:
 
 - **When the session already exists, attach only:** use `tmux attach-session -t
-  <session_name>` (or `switch-client -t` from inside tmux). Attach-only commands
+<session_name>` (or `switch-client -t` from inside tmux). Attach-only commands
   never create a bare session, so there is nothing to repair.
 - **If your tool creates the session itself, apply the equivalent bootstrap:**
   set `default-command` to `""` and add a session-scoped remove-marker
