@@ -64,6 +64,45 @@ func rowBranch(row Row) string {
 	return ""
 }
 
+func shortCommitHash(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if len(hash) > 8 {
+		return hash[:8]
+	}
+	return hash
+}
+
+const primaryBranchSuffix = " [primary]"
+
+func rowDisplayBranch(row Row) string {
+	branch := rowBranch(row)
+	detached := false
+	commit := ""
+	primary := false
+
+	switch {
+	case row.Entry != nil:
+		detached = branch == "" || branch == "HEAD"
+		commit = row.Entry.CommitHash
+		primary = row.Entry.IsMain
+	case row.Fleet != nil:
+		detached = strings.EqualFold(strings.TrimSpace(row.Fleet.Kind), "detached")
+		commit = row.Fleet.Ref
+		primary = row.Fleet.AllPrimary
+	}
+
+	if detached {
+		branch = "detached"
+		if short := shortCommitHash(commit); short != "" {
+			branch += "@" + short
+		}
+	}
+	if primary {
+		branch += primaryBranchSuffix
+	}
+	return branch
+}
+
 // FleetKey identifies one worktree for matching hub state against what is on
 // disk. The project half is folded per host, because a clone's remote URL and a
 // hub manifest can spell one forge identity differently while a case-sensitive
@@ -129,7 +168,7 @@ func rowPath(row Row) string {
 }
 
 func rowLabel(row Row) string {
-	return rowRepoName(row) + ":" + rowBranch(row)
+	return rowRepoName(row) + ":" + rowDisplayBranch(row)
 }
 
 func sortRows(rows []Row) {
@@ -178,6 +217,7 @@ func filterRows(rows []Row, filter string) []Row {
 		haystack := strings.ToLower(strings.Join([]string{
 			rowRepoName(row),
 			rowBranch(row),
+			rowDisplayBranch(row),
 			rowPath(row),
 			rowLabel(row),
 			rowFleetHaystack(row),
@@ -704,13 +744,28 @@ func renderDashboardCells(columns []tableColumn, values map[string]string, style
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		cell := padRight(truncateWithEllipsis(values[column.key], column.width), column.width)
+		cell := padRight(truncateDashboardCell(column, values[column.key]), column.width)
 		if style := styles[column.key]; style != nil {
 			cell = style(cell)
 		}
 		b.WriteString(cell)
 	}
 	return b.String()
+}
+
+func truncateDashboardCell(column tableColumn, value string) string {
+	if column.key != dashboardColumnBranch ||
+		!strings.HasSuffix(value, primaryBranchSuffix) ||
+		runewidth.StringWidth(value) <= column.width {
+		return truncateWithEllipsis(value, column.width)
+	}
+
+	suffixWidth := runewidth.StringWidth(primaryBranchSuffix)
+	if column.width < suffixWidth {
+		return truncateWithEllipsis(strings.TrimSpace(primaryBranchSuffix), column.width)
+	}
+	branch := strings.TrimSuffix(value, primaryBranchSuffix)
+	return truncateWithEllipsis(branch, column.width-suffixWidth) + primaryBranchSuffix
 }
 
 func renderDashboardHeader(columns []tableColumn) string {
@@ -724,7 +779,7 @@ func renderDashboardHeader(columns []tableColumn) string {
 func dashboardCellValues(row Row, now time.Time) map[string]string {
 	return map[string]string{
 		dashboardColumnRepo:      rowRepoName(row),
-		dashboardColumnBranch:    rowBranch(row),
+		dashboardColumnBranch:    rowDisplayBranch(row),
 		dashboardColumnMachines:  formatMachines(row),
 		dashboardColumnChanges:   formatRowChanges(row),
 		dashboardColumnHeads:     formatRowSync(row),

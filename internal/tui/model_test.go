@@ -295,6 +295,21 @@ func TestModelPolishesSingleRowDashboard(t *testing.T) {
 	assert.NotContains(t, stripANSI(content), "s sync")
 }
 
+func TestModelRendersPrimaryAndDetachedDisplayLabels(t *testing.T) {
+	primary := testRow("kwt", "main", "/w/kwt/main")
+	primary.Entry.IsMain = true
+	detached := testRow("kwt", "HEAD", "/w/kwt/detached")
+	detached.Entry.CommitHash = "be094b1bdf4471ea60db4656f06d8fb2551ffd3d"
+
+	model := NewModel(&fakeBackend{}, "/worktrees").WithInitialAnchor(primary.Entry.Path)
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{primary, detached}})
+
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "main [primary]")
+	assert.Contains(t, content, "detached@be094b1b")
+	assert.Contains(t, content, "selected kwt:main [primary]")
+}
+
 func TestModelRendersRemoteOnlyFleetRows(t *testing.T) {
 	row := Row{Fleet: &FleetInfo{
 		ProjectIdentity:  "github.com/example/kwt",
@@ -369,6 +384,52 @@ func TestModelDashboardFitsHundredColumnTerminal(t *testing.T) {
 	assert.NotContains(t, content, "machines local")
 	assert.LessOrEqual(t, visibleWidth(header), 100, header)
 	assert.LessOrEqual(t, visibleWidth(body), 100, body)
+}
+
+func TestModelDashboardPreservesPrimaryMarkerWhenBranchTruncated(t *testing.T) {
+	fullHash := "be094b1bdf4471ea60db4656f06d8fb2551ffd3d"
+	tests := []struct {
+		name  string
+		width int
+		row   Row
+	}{
+		{
+			name:  "long branch",
+			width: 100,
+			row: func() Row {
+				row := testRow("kwt", "feature/"+strings.Repeat("long-", 10), "/w/kwt/long")
+				row.Entry.IsMain = true
+				return row
+			}(),
+		},
+		{
+			name:  "detached in narrow dashboard",
+			width: 55,
+			row: func() Row {
+				row := testRow("kwt", "HEAD", "/w/kwt/detached")
+				row.Entry.CommitHash = fullHash
+				row.Entry.IsMain = true
+				return row
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewModel(&fakeBackend{}, "/worktrees")
+			model, _ = updateModel(t, model, tea.WindowSizeMsg{Width: tt.width, Height: 12})
+			model, _ = updateModel(t, model, rowsMsg{rows: []Row{tt.row}})
+
+			lines := strings.Split(stripANSI(viewContent(model)), "\n")
+			headerIndex := lineIndexContaining(lines, "REPO")
+
+			require.GreaterOrEqual(t, headerIndex, 0)
+			require.Greater(t, len(lines), headerIndex+1)
+			body := lines[headerIndex+1]
+			assert.Contains(t, body, "[primary]")
+			assert.LessOrEqual(t, visibleWidth(body), tt.width, body)
+		})
+	}
 }
 
 func TestModelSummarizesRemoteChangesInTableAndDetailsNameHost(t *testing.T) {
@@ -1045,16 +1106,23 @@ func TestModelCancelNewBranchInputKeepsExistingFilter(t *testing.T) {
 	assert.Equal(t, "/w/kwt/main", rowPath(model.selectedRow()))
 }
 
-func TestModelDeleteRefusesMainWorktree(t *testing.T) {
-	row := testRow("kwt", "main", "/w/kwt/main")
+func TestModelDeleteRefusesPrimaryCheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path := filepath.Join(home, "code", "kwt")
+	row := testRow("kwt", "main", path)
 	row.Entry.IsMain = true
-	model := NewModel(&fakeBackend{}, "/worktrees")
+	backend := &fakeBackend{}
+	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
 
 	model, cmd := updateModel(t, model, press("d"))
 
 	require.Nil(t, cmd)
-	assert.Contains(t, viewContent(model), "refusing to remove a main worktree")
+	expectedPath := filepath.Join("~", "code", "kwt")
+	assert.Contains(t, viewContent(model), "cannot delete the primary checkout: "+expectedPath)
+	assert.Empty(t, backend.removeCalls)
 }
 
 func TestModelDeleteLiveWorktreeConfirmsAndCallsRemove(t *testing.T) {
@@ -1285,6 +1353,32 @@ func TestFastRefreshKeepsRemoteRowsWithNoLocalWorktrees(t *testing.T) {
 	require.Len(t, model.rows, 1)
 	assert.True(t, isRemoteOnly(model.rows[0]))
 	assert.Equal(t, "feature/remote", model.rows[0].Fleet.Branch)
+}
+
+func TestFastRefreshKeepsRemotePrimaryLabelAfterLocalWorktreeDisappears(t *testing.T) {
+	local := testRow("kwt", "main", "/w/kwt/main-linked")
+	local.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+	local.Fleet = &FleetInfo{
+		ProjectIdentity: "github.com/example/kwt",
+		ProjectName:     "kwt",
+		Kind:            "branch",
+		Ref:             "main",
+		Branch:          "main",
+		Local:           true,
+		Hosts:           []string{"host-b", "local"},
+		AllPrimary:      true,
+	}
+
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{local}})
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: nil})
+
+	require.Len(t, model.rows, 1)
+	assert.True(t, isRemoteOnly(model.rows[0]))
+	assert.Equal(t, []string{"host-b"}, model.rows[0].Fleet.Hosts)
+	assert.True(t, model.rows[0].Fleet.AllPrimary)
+	assert.Equal(t, "main [primary]", rowDisplayBranch(model.rows[0]))
 }
 
 func TestFastRefreshDropsRemoteRowThatBecameLocal(t *testing.T) {
