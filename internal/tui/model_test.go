@@ -29,11 +29,15 @@ type fakeBackend struct {
 	removeErr       error
 	killErr         error
 	openErr         error
+	branches        []models.Branch
+	branchErr       error
 	fastListCalls   int
 	listCalls       int
+	branchCalls     []string
 	mergeFleetCalls int
 	mergeCtx        context.Context
 	createCalls     []string
+	createSources   []string
 	materializeRows []string
 	removeCalls     []string
 	removeForces    []bool
@@ -58,9 +62,23 @@ func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []stri
 	return append(append([]Row(nil), rows...), b.fleetRows...), b.fleetWarnings
 }
 
-func (b *fakeBackend) CreateWorktree(ctx context.Context, row Row, branch string) (string, error) {
+func (b *fakeBackend) CreateWorktree(
+	ctx context.Context,
+	row Row,
+	branch string,
+	source string,
+) (string, error) {
 	b.createCalls = append(b.createCalls, rowPath(row)+":"+branch)
+	b.createSources = append(b.createSources, source)
 	return b.createPath, b.createErr
+}
+
+func (b *fakeBackend) ListBranches(
+	ctx context.Context,
+	row Row,
+) ([]models.Branch, error) {
+	b.branchCalls = append(b.branchCalls, rowPath(row))
+	return append([]models.Branch(nil), b.branches...), b.branchErr
 }
 
 func (b *fakeBackend) PreviewWorktree(row Row, branch string) (Row, error) {
@@ -711,6 +729,7 @@ func TestModelProjectPerspectiveCancelKeepsCurrentProject(t *testing.T) {
 	model, _ = updateModel(t, model, press("P"))
 	model, _ = updateModel(t, model, press("k"))
 	model, _ = updateModel(t, model, press("a"))
+	assert.Equal(t, len("ka"), model.input.Position())
 	model, _ = updateModel(t, model, press("esc"))
 
 	assert.Equal(t, "kwt", model.projectPerspective)
@@ -758,6 +777,111 @@ func TestModelNewBranchAcceptsPaste(t *testing.T) {
 	require.NotNil(t, cmd)
 	_ = cmd()
 	assert.Equal(t, []string{"/w/kwt/main:feature/pasted"}, backend.createCalls)
+	assert.Equal(t, []string{""}, backend.createSources)
+}
+
+func TestModelExistingBranchPickerCreatesSelectedRemote(t *testing.T) {
+	backend := &fakeBackend{
+		createPath: "/w/kwt/remote-ready",
+		branches: []models.Branch{
+			{Name: "local-ready", Source: "local-ready"},
+			{
+				Name:     "remote-ready",
+				Source:   "refs/remotes/origin/remote-ready",
+				IsRemote: true,
+			},
+		},
+	}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+
+	model, loadCmd := updateModel(t, model, press("b"))
+	require.NotNil(t, loadCmd)
+	model, _ = updateModel(t, model, loadCmd())
+
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "local-ready")
+	assert.Contains(t, content, "remote-ready")
+	assert.Contains(t, content, "origin/remote-ready")
+	assert.NotContains(t, content, "refs/remotes/")
+
+	for _, value := range []string{"r", "e", "m", "o", "t", "e"} {
+		model, _ = updateModel(t, model, press(value))
+	}
+	assert.Equal(t, len("remote"), model.input.Position())
+	_, createCmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, createCmd)
+	result := createCmd()
+	assert.Contains(t, result.(actionDoneMsg).message, "review")
+	assert.Equal(t, []string{"/w/kwt/main:remote-ready"}, backend.createCalls)
+	assert.Equal(t, []string{"refs/remotes/origin/remote-ready"}, backend.createSources)
+}
+
+func TestModelExistingBranchPickerPreviewsDuplicateRemoteSource(t *testing.T) {
+	backend := &fakeBackend{
+		createPath: "/w/kwt/topic",
+		branches: []models.Branch{
+			{
+				Name:     "topic",
+				Label:    "topic (origin/topic)",
+				Source:   "refs/remotes/origin/topic",
+				IsRemote: true,
+			},
+			{
+				Name:     "topic",
+				Label:    "topic (upstream/topic)",
+				Source:   "refs/remotes/upstream/topic",
+				IsRemote: true,
+			},
+		},
+	}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+
+	model, loadCmd := updateModel(t, model, press("b"))
+	require.NotNil(t, loadCmd)
+	model, _ = updateModel(t, model, loadCmd())
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "topic (origin/topic)")
+	assert.Contains(t, content, "topic (upstream/topic)")
+
+	model, _ = updateModel(t, model, paste("upstream"))
+	model, createCmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, createCmd)
+	require.NotNil(t, model.selectedRow().Entry)
+	assert.Equal(t, "topic (upstream/topic)", model.selectedRow().Entry.Branch)
+	_ = createCmd()
+	assert.Equal(t, []string{"refs/remotes/upstream/topic"}, backend.createSources)
+}
+
+func TestModelExistingLocalBranchRequiresReviewBeforeAttaching(t *testing.T) {
+	backend := &fakeBackend{
+		createPath: "/w/kwt/local-ready",
+		branches: []models.Branch{{
+			Name:   "local-ready",
+			Source: "local-ready",
+		}},
+	}
+	model := NewModel(backend, "/worktrees")
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
+		testRow("kwt", "main", "/w/kwt/main"),
+	}})
+
+	model, loadCmd := updateModel(t, model, press("b"))
+	require.NotNil(t, loadCmd)
+	model, _ = updateModel(t, model, loadCmd())
+	_, createCmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, createCmd)
+	result := createCmd()
+	assert.Contains(t, result.(actionDoneMsg).message, "review")
+	assert.Equal(t, []string{"local-ready"}, backend.createSources)
 }
 
 func TestModelShowsNewWorktreeWhileCreateIsInFlight(t *testing.T) {

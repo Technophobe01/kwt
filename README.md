@@ -34,6 +34,12 @@ kwt add -b feature/new-ui
 # Create without launching tmux
 kwt add --no-launch -b feature/new-ui
 
+# Create a tracking worktree from an existing remote branch
+kwt add --from origin/feature/review feature/review
+
+# After reviewing that checkout, explicitly start its workspace
+kwt open "$(kwt get feature/review)"
+
 # Open a worktree workspace, creating its session when needed
 kwt open
 
@@ -68,13 +74,22 @@ When `-b` creates a branch, `kwt` fetches `origin` and starts from its default
 branch. If that remote base is unavailable, it falls back to local `main`, then
 `master`, then the branch checked out in the primary worktree.
 
+Existing-branch worktrees are inert on creation: branch mutation and checkout
+run without repository-configured hooks or filters and without kwt credential
+variables, and `kwt` does not copy configured files, run setup commands,
+or launch a layout against contributor-controlled content. Existing branch
+names are treated literally when building the destination path. The checkout
+still participates in ordinary status and fleet observation. Review it before
+using `kwt open` to explicitly create and attach its workspace.
+
 ### Dashboard Keys
 
 | Key       | Action                                  |
 | --------- | --------------------------------------- |
 | `up/down` | Move selection                          |
 | `enter`   | Attach to selected workspace            |
-| `n`       | Create a worktree in the active project |
+| `n`       | Create a new branch and worktree        |
+| `b`       | Search existing branches for a worktree |
 | `L`       | Select workspace layout                 |
 | `P`       | Switch active project perspective       |
 | `p`       | Filter visible projects                 |
@@ -176,7 +191,8 @@ visible at roughly 100 columns. Select a remote-only branch row and press `s` to
 sync that branch locally. Press `c` on a local row to open a shell there.
 Remote-only sync verifies the created worktree against the hub-reported commit
 when one is available, and skips repository setup (`copy_files` and
-`setup_commands`); those hooks run for locally initiated `kwt add` worktrees.
+`setup_commands`). Existing local and remote branches use the same inert
+creation boundary; setup hooks run only for newly created branches.
 
 Useful commands:
 

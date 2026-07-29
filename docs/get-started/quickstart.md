@@ -33,7 +33,8 @@ Useful keys:
 | Key     | Action                                                  |
 | ------- | ------------------------------------------------------- |
 | `enter` | Attach to the selected workspace.                       |
-| `n`     | Create a worktree in the active project perspective.    |
+| `n`     | Create a new branch and worktree.                       |
+| `b`     | Search local and remote branches for a worktree.        |
 | `P`     | Switch the active project perspective.                  |
 | `p`     | Filter visible projects by name.                        |
 | `/`     | Search rows within the active perspective/filter.       |
@@ -70,9 +71,30 @@ When `-b` creates a branch, `kwt` fetches `origin` and starts from its default
 branch. If that remote base is unavailable, it falls back to local `main`, then
 `master`, then the branch checked out in the primary worktree.
 
-By default, `kwt add` creates the worktree and launches a tmux workspace — a
-blank single-pane session unless a [layout](../reference/configuration.md) is
-selected. To create without launching:
+To use an existing branch, press `b` in the dashboard and search the available
+local and remote branches. From the CLI, pass the local branch directly or
+retain an exact remote source with `--from`:
+
+```sh
+kwt add feature/local
+kwt add --from origin/feature/review feature/review
+```
+
+Existing-branch creation disables repository-configured Git hooks and checkout
+filters, removes kwt credential variables from Git, treats branch names
+literally in destination paths, and skips `copy_files`, `setup_commands`, and
+workspace launch. Ordinary status and fleet observation remain available.
+After reviewing the checkout, explicitly acknowledge it and create its
+workspace:
+
+```sh
+kwt open "$(kwt get feature/review)"
+```
+
+For local and newly created branches, `kwt add` launches a tmux workspace by
+default — a blank single-pane session unless a
+[layout](../reference/configuration.md) is selected. To create without
+launching:
 
 ```sh
 kwt add --no-launch -b feature/new-ui

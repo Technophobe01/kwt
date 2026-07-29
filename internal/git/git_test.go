@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -126,6 +128,24 @@ func commitTestFile(t *testing.T, dir, name, contents, message string) {
 	}
 	gitOutput(t, dir, "add", name)
 	gitOutput(t, dir, "commit", "-m", message)
+}
+
+func createBranchWithMissingBlob(
+	t *testing.T,
+	repo *TestRepository,
+	branch string,
+) string {
+	t.Helper()
+	repo.CreateBranch(t, branch)
+	commitTestFile(t, repo.Path, "missing.txt", "missing\n", "Missing blob")
+	commit := gitOutput(t, repo.Path, "rev-parse", "HEAD")
+	blob := gitOutput(t, repo.Path, "rev-parse", branch+":missing.txt")
+	gitOutput(t, repo.Path, "checkout", "main")
+	objectPath := filepath.Join(repo.Path, ".git", "objects", blob[:2], blob[2:])
+	if err := os.Remove(objectPath); err != nil {
+		t.Fatalf("remove blob object: %v", err)
+	}
+	return commit
 }
 
 func TestNew(t *testing.T) {
@@ -518,6 +538,187 @@ exec "$REAL_GIT" "$@"
 	})
 }
 
+func TestAddWorktreeExistingDisablesCheckoutHooks(t *testing.T) {
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "existing-unreviewed")
+	if err := os.WriteFile(
+		filepath.Join(repo.Path, ".gitattributes"),
+		[]byte("branch.txt filter=conditional-attack\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write attributes: %v", err)
+	}
+	gitOutput(t, repo.Path, "add", ".gitattributes")
+	commitTestFile(t, repo.Path, "branch.txt", "branch\n", "Existing branch")
+	gitOutput(t, repo.Path, "checkout", "main")
+
+	hookMarker := filepath.Join(t.TempDir(), "hook-ran")
+	configuredHookMarker := filepath.Join(t.TempDir(), "configured-hook-ran")
+	filterMarker := filepath.Join(t.TempDir(), "conditional-filter-ran")
+	hooksDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(hooksDir, "post-checkout"),
+		fmt.Appendf(nil, "#!/bin/sh\nprintf hook > %q\n", hookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write checkout hook: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "core.hooksPath", hooksDir)
+	configuredHook := filepath.Join(t.TempDir(), "configured-hook")
+	if err := os.WriteFile(
+		configuredHook,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf hook > %q\n", configuredHookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write configured hook: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "hook.configured-attack.command", configuredHook)
+	gitOutput(t, repo.Path, "config", "--add", "hook.configured-attack.event", "post-checkout")
+	gitOutput(t, repo.Path, "config", "--add", "hook.configured-attack.event", "post-index-change")
+	configuredHooksSupported := exec.Command(
+		"git", "-C", repo.Path, "hook", "list", "post-checkout",
+	).Run() == nil
+
+	filterCommand := filepath.Join(t.TempDir(), "conditional-filter")
+	if err := os.WriteFile(
+		filterCommand,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf filter > %q\ncat\n", filterMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write conditional filter: %v", err)
+	}
+	includePath := filepath.Join(t.TempDir(), "onbranch.config")
+	gitOutput(t, repo.Path, "config", "-f", includePath, "filter.conditional-attack.smudge", filterCommand)
+	gitOutput(t, repo.Path, "config", "-f", includePath, "filter.conditional-attack.required", "true")
+	gitOutput(
+		t,
+		repo.Path,
+		"config",
+		"includeIf.onbranch:existing-unreviewed.path",
+		includePath,
+	)
+	gitOutput(t, repo.Path, "config", "core.autocrlf", "true")
+
+	worktreePath := filepath.Join(t.TempDir(), "existing-unreviewed")
+	if err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"existing-unreviewed",
+		nil,
+	); err != nil {
+		t.Fatalf("AddWorktreeExisting() error = %v", err)
+	}
+
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Errorf("checkout hook ran against existing branch: stat error = %v", err)
+	}
+	if configuredHooksSupported {
+		if _, err := os.Stat(configuredHookMarker); !os.IsNotExist(err) {
+			t.Errorf("configured hook ran against existing branch: stat error = %v", err)
+		}
+	}
+	if _, err := os.Stat(filterMarker); !os.IsNotExist(err) {
+		t.Errorf("branch-conditional filter ran against existing branch: stat error = %v", err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(worktreePath, "branch.txt")); err != nil {
+		t.Errorf("read checked-out branch file: %v", err)
+	} else if strings.ReplaceAll(string(contents), "\r\n", "\n") != "branch\n" {
+		t.Errorf("branch.txt = %q, want branch content", contents)
+	}
+	if got := gitOutput(t, worktreePath, "branch", "--show-current"); got != "existing-unreviewed" {
+		t.Errorf("branch = %q, want existing-unreviewed", got)
+	}
+}
+
+func TestAddWorktreeExistingPreservesRefsHeadsPrefixInShortName(t *testing.T) {
+	repo := NewTestRepository(t)
+	gitOutput(t, repo.Path, "branch", "topic")
+	gitOutput(
+		t,
+		repo.Path,
+		"update-ref",
+		"refs/heads/refs/heads/topic",
+		"HEAD",
+	)
+	worktreePath := filepath.Join(t.TempDir(), "literal-refs-heads")
+
+	err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"refs/heads/topic",
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"refs/heads/topic",
+		gitOutput(t, worktreePath, "branch", "--show-current"),
+	)
+}
+
+func TestAddWorktreeExistingDoesNotRecurseIntoSubmodules(t *testing.T) {
+	submodule := NewTestRepository(t)
+	if err := os.WriteFile(
+		filepath.Join(submodule.Path, ".gitattributes"),
+		[]byte("payload.txt filter=submodule-attack\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write submodule attributes: %v", err)
+	}
+	gitOutput(t, submodule.Path, "add", ".gitattributes")
+	commitTestFile(t, submodule.Path, "payload.txt", "payload\n", "Payload")
+
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "existing-unreviewed")
+	gitOutput(
+		t,
+		repo.Path,
+		"-c",
+		"protocol.file.allow=always",
+		"submodule",
+		"add",
+		submodule.Path,
+		"dependency",
+	)
+	gitOutput(t, repo.Path, "commit", "-am", "Add dependency")
+	gitOutput(t, repo.Path, "checkout", "main")
+
+	filterMarker := filepath.Join(t.TempDir(), "submodule-filter-ran")
+	filterCommand := filepath.Join(t.TempDir(), "submodule-filter")
+	if err := os.WriteFile(
+		filterCommand,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf filter > %q\ncat\n", filterMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write submodule filter: %v", err)
+	}
+	gitOutput(
+		t,
+		filepath.Join(repo.Path, "dependency"),
+		"config",
+		"filter.submodule-attack.smudge",
+		filterCommand,
+	)
+	gitOutput(t, repo.Path, "config", "submodule.recurse", "true")
+
+	worktreePath := filepath.Join(t.TempDir(), "existing-unreviewed")
+	if err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"existing-unreviewed",
+		nil,
+	); err != nil {
+		t.Fatalf("AddWorktreeExisting() error = %v", err)
+	}
+
+	if _, err := os.Stat(filterMarker); !os.IsNotExist(err) {
+		t.Errorf("submodule filter ran before review: stat error = %v", err)
+	}
+	if _, err := os.Stat(
+		filepath.Join(worktreePath, "dependency", "payload.txt"),
+	); !os.IsNotExist(err) {
+		t.Errorf("submodule content materialized before review: stat error = %v", err)
+	}
+}
+
 func TestRemoveWorktree(t *testing.T) {
 	repo := NewTestRepository(t)
 	g := New(repo.Path)
@@ -676,6 +877,599 @@ func TestListBranches(t *testing.T) {
 			t.Error("No current branch found")
 		}
 	})
+}
+
+func TestListAvailableBranchesNormalizesRemoteAndExcludesCheckedOut(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+
+	repo.CreateBranch(t, "local-ready")
+	gitOutput(t, repo.Path, "checkout", "main")
+	repo.CreateBranch(t, "checked-out")
+	gitOutput(t, repo.Path, "checkout", "main")
+	repo.CreateBranch(t, "remote-only")
+	commitTestFile(t, repo.Path, "remote.txt", "remote\n", "Remote branch")
+	gitOutput(t, repo.Path, "push", "origin", "main", "local-ready", "remote-only")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "remote-only")
+	gitOutput(t, repo.Path, "remote", "set-head", "origin", "-a")
+
+	worktreePath := filepath.Join(t.TempDir(), "checked-out")
+	repo.CreateWorktree(t, worktreePath, "checked-out")
+
+	branches, err := New(repo.Path).ListAvailableBranches()
+	if err != nil {
+		t.Fatalf("ListAvailableBranches() error = %v", err)
+	}
+
+	byName := make(map[string]models.Branch, len(branches))
+	for _, branch := range branches {
+		byName[branch.Name] = branch
+	}
+	if _, ok := byName["main"]; ok {
+		t.Error("current branch was offered as available")
+	}
+	if _, ok := byName["checked-out"]; ok {
+		t.Error("branch checked out in another worktree was offered as available")
+	}
+	if got := byName["local-ready"]; got.IsRemote || got.Source != "local-ready" {
+		t.Errorf("local-ready = %+v, want available local branch", got)
+	}
+	if got := byName["remote-only"]; !got.IsRemote ||
+		got.Source != "refs/remotes/origin/remote-only" {
+		t.Errorf("remote-only = %+v, want normalized origin branch", got)
+	}
+	if _, ok := byName["HEAD"]; ok {
+		t.Error("remote symbolic HEAD was offered as a branch")
+	}
+}
+
+func TestListAvailableBranchesUsesCustomRemoteFetchRefspec(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+	gitOutput(t, repo.Path, "config", "--unset-all", "remote.origin.fetch")
+	gitOutput(
+		t,
+		repo.Path,
+		"config",
+		"--add",
+		"remote.origin.fetch",
+		"+refs/heads/*:refs/remotes/pull/*",
+	)
+
+	repo.CreateBranch(t, "custom-fetch")
+	gitOutput(t, repo.Path, "push", "origin", "custom-fetch")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "custom-fetch")
+	gitOutput(t, repo.Path, "fetch", "origin")
+
+	branches, err := New(repo.Path).ListAvailableBranches()
+	require.NoError(t, err)
+
+	for _, branch := range branches {
+		if branch.Source != "refs/remotes/pull/custom-fetch" {
+			continue
+		}
+		assert.Equal(t, "custom-fetch", branch.Name)
+		assert.True(t, branch.IsRemote)
+		return
+	}
+	t.Fatalf("custom-fetch branch not found: %+v", branches)
+}
+
+func TestListAvailableBranchesUsesFullRefsAcrossNamespaceCollisions(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "upstream.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "team/upstream", remotePath)
+
+	repo.CreateBranch(t, "topic")
+	commitTestFile(t, repo.Path, "topic.txt", "topic\n", "Topic branch")
+	gitOutput(t, repo.Path, "push", "team/upstream", "topic")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "topic")
+	gitOutput(t, repo.Path, "branch", "team/upstream/topic")
+	gitOutput(t, repo.Path, "fetch", "team/upstream")
+
+	branches, err := New(repo.Path).ListAvailableBranches()
+	if err != nil {
+		t.Fatalf("ListAvailableBranches() error = %v", err)
+	}
+
+	bySource := make(map[string]models.Branch, len(branches))
+	for _, branch := range branches {
+		bySource[branch.Source] = branch
+	}
+	if got := bySource["team/upstream/topic"]; got.Name != "team/upstream/topic" ||
+		got.IsRemote {
+		t.Errorf("local collision branch = %+v, want canonical local identity", got)
+	}
+	const remoteSource = "refs/remotes/team/upstream/topic"
+	if got := bySource[remoteSource]; got.Name != "topic" || !got.IsRemote {
+		t.Errorf("remote collision branch = %+v, want topic from %s", got, remoteSource)
+	}
+}
+
+func TestListAvailableBranchesLabelsDuplicateRemoteNamesBySource(t *testing.T) {
+	repo := NewTestRepository(t)
+	for _, remote := range []string{"origin", "upstream"} {
+		remotePath := filepath.Join(t.TempDir(), remote+".git")
+		gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+		gitOutput(t, repo.Path, "remote", "add", remote, remotePath)
+	}
+	repo.CreateBranch(t, "topic")
+	commitTestFile(t, repo.Path, "topic.txt", "topic\n", "Topic")
+	gitOutput(t, repo.Path, "push", "origin", "topic")
+	gitOutput(t, repo.Path, "push", "upstream", "topic")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "topic")
+
+	branches, err := New(repo.Path).ListAvailableBranches()
+	if err != nil {
+		t.Fatalf("ListAvailableBranches() error = %v", err)
+	}
+
+	labels := make(map[string]string)
+	for _, branch := range branches {
+		if branch.Name == "topic" {
+			labels[branch.Source] = branch.Label
+		}
+	}
+	if got := labels["refs/remotes/origin/topic"]; got != "topic (origin/topic)" {
+		t.Errorf("origin label = %q, want source-qualified label", got)
+	}
+	if got := labels["refs/remotes/upstream/topic"]; got != "topic (upstream/topic)" {
+		t.Errorf("upstream label = %q, want source-qualified label", got)
+	}
+}
+
+func TestListAvailableBranchesPreservesDelimiterCharacters(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+
+	branchName := "topic|review"
+	if runtime.GOOS == "windows" {
+		// NTFS cannot materialize a loose ref containing "|". The commit
+		// subject still exercises NUL-delimited parsing on Windows, while the
+		// ref-name case runs on filesystems that support it.
+		branchName = "topic-review"
+	}
+	repo.CreateBranch(t, branchName)
+	commitTestFile(t, repo.Path, "topic.txt", "topic\n", "Subject | details")
+	gitOutput(t, repo.Path, "push", "origin", branchName)
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", branchName)
+
+	branches, err := New(repo.Path).ListAvailableBranches()
+	if err != nil {
+		t.Fatalf("ListAvailableBranches() error = %v", err)
+	}
+
+	source := "refs/remotes/origin/" + branchName
+	for _, branch := range branches {
+		if branch.Source != source {
+			continue
+		}
+		if branch.Name != branchName {
+			t.Errorf("branch name = %q, want %s", branch.Name, branchName)
+		}
+		if branch.LastCommit.Message != "Subject | details" {
+			t.Errorf(
+				"commit subject = %q, want Subject | details",
+				branch.LastCommit.Message,
+			)
+		}
+		return
+	}
+	t.Fatalf("remote branch %s not found: %+v", source, branches)
+}
+
+func TestAddWorktreeTrackingRemoteBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+
+	repo.CreateBranch(t, "remote-only")
+	if err := os.WriteFile(
+		filepath.Join(repo.Path, ".gitattributes"),
+		[]byte(
+			"remote.txt filter=smudge-attack\n"+
+				"process.txt filter=process-attack\n"+
+				"conditional.txt filter=conditional-attack\n",
+		),
+		0644,
+	); err != nil {
+		t.Fatalf("write attributes: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(repo.Path, "process.txt"),
+		[]byte("process content\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write process input: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(repo.Path, "conditional.txt"),
+		[]byte("conditional content\n"),
+		0644,
+	); err != nil {
+		t.Fatalf("write conditional input: %v", err)
+	}
+	gitOutput(t, repo.Path, "add", ".gitattributes", "process.txt", "conditional.txt")
+	commitTestFile(t, repo.Path, "remote.txt", "remote\n", "Remote branch")
+	wantHead := gitOutput(t, repo.Path, "rev-parse", "HEAD")
+	gitOutput(t, repo.Path, "push", "origin", "remote-only")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "remote-only")
+	t.Setenv("KWT_GITHUB_TOKEN", "must-not-reach-remote-checkout")
+	t.Setenv("KWT_FLEET_TOKEN", "must-not-reach-remote-checkout")
+	t.Setenv("Custom_Fleet_Token", "must-not-reach-remote-checkout")
+
+	hookMarker := filepath.Join(t.TempDir(), "hook-ran")
+	referenceHookMarker := filepath.Join(t.TempDir(), "reference-hook-ran")
+	configuredHookMarker := filepath.Join(t.TempDir(), "configured-hook-ran")
+	filterMarker := filepath.Join(t.TempDir(), "filter-ran")
+	processMarker := filepath.Join(t.TempDir(), "process-ran")
+	conditionalFilterMarker := filepath.Join(t.TempDir(), "conditional-filter-ran")
+	hooksDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(hooksDir, "post-checkout"),
+		fmt.Appendf(nil, "#!/bin/sh\nprintf hook > %q\n", hookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write checkout hook: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(hooksDir, "reference-transaction"),
+		fmt.Appendf(nil, "#!/bin/sh\nprintf reference > %q\n", referenceHookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write reference transaction hook: %v", err)
+	}
+	filterDir := t.TempDir()
+	smudgePath := filepath.Join(filterDir, "smudge")
+	if err := os.WriteFile(
+		smudgePath,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf filter > %q\ncat\n", filterMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write smudge filter: %v", err)
+	}
+	processPath := filepath.Join(filterDir, "process")
+	if err := os.WriteFile(
+		processPath,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf process > %q\nexit 1\n", processMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write process filter: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "core.hooksPath", hooksDir)
+	gitOutput(t, repo.Path, "config", "filter.smudge-attack.smudge", smudgePath)
+	gitOutput(t, repo.Path, "config", "filter.process-attack.process", processPath)
+	gitOutput(t, repo.Path, "config", "filter.process-attack.required", "true")
+	configuredHook := filepath.Join(t.TempDir(), "configured-hook")
+	if err := os.WriteFile(
+		configuredHook,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf hook > %q\n", configuredHookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write configured hook: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "hook.configured-attack.command", configuredHook)
+	for _, event := range []string{
+		"post-checkout",
+		"post-index-change",
+		"reference-transaction",
+	} {
+		gitOutput(t, repo.Path, "config", "--add", "hook.configured-attack.event", event)
+	}
+	configuredHooksSupported := exec.Command(
+		"git", "-C", repo.Path, "hook", "list", "post-checkout",
+	).Run() == nil
+
+	conditionalFilter := filepath.Join(t.TempDir(), "conditional-filter")
+	if err := os.WriteFile(
+		conditionalFilter,
+		fmt.Appendf(
+			nil,
+			"#!/bin/sh\nprintf filter > %q\ncat\n",
+			conditionalFilterMarker,
+		),
+		0755,
+	); err != nil {
+		t.Fatalf("write conditional filter: %v", err)
+	}
+	includePath := filepath.Join(t.TempDir(), "gitdir.config")
+	gitOutput(t, repo.Path, "config", "-f", includePath, "filter.conditional-attack.smudge", conditionalFilter)
+	gitOutput(t, repo.Path, "config", "-f", includePath, "filter.conditional-attack.required", "true")
+	gitOutput(
+		t,
+		repo.Path,
+		"config",
+		"includeIf.gitdir:**/worktrees/remote-only.path",
+		includePath,
+	)
+	gitOutput(t, repo.Path, "config", "core.autocrlf", "true")
+
+	if runtime.GOOS != "windows" {
+		realGit, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatalf("find git executable: %v", err)
+		}
+		wrapperDir := t.TempDir()
+		wrapperPath := filepath.Join(wrapperDir, "git")
+		wrapper := `#!/bin/sh
+if [ -n "$KWT_GITHUB_TOKEN" ] || [ -n "$KWT_FLEET_TOKEN" ] || [ -n "$Custom_Fleet_Token" ]; then
+	printf '%s\n' 'kwt credential reached remote-source git command' >&2
+	exit 88
+fi
+worktree_add=false
+previous=
+for arg in "$@"; do
+	if [ "$previous" = "worktree" ] && [ "$arg" = "add" ]; then
+		worktree_add=true
+	fi
+	previous=$arg
+done
+if $worktree_add; then
+	for arg in "$@"; do
+		if [ "$arg" = "--track" ]; then
+			printf '%s\n' 'error: unknown option track' >&2
+			exit 129
+		fi
+	done
+fi
+exec "$REAL_GIT" "$@"
+`
+		if err := os.WriteFile(wrapperPath, []byte(wrapper), 0755); err != nil {
+			t.Fatalf("write git compatibility wrapper: %v", err)
+		}
+		t.Setenv("REAL_GIT", realGit)
+		t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+
+	worktreePath := filepath.Join(t.TempDir(), "remote-only")
+	err := New(repo.Path).AddWorktreeTracking(
+		worktreePath,
+		"remote-only",
+		"origin/remote-only",
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN", "custom_fleet_token"},
+	)
+	t.Setenv("KWT_GITHUB_TOKEN", "")
+	t.Setenv("KWT_FLEET_TOKEN", "")
+	t.Setenv("Custom_Fleet_Token", "")
+	if err != nil {
+		t.Fatalf("AddWorktreeTracking() error = %v", err)
+	}
+	if got := gitOutput(t, worktreePath, "rev-parse", "HEAD"); got != wantHead {
+		t.Errorf("HEAD = %s, want remote branch %s", got, wantHead)
+	}
+	if got := gitOutput(t, worktreePath, "rev-parse", "--abbrev-ref", "@{upstream}"); got != "origin/remote-only" {
+		t.Errorf("upstream = %s, want origin/remote-only", got)
+	}
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Errorf("checkout hook ran against remote content: stat error = %v", err)
+	}
+	if _, err := os.Stat(referenceHookMarker); !os.IsNotExist(err) {
+		t.Errorf("reference transaction hook ran during remote creation: stat error = %v", err)
+	}
+	if configuredHooksSupported {
+		if _, err := os.Stat(configuredHookMarker); !os.IsNotExist(err) {
+			t.Errorf("configured hook ran during remote creation: stat error = %v", err)
+		}
+	}
+	if _, err := os.Stat(filterMarker); !os.IsNotExist(err) {
+		t.Errorf("smudge filter ran against remote content: stat error = %v", err)
+	}
+	if _, err := os.Stat(processMarker); !os.IsNotExist(err) {
+		t.Errorf("process filter ran against remote content: stat error = %v", err)
+	}
+	if _, err := os.Stat(conditionalFilterMarker); !os.IsNotExist(err) {
+		t.Errorf("gitdir-conditional filter ran against remote content: stat error = %v", err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(worktreePath, "conditional.txt")); err != nil {
+		t.Errorf("read checked-out remote file: %v", err)
+	} else if strings.ReplaceAll(string(contents), "\r\n", "\n") != "conditional content\n" {
+		t.Errorf("conditional.txt = %q, want remote content", contents)
+	}
+}
+
+func TestAddWorktreeTrackingRollsBackBranchWhenWorktreeFails(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+
+	repo.CreateBranch(t, "remote-only")
+	gitOutput(t, repo.Path, "push", "origin", "remote-only")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "remote-only")
+	referenceHookMarker := filepath.Join(t.TempDir(), "reference-hook-ran")
+	hooksDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(hooksDir, "reference-transaction"),
+		fmt.Appendf(nil, "#!/bin/sh\nprintf reference > %q\n", referenceHookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write reference transaction hook: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "core.hooksPath", hooksDir)
+	configuredHookMarker := filepath.Join(t.TempDir(), "configured-hook-ran")
+	configuredHook := filepath.Join(t.TempDir(), "configured-hook")
+	if err := os.WriteFile(
+		configuredHook,
+		fmt.Appendf(nil, "#!/bin/sh\nprintf hook > %q\n", configuredHookMarker),
+		0755,
+	); err != nil {
+		t.Fatalf("write configured hook: %v", err)
+	}
+	gitOutput(t, repo.Path, "config", "hook.configured-attack.command", configuredHook)
+	gitOutput(t, repo.Path, "config", "--add", "hook.configured-attack.event", "reference-transaction")
+	configuredHooksSupported := exec.Command(
+		"git", "-C", repo.Path, "hook", "list", "reference-transaction",
+	).Run() == nil
+
+	occupiedPath := filepath.Join(t.TempDir(), "occupied")
+	if err := os.MkdirAll(occupiedPath, 0755); err != nil {
+		t.Fatalf("create occupied path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(occupiedPath, "keep"), []byte("keep"), 0644); err != nil {
+		t.Fatalf("write occupied path: %v", err)
+	}
+
+	err := New(repo.Path).AddWorktreeTracking(
+		occupiedPath,
+		"remote-only",
+		"refs/remotes/origin/remote-only",
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("AddWorktreeTracking() expected an error")
+	}
+	if err := repo.run("show-ref", "--verify", "--quiet", "refs/heads/remote-only"); err == nil {
+		t.Error("local tracking branch remained after worktree creation failed")
+	}
+	if _, err := os.Stat(referenceHookMarker); !os.IsNotExist(err) {
+		t.Errorf("reference transaction hook ran during rollback: stat error = %v", err)
+	}
+	if configuredHooksSupported {
+		if _, err := os.Stat(configuredHookMarker); !os.IsNotExist(err) {
+			t.Errorf("configured hook ran during rollback: stat error = %v", err)
+		}
+	}
+}
+
+func TestAddWorktreeTrackingRejectsOptionLikeBranchName(t *testing.T) {
+	repo := NewTestRepository(t)
+	gitOutput(
+		t,
+		repo.Path,
+		"update-ref",
+		"refs/remotes/origin/-M",
+		"HEAD",
+	)
+
+	worktreePath := filepath.Join(t.TempDir(), "option-like")
+	err := New(repo.Path).AddWorktreeTracking(
+		worktreePath,
+		"-M",
+		"refs/remotes/origin/-M",
+		nil,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid local branch name "-M"`)
+	assert.Equal(t, "main", gitOutput(t, repo.Path, "branch", "--show-current"))
+	assert.NoDirExists(t, worktreePath)
+}
+
+func TestAddWorktreeExistingRemovesWorktreeAfterCheckoutFailure(t *testing.T) {
+	repo := NewTestRepository(t)
+	createBranchWithMissingBlob(t, repo, "broken-local")
+	worktreePath := filepath.Join(t.TempDir(), "broken-local")
+
+	err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"broken-local",
+		nil,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to check out existing-branch worktree")
+	assert.NoDirExists(t, worktreePath)
+	worktrees, listErr := New(repo.Path).ListWorktrees()
+	require.NoError(t, listErr)
+	for _, worktree := range worktrees {
+		assert.NotEqual(t, worktreePath, worktree.Path)
+	}
+}
+
+func TestAddWorktreeExistingRejectsRemoteOnlyBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	gitOutput(
+		t,
+		filepath.Dir(remotePath),
+		"init",
+		"--bare",
+		"-b",
+		"main",
+		remotePath,
+	)
+	gitOutput(t, repo.Path, "remote", "add", "origin", remotePath)
+	repo.CreateBranch(t, "remote-only-local-import")
+	gitOutput(t, repo.Path, "push", "-u", "origin", "remote-only-local-import")
+	gitOutput(t, repo.Path, "checkout", "main")
+	gitOutput(t, repo.Path, "branch", "-D", "remote-only-local-import")
+	worktreePath := filepath.Join(t.TempDir(), "remote-only-local-import")
+
+	err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"remote-only-local-import",
+		nil,
+	)
+
+	require.Error(t, err)
+	assert.NoDirExists(t, worktreePath)
+	assert.Error(
+		t,
+		repo.run(
+			"show-ref",
+			"--verify",
+			"--quiet",
+			"refs/heads/remote-only-local-import",
+		),
+	)
+}
+
+func TestAddWorktreeTrackingRemovesWorktreeAndBranchAfterCheckoutFailure(
+	t *testing.T,
+) {
+	repo := NewTestRepository(t)
+	commit := createBranchWithMissingBlob(t, repo, "broken-remote")
+	gitOutput(t, repo.Path, "remote", "add", "origin", repo.Path)
+	gitOutput(
+		t,
+		repo.Path,
+		"update-ref",
+		"refs/remotes/origin/broken-remote",
+		commit,
+	)
+	gitOutput(t, repo.Path, "branch", "-D", "broken-remote")
+	worktreePath := filepath.Join(t.TempDir(), "broken-remote")
+
+	err := New(repo.Path).AddWorktreeTracking(
+		worktreePath,
+		"broken-remote",
+		"refs/remotes/origin/broken-remote",
+		nil,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to check out worktree tracking")
+	assert.NoDirExists(t, worktreePath)
+	assert.Error(
+		t,
+		repo.run(
+			"show-ref",
+			"--verify",
+			"--quiet",
+			"refs/heads/broken-remote",
+		),
+	)
+	worktrees, listErr := New(repo.Path).ListWorktrees()
+	require.NoError(t, listErr)
+	for _, worktree := range worktrees {
+		assert.NotEqual(t, worktreePath, worktree.Path)
+	}
 }
 
 func TestGetRepositoryName(t *testing.T) {

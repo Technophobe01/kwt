@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/ui"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
@@ -61,6 +62,61 @@ func TestCollectWorktreeStatusesLocalUsesCanonicalLocalRepository(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, statuses, 1)
 	require.Equal(t, want.FullPath, statuses[0].Repository)
+}
+
+func TestImportedWorktreeReceivesAutomaticStatusAndFleetInspection(t *testing.T) {
+	resetStatusTestFlags(t)
+	resetFleetCommandDeps(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	repoDir := t.TempDir()
+	require.NoError(t, cmdStatusTestGit(repoDir, "init", "-b", "main"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.name", "Test User"))
+	require.NoError(t, cmdStatusTestGit(repoDir, "config", "user.email", "test@example.com"))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoDir, "README.md"),
+		[]byte("# remote\n"),
+		0644,
+	))
+	require.NoError(t, cmdStatusTestGit(repoDir, "add", "."))
+	require.NoError(t, cmdStatusTestGit(repoDir, "commit", "-m", "Initial commit"))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoDir, "README.md"),
+		[]byte("# changed\n"),
+		0644,
+	))
+	builder := newFleetManifestBuilder()
+	reg, err := registry.New()
+	require.NoError(t, err)
+	require.NoError(t, reg.Register(&registry.WorktreeEntry{
+		Path:                   repoDir,
+		Branch:                 "main",
+		UnreviewedRemoteSource: true,
+	}))
+	t.Chdir(repoDir)
+	statusNoFetch = true
+	cfg := &models.Config{
+		Fleet: models.FleetConfig{HostID: "host-a"},
+		Projects: []models.Project{{
+			Repository: "github.com/acme/widget",
+			Path:       repoDir,
+		}},
+	}
+
+	statuses, err := collectWorktreeStatuses(
+		context.Background(),
+		cfg,
+		ui.New(&models.UIConfig{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, models.WorktreeStatusModified, statuses[0].Status)
+	require.Equal(t, 1, statuses[0].GitStatus.Modified)
+
+	manifest, err := builder.Build(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Len(t, manifest.Worktrees, 1)
+	require.Equal(t, 1, manifest.Worktrees[0].Status.Modified)
 }
 
 func resetStatusTestFlags(t *testing.T) {

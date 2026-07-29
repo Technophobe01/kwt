@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
@@ -34,6 +35,7 @@ type tuiBackend struct {
 	mu                        sync.Mutex
 	cfg                       *models.Config
 	tmux                      *tmux.TmuxCommand
+	protectedNames            []string
 	launchDir                 string
 	launchProjectRegistered   bool
 	launchWorkspaceRegistered bool
@@ -47,6 +49,8 @@ type tuiBackend struct {
 	registerWorkspace         func(models.Workspace) (models.Workspace, error)
 	unregisterWorkspace       func(name string) error
 	readFleetState            func(context.Context, *models.Config) (fleet.FleetState, error)
+	loadTargetConfig          func(string, bool) (*models.Config, error)
+	acknowledgeRemoteSource   func(string) error
 	now                       func() time.Time
 }
 
@@ -56,11 +60,13 @@ func newTUIBackend(cfg *models.Config) *tuiBackend {
 }
 
 func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBackend {
-	tmuxCmd := tmux.NewTmuxCommand("")
+	protectedNames := credentials.ProtectedNames(cfg)
+	tmuxCmd := tmux.NewTmuxCommandWithStripNames("", protectedNames)
 	return &tuiBackend{
-		cfg:       cfg,
-		tmux:      tmuxCmd,
-		launchDir: launchDir,
+		cfg:            cfg,
+		tmux:           tmuxCmd,
+		protectedNames: protectedNames,
+		launchDir:      launchDir,
 		// Registered projects flow into base-dir discovery so a registered
 		// canonical identity wins over a fork origin (the same precedence
 		// applyProjectIdentityFallback applies to per-project discovery).
@@ -71,12 +77,17 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		discoverLaunchWorktrees:  discoverLaunchRepoWorktrees,
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
-		ensureAndAttach:          tmux.NewWorkspaceRunner(tmuxCmd).EnsureAndAttach,
-		registerProject:          config.RegisterProject,
-		registerWorkspace:        config.RegisterWorkspace,
-		unregisterWorkspace:      config.UnregisterWorkspace,
-		readFleetState:           readTUIFleetState,
-		now:                      time.Now,
+		ensureAndAttach: tmux.NewWorkspaceRunner(
+			tmuxCmd,
+			protectedNames,
+		).EnsureAndAttach,
+		registerProject:         config.RegisterProject,
+		registerWorkspace:       config.RegisterWorkspace,
+		unregisterWorkspace:     config.UnregisterWorkspace,
+		readFleetState:          readTUIFleetState,
+		loadTargetConfig:        config.LoadForTarget,
+		acknowledgeRemoteSource: acknowledgeRemoteSourcePath,
+		now:                     time.Now,
 	}
 }
 
@@ -105,7 +116,9 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	startup.Add(4)
 	go func() {
 		defer startup.Done()
-		entries, discoveryErr = b.discoverGlobalWorktrees(b.cfg.Worktree.BaseDir)
+		entries, discoveryErr = b.discoverGlobalWorktrees(
+			b.cfg.Worktree.BaseDir,
+		)
 	}()
 	go func() {
 		defer startup.Done()
@@ -138,7 +151,11 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 
 	var statusByPath map[string]*models.WorktreeStatus
 	if includeStatuses {
-		statusByPath, discoveryErr = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
+		statusByPath, discoveryErr = b.collectStatuses(
+			ctx,
+			b.cfg.Worktree.BaseDir,
+			entries,
+		)
 		if discoveryErr != nil {
 			return nil, nil, discoveryErr
 		}
@@ -885,11 +902,24 @@ func (b *tuiBackend) CreateWorktree(
 	ctx context.Context,
 	row dashboard.Row,
 	branch string,
+	source string,
 ) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
-	path, err := worktree.New(git.New(row.Entry.Path), b.cfg).Add(branch, "", true)
+	manager, err := b.worktreeManager(row)
+	if err != nil {
+		return "", err
+	}
+	var path string
+	switch source {
+	case "":
+		path, err = manager.Add(branch, "", true)
+	case branch:
+		path, err = manager.Add(branch, "", false)
+	default:
+		path, err = manager.AddTracking(branch, source, "")
+	}
 	if err != nil {
 		return "", err
 	}
@@ -897,11 +927,24 @@ func (b *tuiBackend) CreateWorktree(
 	return path, nil
 }
 
+func (b *tuiBackend) ListBranches(
+	_ context.Context,
+	row dashboard.Row,
+) ([]models.Branch, error) {
+	if row.Entry == nil {
+		return nil, fmt.Errorf("no worktree selected")
+	}
+	return git.New(row.Entry.Path).ListAvailableBranches()
+}
+
 func (b *tuiBackend) PreviewWorktree(row dashboard.Row, branch string) (dashboard.Row, error) {
 	if row.Entry == nil {
 		return dashboard.Row{}, fmt.Errorf("no worktree selected")
 	}
-	manager := worktree.New(git.New(row.Entry.Path), b.cfg)
+	manager, err := b.worktreeManager(row)
+	if err != nil {
+		return dashboard.Row{}, err
+	}
 	worktreePath, err := manager.PreparePath("", branch)
 	if err != nil {
 		return dashboard.Row{}, err
@@ -919,6 +962,19 @@ func (b *tuiBackend) PreviewWorktree(row dashboard.Row, branch string) (dashboar
 	}, nil
 }
 
+func (b *tuiBackend) worktreeManager(row dashboard.Row) (*worktree.Manager, error) {
+	repositoryGit := git.New(row.Entry.Path)
+	repoRoot, err := repositoryGit.GetMainRepositoryPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve selected repository root: %w", err)
+	}
+	cfg, err := b.loadTargetConfig(repoRoot, false)
+	if err != nil {
+		return nil, fmt.Errorf("load selected repository config: %w", err)
+	}
+	return worktree.New(repositoryGit, cfg), nil
+}
+
 func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row) (string, error) {
 	if row.Fleet == nil {
 		return "", fmt.Errorf("no fleet worktree selected")
@@ -934,30 +990,101 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
 	}
 	repo := git.New(project.Path)
-	// `git worktree add` auto-creates a local branch from a fetched remote;
-	// remember whether one existed so a failed verification can clean it up.
 	branchExisted := localBranchExists(ctx, repo, row.Fleet.Branch)
-	path, err := worktree.New(repo, b.cfg).AddWithOptions(
-		row.Fleet.Branch,
-		"",
-		false,
-		worktree.AddOptions{SkipSetup: true},
-	)
+	cfg, err := b.loadTargetConfig(project.Path, false)
 	if err != nil {
-		return "", fmt.Errorf(
+		return "", fmt.Errorf("load selected project config: %w", err)
+	}
+	manager := worktree.New(repo, cfg)
+	var (
+		path          string
+		branchCreated bool
+	)
+	if branchExisted {
+		path, err = manager.AddWithOptions(
+			row.Fleet.Branch,
+			"",
+			false,
+			worktree.AddOptions{SkipSetup: true},
+		)
+	} else {
+		var source string
+		source, err = resolveFetchedRemoteSource(repo, row.Fleet.Branch)
+		if err == nil {
+			path, err = manager.AddTracking(
+				row.Fleet.Branch,
+				source,
+				"",
+			)
+			branchCreated = err == nil
+		}
+	}
+	if err != nil {
+		syncErr := fmt.Errorf(
 			"could not sync %s: branch must exist locally or on a fetched remote; push or fetch it first: %w",
 			row.Fleet.Branch,
 			err,
 		)
+		return "", syncErr
 	}
 	if err := b.verifyMaterializedHead(ctx, project.Path, path, row.Fleet); err != nil {
-		if !branchExisted {
-			_ = repo.DeleteBranch(row.Fleet.Branch, true)
+		if branchCreated {
+			err = b.rollbackMaterializedBranch(
+				repo,
+				row.Fleet.Branch,
+				err,
+			)
 		}
 		return "", err
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
+}
+
+func resolveFetchedRemoteSource(repo *git.Git, branch string) (string, error) {
+	branches, err := repo.ListAvailableBranches()
+	if err != nil {
+		return "", fmt.Errorf("list fetched branches: %w", err)
+	}
+	var source string
+	for _, candidate := range branches {
+		if !candidate.IsRemote || candidate.Name != branch {
+			continue
+		}
+		if source != "" {
+			return "", fmt.Errorf(
+				"branch %s matches multiple fetched remotes",
+				branch,
+			)
+		}
+		source = candidate.Source
+	}
+	if source == "" {
+		return "", fmt.Errorf(
+			"branch %s has no matching fetched remote",
+			branch,
+		)
+	}
+	return source, nil
+}
+
+func (b *tuiBackend) rollbackMaterializedBranch(
+	repo *git.Git,
+	branch string,
+	materializeErr error,
+) error {
+	if cleanupErr := repo.DeleteBranchIsolated(
+		branch,
+		b.protectedNames,
+	); cleanupErr != nil {
+		return fmt.Errorf(
+			"%w (failed to remove auto-created branch %s; an incomplete worktree may remain: %v)",
+			materializeErr,
+			branch,
+			cleanupErr,
+		)
+	}
+	return materializeErr
 }
 
 func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string, worktreePath string, info *dashboard.FleetInfo) error {
@@ -967,20 +1094,63 @@ func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string
 	want := strings.TrimSpace(info.RemoteHead)
 	got, err := git.New(worktreePath).RunWithContext(ctx, "rev-parse", "HEAD")
 	if err != nil {
-		_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
-		return fmt.Errorf("could not verify synced head for %s; push or fetch it first: %w", info.Branch, err)
+		return b.failMaterializedHeadVerification(
+			repoRoot,
+			worktreePath,
+			fmt.Errorf(
+				"could not verify synced head for %s; push or fetch it first: %w",
+				info.Branch,
+				err,
+			),
+		)
 	}
 	got = strings.TrimSpace(got)
 	if strings.EqualFold(got, want) {
 		return nil
 	}
-	_ = worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, true)
-	return fmt.Errorf(
-		"synced %s at %s, but hub reported head %s; push or fetch the reported commit first",
-		info.Branch,
-		shortCommit(got),
-		shortCommit(want),
+	return b.failMaterializedHeadVerification(
+		repoRoot,
+		worktreePath,
+		fmt.Errorf(
+			"synced %s at %s, but hub reported head %s; push or fetch the reported commit first",
+			info.Branch,
+			shortCommit(got),
+			shortCommit(want),
+		),
 	)
+}
+
+func (b *tuiBackend) failMaterializedHeadVerification(
+	repoRoot string,
+	worktreePath string,
+	verificationErr error,
+) error {
+	if err := worktree.New(git.New(repoRoot), b.cfg).Remove(
+		worktreePath,
+		true,
+	); err != nil {
+		return fmt.Errorf(
+			"%w (failed to remove rejected worktree: %v)",
+			verificationErr,
+			err,
+		)
+	}
+	reg, err := registry.New()
+	if err != nil {
+		return fmt.Errorf(
+			"%w (worktree removed, but failed to open registry: %v)",
+			verificationErr,
+			err,
+		)
+	}
+	if err := reg.Unregister(worktreePath); err != nil {
+		return fmt.Errorf(
+			"%w (worktree removed, but failed to unregister it: %v)",
+			verificationErr,
+			err,
+		)
+	}
+	return verificationErr
 }
 
 func localBranchExists(ctx context.Context, g *git.Git, branch string) bool {
@@ -1308,6 +1478,9 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 		return fmt.Errorf("no worktree selected")
 	}
 	if err := rejectProtectedWorkspaceOpen(ctx, rowPaneRoot(row)); err != nil {
+		return err
+	}
+	if err := b.acknowledgeRemoteSource(rowPaneRoot(row)); err != nil {
 		return err
 	}
 	sessionName, err := b.sessionName(row)

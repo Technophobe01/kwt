@@ -19,6 +19,8 @@ type Worktree struct {
 // Branch represents a Git branch with its metadata.
 type Branch struct {
 	Name       string     `json:"name"`        // Branch name
+	Label      string     `json:"label"`       // Source-qualified display label
+	Source     string     `json:"source"`      // Local branch or remote ref used to create a worktree
 	IsCurrent  bool       `json:"is_current"`  // Whether this is the current branch
 	IsRemote   bool       `json:"is_remote"`   // Whether this is a remote branch
 	LastCommit CommitInfo `json:"last_commit"` // Information about the last commit
@@ -125,9 +127,10 @@ type UIConfig struct {
 
 // NamingConfig contains directory naming and template configuration options.
 type NamingConfig struct {
-	Template        string            `mapstructure:"template"`            // Directory name template
-	SanitizeChars   map[string]string `mapstructure:"sanitize_chars"`      // Character replacement for branch names
-	RepositoryLocal bool              `mapstructure:"-" toml:"-" json:"-"` // Generated paths include repository-local naming input
+	Template                     string            `mapstructure:"template"`            // Directory name template
+	SanitizeChars                map[string]string `mapstructure:"sanitize_chars"`      // Character replacement for branch names
+	TemplateRepositoryLocal      bool              `mapstructure:"-" toml:"-" json:"-"` // Template came from repository-local config
+	SanitizeCharsRepositoryLocal bool              `mapstructure:"-" toml:"-" json:"-"` // Replacements came from repository-local config
 }
 
 // WorktreeStatus represents the current status of a worktree.

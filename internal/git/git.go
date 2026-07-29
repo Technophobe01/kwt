@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"go.kenn.io/kwt/internal/credentials"
 )
 
 // Git provides Git command operations.
@@ -57,6 +59,27 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), stderr.String())
 	}
 
+	return stdout.String(), nil
+}
+
+// runWithoutCredentials executes a Git operation that may run against
+// untrusted content without exposing caller-supplied credentials.
+func (g *Git) runWithoutCredentials(
+	protectedNames []string,
+	args ...string,
+) (string, error) {
+	cmd := exec.Command("git", args...)
+	if g.workDir != "" {
+		cmd.Dir = g.workDir
+	}
+	cmd.Env = credentials.StripEnvironment(os.Environ(), protectedNames)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), stderr.String())
+	}
 	return stdout.String(), nil
 }
 

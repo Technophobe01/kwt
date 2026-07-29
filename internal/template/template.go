@@ -4,9 +4,11 @@ package template
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
+	"text/template/parse"
 
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
@@ -29,6 +31,13 @@ type Processor struct {
 	sanitizeChars map[string]string
 }
 
+// EnvironmentOptions selects which naming components inherit environment
+// expansion from global configuration.
+type EnvironmentOptions struct {
+	ExpandTemplate      bool
+	ExpandSanitizeChars bool
+}
+
 // New creates a new template processor.
 func New(templateStr string, sanitizeChars map[string]string) (*Processor, error) {
 	tmpl, err := template.New("worktree").Parse(templateStr)
@@ -40,6 +49,121 @@ func New(templateStr string, sanitizeChars map[string]string) (*Processor, error
 		template:      tmpl,
 		sanitizeChars: sanitizeChars,
 	}, nil
+}
+
+// NewWithEnvironment creates a processor for trusted global configuration.
+// Environment references expand only in literal template text and replacement
+// values, never inside template actions or branch-derived data.
+func NewWithEnvironment(
+	templateStr string,
+	sanitizeChars map[string]string,
+) (*Processor, error) {
+	return NewWithEnvironmentOptions(
+		templateStr,
+		sanitizeChars,
+		EnvironmentOptions{
+			ExpandTemplate:      true,
+			ExpandSanitizeChars: true,
+		},
+	)
+}
+
+// NewWithEnvironmentOptions creates a processor with per-component
+// environment-expansion provenance.
+func NewWithEnvironmentOptions(
+	templateStr string,
+	sanitizeChars map[string]string,
+	options EnvironmentOptions,
+) (*Processor, error) {
+	processor, err := New(templateStr, sanitizeChars)
+	if err != nil {
+		return nil, err
+	}
+	if options.ExpandTemplate {
+		for _, tmpl := range processor.template.Templates() {
+			if tmpl.Tree != nil {
+				expandLiteralText(tmpl.Root)
+			}
+		}
+	}
+	if options.ExpandSanitizeChars {
+		expandedSanitizeChars := make(map[string]string, len(sanitizeChars))
+		for old, replacement := range sanitizeChars {
+			expandedSanitizeChars[old] = os.ExpandEnv(replacement)
+		}
+		processor.sanitizeChars = expandedSanitizeChars
+	}
+	return processor, nil
+}
+
+// LiteralTextHasEnvironmentReference reports whether environment expansion
+// would affect literal template output. Dollar-prefixed Go template variables
+// inside actions are syntax, not environment references.
+func LiteralTextHasEnvironmentReference(templateStr string) (bool, error) {
+	processor, err := New(templateStr, nil)
+	if err != nil {
+		return false, err
+	}
+	for _, tmpl := range processor.template.Templates() {
+		if tmpl.Tree != nil && literalTextHasEnvironmentReference(tmpl.Root) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func literalTextHasEnvironmentReference(node parse.Node) bool {
+	switch current := node.(type) {
+	case *parse.ListNode:
+		if current == nil {
+			return false
+		}
+		for _, child := range current.Nodes {
+			if literalTextHasEnvironmentReference(child) {
+				return true
+			}
+		}
+	case *parse.TextNode:
+		found := false
+		_ = os.Expand(string(current.Text), func(string) string {
+			found = true
+			return ""
+		})
+		return found
+	case *parse.IfNode:
+		return literalTextHasEnvironmentReference(current.List) ||
+			literalTextHasEnvironmentReference(current.ElseList)
+	case *parse.RangeNode:
+		return literalTextHasEnvironmentReference(current.List) ||
+			literalTextHasEnvironmentReference(current.ElseList)
+	case *parse.WithNode:
+		return literalTextHasEnvironmentReference(current.List) ||
+			literalTextHasEnvironmentReference(current.ElseList)
+	}
+	return false
+}
+
+func expandLiteralText(node parse.Node) {
+	switch current := node.(type) {
+	case *parse.ListNode:
+		if current == nil {
+			return
+		}
+		for _, child := range current.Nodes {
+			expandLiteralText(child)
+		}
+	case *parse.TextNode:
+		current.Text = []byte(os.ExpandEnv(string(current.Text)))
+	case *parse.IfNode:
+		expandLiteralText(current.List)
+		expandLiteralText(current.ElseList)
+	case *parse.RangeNode:
+		expandLiteralText(current.List)
+		expandLiteralText(current.ElseList)
+	case *parse.WithNode:
+		expandLiteralText(current.List)
+		expandLiteralText(current.ElseList)
+	}
 }
 
 // GeneratePath generates a worktree path using the configured template.

@@ -108,7 +108,11 @@ func DiscoverGlobalWorktrees(baseDir string, projects []models.Project) ([]*Glob
 		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
-	return extractWorktreeCandidates(candidates, projects, extractWorktreeInfo), nil
+	return extractWorktreeCandidates(
+		candidates,
+		projects,
+		extractWorktreeInfo,
+	), nil
 }
 
 // DiscoverWorktree resolves one exact worktree root independently of the

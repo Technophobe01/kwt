@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	worktreetemplate "go.kenn.io/kwt/internal/template"
 	repositoryurl "go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
@@ -20,6 +21,9 @@ const (
 	configName      = "config"
 	configType      = "toml"
 	localConfigName = ".kwt"
+
+	cwdLocalNamingTemplateMarker = "kwt.internal.cwd_local_naming_template"
+	cwdLocalNamingSanitizeMarker = "kwt.internal.cwd_local_naming_sanitize"
 
 	// DefaultNamingTemplate is the starter naming template used for new global configs.
 	DefaultNamingTemplate = "{{.FullPath}}/{{.Branch}}"
@@ -81,6 +85,8 @@ func getLocalConfigPath() string {
 //
 // For repository_settings, merging is done by the `repository` field as the key.
 func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive bool) error {
+	viper.Set(cwdLocalNamingTemplateMarker, false)
+	viper.Set(cwdLocalNamingSanitizeMarker, false)
 	rawPath := getLocalConfigPath()
 	if rawPath == "" {
 		return nil
@@ -130,6 +136,20 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 	if err := localViper.ReadConfig(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("parse local config %s: %w", absPath, err)
 	}
+	if err := resolveTargetLocalPaths(
+		localViper,
+		filepath.Dir(absPath),
+	); err != nil {
+		return fmt.Errorf("resolve local config paths %s: %w", absPath, err)
+	}
+	viper.Set(
+		cwdLocalNamingTemplateMarker,
+		localViper.IsSet("naming.template"),
+	)
+	viper.Set(
+		cwdLocalNamingSanitizeMarker,
+		localViper.IsSet("naming.sanitize_chars"),
+	)
 
 	for _, key := range localViper.AllKeys() {
 		switch {
@@ -448,7 +468,8 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 	if err := target.MergeConfigMap(viper.AllSettings()); err != nil {
 		return nil, fmt.Errorf("copy global config: %w", err)
 	}
-	repositoryLocalNaming := false
+	repositoryLocalTemplate := false
+	repositoryLocalSanitizeChars := false
 
 	path := filepath.Join(repoRoot, localConfigName+"."+configType)
 	if _, err := os.Lstat(path); err != nil {
@@ -492,8 +513,10 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 				if pathErr := resolveTargetLocalPaths(local, repoRoot); pathErr != nil {
 					return nil, fmt.Errorf("resolve target config paths %s: %w", absPath, pathErr)
 				}
-				repositoryLocalNaming = local.IsSet("naming.template") ||
-					local.IsSet("naming.sanitize_chars")
+				repositoryLocalTemplate = local.IsSet("naming.template")
+				repositoryLocalSanitizeChars = local.IsSet(
+					"naming.sanitize_chars",
+				)
 				for _, key := range local.AllKeys() {
 					switch {
 					case key == "repository_settings":
@@ -516,7 +539,9 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 	if err := expandConfigPaths(&cfg); err != nil {
 		return nil, err
 	}
-	cfg.Naming.RepositoryLocal = repositoryLocalNaming
+	cfg.Naming.TemplateRepositoryLocal = repositoryLocalTemplate
+	cfg.Naming.SanitizeCharsRepositoryLocal =
+		repositoryLocalSanitizeChars
 	return &cfg, nil
 }
 
@@ -549,11 +574,19 @@ func normalizeTargetConfigPath(path string) (string, error) {
 
 func resolveTargetLocalPaths(local *viper.Viper, repoRoot string) error {
 	repoRoot = utils.CanonicalPath(repoRoot)
-	if local.IsSet("naming.template") &&
-		targetPathHasEnvironmentReference(local.GetString("naming.template")) {
-		return fmt.Errorf(
-			"environment variable references are not allowed in repository-local naming templates",
-		)
+	if local.IsSet("naming.template") {
+		hasEnvironmentReference, err :=
+			worktreetemplate.LiteralTextHasEnvironmentReference(
+				local.GetString("naming.template"),
+			)
+		if err != nil {
+			return err
+		}
+		if hasEnvironmentReference {
+			return fmt.Errorf(
+				"environment variable references are not allowed in repository-local naming templates",
+			)
+		}
 	}
 	for _, replacement := range local.GetStringMapString(
 		"naming.sanitize_chars",
@@ -646,6 +679,12 @@ func Load() (*models.Config, error) {
 	if err := expandConfigPaths(&cfg); err != nil {
 		return nil, err
 	}
+	cfg.Naming.TemplateRepositoryLocal = viper.GetBool(
+		cwdLocalNamingTemplateMarker,
+	)
+	cfg.Naming.SanitizeCharsRepositoryLocal = viper.GetBool(
+		cwdLocalNamingSanitizeMarker,
+	)
 	return &cfg, nil
 }
 

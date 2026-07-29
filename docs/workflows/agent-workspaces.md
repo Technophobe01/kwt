@@ -41,5 +41,10 @@ quiet.
 ## Cross-project steering
 
 The dashboard is project-aware. Use `P` to set the active project perspective
-before creating a worktree, then `n` to create it without leaving the TUI. Use
-lowercase `p` for a temporary project-name filter and `/` for row search.
+before creating a worktree. Press `n` for a new branch or `b` to search local
+and remote branches that are not already checked out. A selected remote branch
+is checked out without repository hooks, configured filters, setup commands,
+status or fleet inspection, or workspace commands. Review it before pressing
+`enter`; that explicit attach acknowledges the checkout, enables normal
+inspection, and creates its session. Use lowercase `p` for a temporary
+project-name filter and `/` for row search.

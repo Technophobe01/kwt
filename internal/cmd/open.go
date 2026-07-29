@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/tmux"
@@ -19,8 +20,9 @@ var (
 	openSelectLayout bool
 	openStartSession bool
 
-	newOpenWorkspaceRunner = func() openWorkspaceRunner {
-		return tmux.NewWorkspaceRunner(tmux.NewTmuxCommand(""))
+	newOpenWorkspaceRunner = func(names []string) openWorkspaceRunner {
+		tmuxCommand := tmux.NewTmuxCommandWithStripNames("", names)
+		return tmux.NewWorkspaceRunner(tmuxCommand, names)
 	}
 )
 
@@ -234,6 +236,9 @@ func openSelectedWorktree(
 	if err := rejectProtectedWorkspaceOpen(commandCtx, entry.Path); err != nil {
 		return err
 	}
+	if err := acknowledgeRemoteSourcePath(entry.Path); err != nil {
+		return err
+	}
 
 	// Only resolve the target repo's default layout (which requires
 	// finding its root and loading, and possibly trust-prompting for, its
@@ -271,7 +276,7 @@ func openSelectedWorktree(
 	}
 
 	session := tmux.WorkspaceSessionName(entry.RepositoryInfo, entry.Branch, entry.Path)
-	runner := newOpenWorkspaceRunner()
+	runner := newOpenWorkspaceRunner(credentials.ProtectedNames(ctx.Config))
 	if startSession {
 		return runner.Ensure(commandCtx, session, entry.Path, layout)
 	}

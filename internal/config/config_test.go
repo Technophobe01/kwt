@@ -1420,6 +1420,128 @@ copy_files = [".env.evil"]
 	})
 }
 
+func TestMergeLocalConfigRejectsEnvironmentReferencesInNaming(t *testing.T) {
+	tests := []struct {
+		name  string
+		local string
+	}{
+		{
+			name: "template",
+			local: `
+[naming]
+template = "$KWT_GITHUB_TOKEN/{{.Branch}}"
+`,
+		},
+		{
+			name: "replacement",
+			local: `
+[naming.sanitize_chars]
+"/" = "$KWT_GITHUB_TOKEN"
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			absPath, data := writeLocalConfig(
+				t,
+				t.TempDir(),
+				[]byte(tt.local),
+			)
+			store := &TrustStore{
+				entries: []trustEntry{{
+					Path:   absPath,
+					SHA256: computeSHA256(data),
+				}},
+			}
+
+			err := mergeLocalConfig(store, trustingPrompter(), true)
+
+			if err == nil ||
+				!strings.Contains(err.Error(), "environment variable references") {
+				t.Fatalf("mergeLocalConfig() error = %v, want environment rejection", err)
+			}
+		})
+	}
+}
+
+func TestMergeLocalConfigAllowsTemplateVariablesNamedWithDollar(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	absPath, data := writeLocalConfig(
+		t,
+		t.TempDir(),
+		[]byte(`
+[naming]
+template = "{{$branch := .Branch}}/{{$branch}}"
+`),
+	)
+	store := &TrustStore{
+		entries: []trustEntry{{
+			Path:   absPath,
+			SHA256: computeSHA256(data),
+		}},
+	}
+
+	require.NoError(t, mergeLocalConfig(store, trustingPrompter(), true))
+}
+
+func TestMergeLocalConfigTracksTemplateProvenanceSeparately(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	absPath, data := writeLocalConfig(
+		t,
+		t.TempDir(),
+		[]byte(`
+[naming]
+template = "{{.Repository}}/{{.Branch}}"
+`),
+	)
+	store := &TrustStore{
+		entries: []trustEntry{{
+			Path:   absPath,
+			SHA256: computeSHA256(data),
+		}},
+	}
+
+	if err := mergeLocalConfig(store, trustingPrompter(), true); err != nil {
+		t.Fatalf("mergeLocalConfig() error = %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	assert.True(t, cfg.Naming.TemplateRepositoryLocal)
+	assert.False(t, cfg.Naming.SanitizeCharsRepositoryLocal)
+}
+
+func TestMergeLocalConfigTracksSanitizationProvenanceSeparately(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	viper.Set("naming.template", "$KWT_GROUP/{{.Branch}}")
+	absPath, data := writeLocalConfig(
+		t,
+		t.TempDir(),
+		[]byte(`
+[naming.sanitize_chars]
+"/" = "-"
+`),
+	)
+	store := &TrustStore{
+		entries: []trustEntry{{
+			Path:   absPath,
+			SHA256: computeSHA256(data),
+		}},
+	}
+
+	require.NoError(t, mergeLocalConfig(store, trustingPrompter(), true))
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.Naming.TemplateRepositoryLocal)
+	assert.True(t, cfg.Naming.SanitizeCharsRepositoryLocal)
+}
+
 func TestDefaultLayoutsConfig(t *testing.T) {
 	// Isolate HOME so Init() reads and writes a throwaway config dir,
 	// never the real ~/.config/kwt (Init calls viper.SafeWriteConfig).
@@ -1797,7 +1919,8 @@ template = '{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}'
 	cfg, err := LoadForTarget(target, false)
 
 	require.NoError(t, err)
-	assert.True(t, cfg.Naming.RepositoryLocal)
+	assert.True(t, cfg.Naming.TemplateRepositoryLocal)
+	assert.False(t, cfg.Naming.SanitizeCharsRepositoryLocal)
 }
 
 func TestLoadForTargetMergesEquivalentGlobalAndLocalRepositoryPaths(t *testing.T) {

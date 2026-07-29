@@ -8,7 +8,10 @@ import (
 	"runtime"
 	"strings"
 
+	"go.kenn.io/kwt/internal/credentials"
+	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/template"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
@@ -18,6 +21,11 @@ import (
 type GitInterface interface {
 	ListWorktrees() ([]models.Worktree, error)
 	AddWorktree(path, branch string, createBranch bool) error
+	AddWorktreeExisting(path, branch string, protectedNames []string) error
+	AddWorktreeTracking(
+		path, branch, remoteBranch string,
+		protectedNames []string,
+	) error
 	AddWorktreeFromBase(path, branch, baseBranch string) error
 	RemoveWorktree(path string, force bool) error
 	DeleteBranch(branch string, force bool) error
@@ -30,8 +38,15 @@ type GitInterface interface {
 
 // Manager handles worktree operations.
 type Manager struct {
-	git    GitInterface
-	config *models.Config
+	git                   GitInterface
+	config                *models.Config
+	openRemoteSourceState func() (remoteSourceState, error)
+}
+
+type remoteSourceState interface {
+	Register(*registry.WorktreeEntry) error
+	Unregister(string) error
+	Get(string) (*registry.WorktreeEntry, bool)
 }
 
 // AddOptions controls optional behavior for creating a worktree.
@@ -44,6 +59,9 @@ func New(g GitInterface, config *models.Config) *Manager {
 	return &Manager{
 		git:    g,
 		config: config,
+		openRemoteSourceState: func() (remoteSourceState, error) {
+			return registry.New()
+		},
 	}
 }
 
@@ -54,6 +72,10 @@ func (m *Manager) Add(branch string, customPath string, createBranch bool) (stri
 
 // AddWithOptions creates a new worktree and returns the path of the created worktree.
 func (m *Manager) AddWithOptions(branch string, customPath string, createBranch bool, opts AddOptions) (string, error) {
+	if !createBranch {
+		return m.addExisting(branch, customPath)
+	}
+
 	path, err := m.preparePath(customPath, branch, nil)
 	if err != nil {
 		return "", err
@@ -66,6 +88,80 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 	if !opts.SkipSetup {
 		m.runPostWorktreeSetup(branch, path)
 	}
+	return path, nil
+}
+
+func (m *Manager) addExisting(branch, customPath string) (string, error) {
+	path, err := m.preparePath(customPath, branch, nil)
+	if err != nil {
+		return "", err
+	}
+	return m.addUnreviewedSource(path, branch, func() error {
+		return m.git.AddWorktreeExisting(
+			path,
+			branch,
+			credentials.ProtectedNames(m.config),
+		)
+	})
+}
+
+// AddTracking creates a worktree on a local branch that tracks remoteBranch.
+// Repository setup is intentionally deferred: the remote checkout is
+// untrusted until the user has reviewed it.
+func (m *Manager) AddTracking(branch, remoteBranch, customPath string) (string, error) {
+	path, err := m.preparePath(customPath, branch, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return m.addUnreviewedSource(path, branch, func() error {
+		return m.git.AddWorktreeTracking(
+			path,
+			branch,
+			remoteBranch,
+			credentials.ProtectedNames(m.config),
+		)
+	})
+}
+
+func (m *Manager) addUnreviewedSource(
+	path, branch string,
+	add func() error,
+) (string, error) {
+	state, err := m.openRemoteSourceState()
+	if err != nil {
+		return "", fmt.Errorf("open remote-source state: %w", err)
+	}
+	previous, existed := state.Get(path)
+	entry := &registry.WorktreeEntry{
+		Branch:                 branch,
+		Path:                   path,
+		UnreviewedRemoteSource: true,
+	}
+	if err := state.Register(entry); err != nil {
+		return "", fmt.Errorf("mark remote-source worktree unreviewed: %w", err)
+	}
+
+	if err := add(); err != nil {
+		var restoreErr error
+		switch {
+		case existed:
+			restoreErr = state.Register(previous)
+		default:
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				restoreErr = state.Unregister(path)
+			}
+		}
+		if restoreErr != nil {
+			return "", fmt.Errorf(
+				"%w (failed to restore remote-source state: %v)",
+				err,
+				restoreErr,
+			)
+		}
+		return "", err
+	}
+
 	return path, nil
 }
 
@@ -211,12 +307,16 @@ func (m *Manager) preparePath(
 		path = generatedPath
 	}
 
-	if !generated || !m.config.Naming.RepositoryLocal {
+	if !generated {
 		expandedPath, err := utils.ExpandPath(path)
 		if err != nil {
 			return "", fmt.Errorf("failed to expand path: %w", err)
 		}
 		path = expandedPath
+	}
+
+	if err := tmux.ValidateStartDirectory(path); err != nil {
+		return "", err
 	}
 
 	if m.config.Worktree.AutoMkdir {
@@ -244,6 +344,7 @@ func (m *Manager) generateWorktreePathForRepository(
 			return "", err
 		}
 	}
+	branch = encodeBranchForWorktreePath(branch)
 
 	// Determine effective base directory: per-repo setting overrides global
 	baseDir := m.config.Worktree.BaseDir
@@ -256,11 +357,26 @@ func (m *Manager) generateWorktreePathForRepository(
 			baseDir = setting.BaseDir
 		}
 	}
+	namingTemplate := m.config.Naming.Template
+	expandedBaseDir, err := utils.ExpandPath(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to expand worktree base: %w", err)
+	}
+	baseDir = expandedBaseDir
 
 	// Use template if configured, otherwise fall back to default URL hierarchy
-	if m.config.Naming.Template != "" {
+	if namingTemplate != "" {
 		// Create template processor
-		processor, err := template.New(m.config.Naming.Template, m.config.Naming.SanitizeChars)
+		naming := m.config.Naming
+		environmentOptions := template.EnvironmentOptions{
+			ExpandTemplate:      !naming.TemplateRepositoryLocal,
+			ExpandSanitizeChars: !naming.SanitizeCharsRepositoryLocal,
+		}
+		processor, err := template.NewWithEnvironmentOptions(
+			namingTemplate,
+			naming.SanitizeChars,
+			environmentOptions,
+		)
 		if err != nil {
 			// Fall back to default hierarchy if template is invalid
 			return url.GenerateWorktreePath(baseDir, repoInfo, branch), nil
@@ -280,6 +396,10 @@ func (m *Manager) generateWorktreePathForRepository(
 	// Fall back to default URL hierarchy
 	path := url.GenerateWorktreePath(baseDir, repoInfo, branch)
 	return path, ensurePathWithinBase(baseDir, path)
+}
+
+func encodeBranchForWorktreePath(branch string) string {
+	return strings.NewReplacer("%", "%25", "#", "%23").Replace(branch)
 }
 
 func (m *Manager) repositoryInfo() (*url.RepositoryInfo, error) {

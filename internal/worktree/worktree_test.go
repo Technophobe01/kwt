@@ -7,10 +7,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	configpkg "go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -28,6 +30,38 @@ type mockGit struct {
 	deleteBranchError error
 	recentCommits     []models.CommitInfo
 	mainRepoPathError error
+	trackingSource    string
+	existingSource    string
+	protectedNames    []string
+}
+
+type mockRemoteSourceState struct {
+	entries map[string]*registry.WorktreeEntry
+}
+
+func (m *mockRemoteSourceState) Register(entry *registry.WorktreeEntry) error {
+	if m.entries == nil {
+		m.entries = make(map[string]*registry.WorktreeEntry)
+	}
+	copied := *entry
+	m.entries[entry.Path] = &copied
+	return nil
+}
+
+func (m *mockRemoteSourceState) Unregister(path string) error {
+	delete(m.entries, path)
+	return nil
+}
+
+func (m *mockRemoteSourceState) Get(
+	path string,
+) (*registry.WorktreeEntry, bool) {
+	entry, ok := m.entries[path]
+	if !ok {
+		return nil, false
+	}
+	copied := *entry
+	return &copied, true
 }
 
 func (m *mockGit) ListWorktrees() ([]models.Worktree, error) {
@@ -41,6 +75,38 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 	if m.addError != nil {
 		return m.addError
 	}
+	m.worktrees = append(m.worktrees, models.Worktree{
+		Path:   path,
+		Branch: branch,
+	})
+	return nil
+}
+
+func (m *mockGit) AddWorktreeTracking(
+	path, branch, remoteBranch string,
+	protectedNames []string,
+) error {
+	if m.addError != nil {
+		return m.addError
+	}
+	m.trackingSource = remoteBranch
+	m.protectedNames = append([]string(nil), protectedNames...)
+	m.worktrees = append(m.worktrees, models.Worktree{
+		Path:   path,
+		Branch: branch,
+	})
+	return nil
+}
+
+func (m *mockGit) AddWorktreeExisting(
+	path, branch string,
+	protectedNames []string,
+) error {
+	if m.addError != nil {
+		return m.addError
+	}
+	m.existingSource = branch
+	m.protectedNames = append([]string(nil), protectedNames...)
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
@@ -185,6 +251,209 @@ func TestManagerAdd(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagerAddTrackingUsesRemoteSource(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(baseDir, "remote-worktree")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoDir, "copy-me"),
+		[]byte("untrusted"),
+		0644,
+	))
+	mockG := &mockGit{repoPath: repoDir}
+	state := &mockRemoteSourceState{}
+	manager := New(mockG, &models.Config{
+		Worktree: models.WorktreeConfig{
+			BaseDir:   baseDir,
+			AutoMkdir: true,
+		},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository:    repoDir,
+			CopyFiles:     []string{"copy-me"},
+			SetupCommands: []string{"touch setup-ran"},
+		}},
+		Fleet: models.FleetConfig{TokenEnv: "Custom_Fleet_Token"},
+	})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	path, err := manager.AddTracking(
+		"feature/remote",
+		"origin/feature/remote",
+		worktreePath,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, worktreePath, path)
+	require.Len(t, mockG.worktrees, 1)
+	assert.Equal(t, "feature/remote", mockG.worktrees[0].Branch)
+	assert.Equal(t, "origin/feature/remote", mockG.trackingSource)
+	assert.ElementsMatch(
+		t,
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN", "Custom_Fleet_Token"},
+		mockG.protectedNames,
+	)
+	require.Contains(t, state.entries, worktreePath)
+	assert.True(t, state.entries[worktreePath].UnreviewedRemoteSource)
+	assert.NoFileExists(t, filepath.Join(worktreePath, "copy-me"))
+	assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran"))
+}
+
+func TestManagerAddExistingMarksSourceUnreviewedAndSkipsSetup(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(baseDir, "local-worktree")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoDir, "copy-me"),
+		[]byte("trusted config, untrusted branch"),
+		0644,
+	))
+	mockG := &mockGit{repoPath: repoDir}
+	state := &mockRemoteSourceState{}
+	manager := New(mockG, &models.Config{
+		Worktree: models.WorktreeConfig{
+			BaseDir:   baseDir,
+			AutoMkdir: true,
+		},
+		RepositorySettings: []models.RepositorySetting{{
+			Repository: repoDir,
+			CopyFiles:  []string{"copy-me"},
+		}},
+		Fleet: models.FleetConfig{TokenEnv: "Custom_Fleet_Token"},
+	})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	path, err := manager.Add("feature/local", worktreePath, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, worktreePath, path)
+	assert.Equal(t, "feature/local", mockG.existingSource)
+	assert.ElementsMatch(
+		t,
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN", "Custom_Fleet_Token"},
+		mockG.protectedNames,
+	)
+	require.Contains(t, state.entries, worktreePath)
+	assert.True(t, state.entries[worktreePath].UnreviewedRemoteSource)
+	assert.NoFileExists(t, filepath.Join(worktreePath, "copy-me"))
+}
+
+func TestManagerAddTrackingRestoresExistingMarkerAfterGitFailure(t *testing.T) {
+	worktreePath := t.TempDir()
+	future := time.Now().Add(time.Hour)
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:                   worktreePath,
+			Branch:                 "feature/existing",
+			Repository:             "github.com/acme/widget",
+			ExpiresAt:              &future,
+			UnreviewedRemoteSource: true,
+		},
+	}}
+	manager := New(&mockGit{addError: errors.New("already checked out")}, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/existing",
+		"refs/remotes/origin/feature/existing",
+		worktreePath,
+	)
+
+	require.Error(t, err)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok, "failed repeated add must retain the safety marker")
+	assert.True(t, entry.UnreviewedRemoteSource)
+	assert.Equal(t, "github.com/acme/widget", entry.Repository)
+	assert.Equal(t, &future, entry.ExpiresAt)
+}
+
+func TestManagerAddTrackingReplacesStaleMetadataAfterSuccess(t *testing.T) {
+	worktreePath := t.TempDir()
+	expired := time.Now().Add(-time.Hour)
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:                   worktreePath,
+			Branch:                 "feature/stale",
+			Repository:             "github.com/acme/old",
+			ExpiresAt:              &expired,
+			UnreviewedRemoteSource: true,
+		},
+	}}
+	manager := New(&mockGit{}, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/reused",
+		"refs/remotes/origin/feature/reused",
+		worktreePath,
+	)
+
+	require.NoError(t, err)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok)
+	assert.Equal(t, "feature/reused", entry.Branch)
+	assert.Empty(t, entry.Repository)
+	assert.Nil(t, entry.ExpiresAt)
+	assert.True(t, entry.UnreviewedRemoteSource)
+}
+
+func TestManagerAddTrackingRetainsMarkerWhenFailedCheckoutPathExists(t *testing.T) {
+	worktreePath := t.TempDir()
+	state := &mockRemoteSourceState{}
+	manager := New(&mockGit{addError: errors.New("checkout failed")}, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/partial",
+		"refs/remotes/origin/feature/partial",
+		worktreePath,
+	)
+
+	require.Error(t, err)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok, "a possibly materialized checkout must remain isolated")
+	assert.True(t, entry.UnreviewedRemoteSource)
+}
+
+func TestManagerAddTrackingDoesNotExpandRemoteBranchEnvironmentReferences(
+	t *testing.T,
+) {
+	trustedBase := t.TempDir()
+	t.Setenv("KWT_TEST_WORKTREE_BASE", trustedBase)
+	t.Setenv("KWT_GITHUB_TOKEN", "credential-must-not-appear-in-path")
+	mockG := &mockGit{repoURL: "https://github.com/acme/widget.git"}
+	manager := New(mockG, &models.Config{
+		Worktree: models.WorktreeConfig{
+			BaseDir: "$KWT_TEST_WORKTREE_BASE",
+		},
+		Naming: models.NamingConfig{Template: "{{.Branch}}"},
+	})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return &mockRemoteSourceState{}, nil
+	}
+
+	path, err := manager.AddTracking(
+		"$KWT_GITHUB_TOKEN",
+		"refs/remotes/origin/$KWT_GITHUB_TOKEN",
+		"",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(trustedBase, "$KWT_GITHUB_TOKEN"), path)
+	assert.NotContains(t, path, "credential-must-not-appear-in-path")
 }
 
 func TestManagerRemove(t *testing.T) {
@@ -437,6 +706,8 @@ func TestManagerValidateWorktreePath(t *testing.T) {
 }
 
 func TestGenerateWorktreePath(t *testing.T) {
+	defaultBaseDir := filepath.Join(t.TempDir(), "base")
+	perRepoBaseDir := filepath.Join(t.TempDir(), "per-repo-base")
 	tests := []struct {
 		name               string
 		branch             string
@@ -446,7 +717,7 @@ func TestGenerateWorktreePath(t *testing.T) {
 		repositorySettings []models.RepositorySetting
 		mainRepoPathError  error
 		wantErr            bool
-		wantBaseDir        string // if non-empty, overrides "/base" in expected path
+		wantBaseDir        string
 	}{
 		{
 			name:       "BasicTemplate",
@@ -472,10 +743,10 @@ func TestGenerateWorktreePath(t *testing.T) {
 			repoName: "myrepo",
 			repoPath: "/mock/repo/path",
 			repositorySettings: []models.RepositorySetting{
-				{Repository: "/mock/repo/path", BaseDir: "/per-repo-base"},
+				{Repository: "/mock/repo/path", BaseDir: perRepoBaseDir},
 			},
 			wantSuffix:  "github.com/test-user/test-repo/feature-test",
-			wantBaseDir: "/per-repo-base",
+			wantBaseDir: perRepoBaseDir,
 		},
 		{
 			name:     "PerRepoBaseDirEmpty",
@@ -493,7 +764,7 @@ func TestGenerateWorktreePath(t *testing.T) {
 			repoName:          "myrepo",
 			mainRepoPathError: errors.New("git error"),
 			repositorySettings: []models.RepositorySetting{
-				{Repository: "/mock/repo/path", BaseDir: "/per-repo-base"},
+				{Repository: "/mock/repo/path", BaseDir: perRepoBaseDir},
 			},
 			wantErr: true,
 		},
@@ -509,7 +780,7 @@ func TestGenerateWorktreePath(t *testing.T) {
 
 			config := &models.Config{
 				Worktree: models.WorktreeConfig{
-					BaseDir: "/base",
+					BaseDir: defaultBaseDir,
 				},
 				RepositorySettings: tt.repositorySettings,
 			}
@@ -527,7 +798,7 @@ func TestGenerateWorktreePath(t *testing.T) {
 				t.Fatalf("generateWorktreePath() error = %v", err)
 			}
 
-			baseDir := "/base"
+			baseDir := defaultBaseDir
 			if tt.wantBaseDir != "" {
 				baseDir = tt.wantBaseDir
 			}
@@ -577,6 +848,31 @@ func TestGenerateWorktreePathDefaultTemplatePreservesNestedRemoteNamespace(t *te
 	if left == right {
 		t.Fatalf("nested remotes generated colliding paths: %s", left)
 	}
+}
+
+func TestGenerateWorktreePathEncodesTmuxFormatCharacters(t *testing.T) {
+	baseDir := t.TempDir()
+	manager := New(&mockGit{
+		repoURL: "https://github.com/acme/widget.git",
+	}, &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: baseDir},
+		Naming: models.NamingConfig{
+			Template:      "{{.Branch}}",
+			SanitizeChars: map[string]string{"/": "-"},
+		},
+	})
+
+	path, err := manager.generateWorktreePath(
+		"feature/%23/#(touch$IFS.pwn)",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		filepath.Join(baseDir, "feature-%2523-%23(touch$IFS.pwn)"),
+		path,
+	)
+	assert.NotContains(t, path, "#")
 }
 
 // TestRepositoryInfoFromGitCanonicalResolver pins the single canonical
@@ -911,8 +1207,8 @@ func TestPreparePathDoesNotExpandRepositoryLocalTemplateOutput(t *testing.T) {
 		&models.Config{
 			Worktree: models.WorktreeConfig{BaseDir: baseDir},
 			Naming: models.NamingConfig{
-				Template:        `{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}`,
-				RepositoryLocal: true,
+				Template:                `{{printf "%c%s" 36 "KWT_GITHUB_TOKEN"}}/{{.Branch}}`,
+				TemplateRepositoryLocal: true,
 			},
 		},
 	)
@@ -922,6 +1218,104 @@ func TestPreparePathDoesNotExpandRepositoryLocalTemplateOutput(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, path, "credential-must-not-appear-in-path")
 	assert.Contains(t, path, "$KWT_GITHUB_TOKEN")
+}
+
+func TestAddRejectsTmuxFormatPathBeforeMutation(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "uncreated")
+	worktreePath := filepath.Join(parent, "feature#widgets")
+	repositoryGit := &mockGit{}
+	manager := New(repositoryGit, &models.Config{
+		Worktree: models.WorktreeConfig{AutoMkdir: true},
+	})
+
+	path, err := manager.Add("feature/widgets", worktreePath, true)
+
+	require.Error(t, err)
+	assert.Empty(t, path)
+	assert.Contains(t, err.Error(), "tmux format syntax")
+	assert.Empty(t, repositoryGit.worktrees)
+	assert.NoDirExists(t, parent)
+}
+
+func TestPreparePathExpandsOnlyLiteralTextInGlobalTemplate(t *testing.T) {
+	t.Setenv("KWT_WORKTREE_GROUP", "trusted-group")
+	baseDir := t.TempDir()
+	manager := New(
+		&mockGit{repoURL: "https://github.com/acme/widget.git"},
+		&models.Config{
+			Worktree: models.WorktreeConfig{BaseDir: baseDir},
+			Naming: models.NamingConfig{
+				Template: `$KWT_WORKTREE_GROUP/{{$branch := .Branch}}{{$branch}}`,
+				SanitizeChars: map[string]string{
+					"/": "-",
+				},
+			},
+		},
+	)
+
+	path, err := manager.PreparePath("", "feature/widgets")
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		filepath.Join(baseDir, "trusted-group", "feature-widgets"),
+		path,
+	)
+}
+
+func TestPreparePathExpandsGlobalSanitizationReplacements(t *testing.T) {
+	t.Setenv("KWT_BRANCH_SEPARATOR", "__")
+	baseDir := t.TempDir()
+	manager := New(
+		&mockGit{repoURL: "https://github.com/acme/widget.git"},
+		&models.Config{
+			Worktree: models.WorktreeConfig{BaseDir: baseDir},
+			Naming: models.NamingConfig{
+				Template: "{{.Branch}}",
+				SanitizeChars: map[string]string{
+					"/": "$KWT_BRANCH_SEPARATOR",
+				},
+			},
+		},
+	)
+
+	path, err := manager.PreparePath("", "feature/widgets")
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(baseDir, "feature__widgets"), path)
+}
+
+func TestPreparePathExpandsNamingComponentsByProvenance(t *testing.T) {
+	t.Setenv("KWT_WORKTREE_GROUP", "trusted-group")
+	t.Setenv("KWT_BRANCH_SEPARATOR", "__")
+	baseDir := t.TempDir()
+	manager := New(
+		&mockGit{repoURL: "https://github.com/acme/widget.git"},
+		&models.Config{
+			Worktree: models.WorktreeConfig{BaseDir: baseDir},
+			Naming: models.NamingConfig{
+				Template:                     "$KWT_WORKTREE_GROUP/{{.Branch}}",
+				TemplateRepositoryLocal:      false,
+				SanitizeCharsRepositoryLocal: true,
+				SanitizeChars: map[string]string{
+					"/": "$KWT_BRANCH_SEPARATOR",
+				},
+			},
+		},
+	)
+
+	path, err := manager.PreparePath("", "feature/widgets")
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		filepath.Join(
+			baseDir,
+			"trusted-group",
+			"feature$KWT_BRANCH_SEPARATORwidgets",
+		),
+		path,
+	)
 }
 
 func TestGenerateWorktreePathRejectsSymlinkEscapeFromBaseDir(t *testing.T) {
@@ -990,7 +1384,7 @@ func TestManagerAdd_ConfigurableSetupIntegration(t *testing.T) {
 	mockG := &mockGit{repoPath: repoDir}
 	m := New(mockG, cfg)
 
-	_, err = m.Add("feature/test", filepath.Join(worktreeDir, "wt1"), false)
+	_, err = m.Add("feature/test", filepath.Join(worktreeDir, "wt1"), true)
 	if err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
@@ -1033,7 +1427,7 @@ func TestManagerAdd_SetupFromWorktreeContext(t *testing.T) {
 	mockG := &mockGit{repoPath: repoDir}
 	m := New(mockG, cfg)
 
-	_, err = m.Add("feature/wt-test", filepath.Join(worktreeDir, "wt1"), false)
+	_, err = m.Add("feature/wt-test", filepath.Join(worktreeDir, "wt1"), true)
 	if err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}

@@ -18,6 +18,9 @@ import (
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/registry"
+	"go.kenn.io/kwt/internal/tmux"
+	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -82,6 +85,155 @@ func TestAddDoesNotPublishWhenValidationFails(t *testing.T) {
 	assert.Zero(t, calls)
 }
 
+func TestAddFromRemoteBranchCreatesTrackingWorktreeWithoutLaunching(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	viper.Set("layouts.auto_launch_on_add", true)
+	putFakeTmuxOnPath(t)
+	t.Chdir(repoPath)
+
+	remotePath := filepath.Join(t.TempDir(), "origin.git")
+	runTUITestGit(t, filepath.Dir(remotePath), "init", "--bare", "-b", "main", remotePath)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", remotePath)
+	runTUITestGit(t, repoPath, "checkout", "-b", "feature/remote")
+	runTUITestGit(t, repoPath, "push", "origin", "feature/remote")
+	runTUITestGit(t, repoPath, "checkout", "main")
+	runTUITestGit(t, repoPath, "branch", "-D", "feature/remote")
+
+	addFrom = "origin/feature/remote"
+	addExpires = "1h"
+	worktreePath := filepath.Join(t.TempDir(), "feature-remote")
+
+	cmd, _, _ := fleetTestCommand()
+	err := runAdd(cmd, []string{"feature/remote", worktreePath})
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"origin/feature/remote",
+		strings.TrimSpace(runTUITestGitOutput(
+			t,
+			worktreePath,
+			"rev-parse",
+			"--abbrev-ref",
+			"@{upstream}",
+		)),
+	)
+	reg, registryErr := registry.New()
+	require.NoError(t, registryErr)
+	entry, ok := reg.Get(worktreePath)
+	require.True(t, ok)
+	assert.True(t, entry.UnreviewedRemoteSource)
+	assert.NotNil(t, entry.ExpiresAt)
+}
+
+func TestAddFromResolvesRemoteRefAcrossLocalNamespaceCollision(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	t.Chdir(repoPath)
+	runTUITestGit(t, repoPath, "remote", "add", "origin", repoPath)
+	runTUITestGit(
+		t,
+		repoPath,
+		"update-ref",
+		"refs/remotes/origin/topic",
+		"HEAD",
+	)
+	runTUITestGit(t, repoPath, "branch", "origin/topic")
+
+	addFrom = "origin/topic"
+	worktreePath := filepath.Join(t.TempDir(), "imported-topic")
+	cmd, _, _ := fleetTestCommand()
+
+	err := runAdd(cmd, []string{"imported-topic", worktreePath})
+
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"origin",
+		strings.TrimSpace(runTUITestGitOutput(
+			t,
+			repoPath,
+			"config",
+			"branch.imported-topic.remote",
+		)),
+	)
+	assert.Equal(
+		t,
+		"refs/heads/topic",
+		strings.TrimSpace(runTUITestGitOutput(
+			t,
+			repoPath,
+			"config",
+			"branch.imported-topic.merge",
+		)),
+	)
+}
+
+func TestAddExistingLocalBranchDefersWorkspaceLaunchUntilReview(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	viper.Set("layouts.auto_launch_on_add", true)
+	putFakeTmuxOnPath(t)
+	runTUITestGit(t, repoPath, "checkout", "-b", "feature/local")
+	runTUITestGit(t, repoPath, "checkout", "main")
+	t.Chdir(repoPath)
+
+	runner := &recordingOpenWorkspaceRunner{}
+	oldNewRunner := newAddWorkspaceRunner
+	t.Cleanup(func() { newAddWorkspaceRunner = oldNewRunner })
+	newAddWorkspaceRunner = func([]string) openWorkspaceRunner {
+		return runner
+	}
+	worktreePath := filepath.Join(t.TempDir(), "feature-local")
+
+	cmd, _, _ := fleetTestCommand()
+	err := runAdd(cmd, []string{"feature/local", worktreePath})
+
+	require.NoError(t, err)
+	assert.False(t, runner.attached)
+	reg, err := registry.New()
+	require.NoError(t, err)
+	assert.True(t, reg.IsUnreviewedRemoteSource(worktreePath))
+}
+
+func TestExistingBranchReviewMessageUsesStaticPicker(t *testing.T) {
+	assert.Equal(
+		t,
+		"Review the existing-branch checkout, then run 'kwt open' to select it and start its workspace.",
+		existingBranchReviewMessage(),
+	)
+}
+
+func TestAddFromRemoteBranchRejectsImmediateLayoutLaunch(t *testing.T) {
+	resetFleetCommandDeps(t)
+	resetAddCommandFlags(t)
+
+	repoPath := newTUITestRepo(t)
+	initCommandTestConfig(t, t.TempDir())
+	t.Chdir(repoPath)
+
+	addFrom = "origin/feature/remote"
+	addLayout = "shell"
+	worktreePath := filepath.Join(t.TempDir(), "feature-remote")
+
+	cmd, _, _ := fleetTestCommand()
+	err := runAdd(cmd, []string{"feature/remote", worktreePath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inspect the checkout")
+	assert.NoDirExists(t, worktreePath)
+}
+
 func TestShouldLaunch(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -144,6 +296,36 @@ func TestPrepareLaunchUsesLocalRepositoryFallback(t *testing.T) {
 	assert.True(t, strings.HasPrefix(info.FullPath, "local/"), info.FullPath)
 }
 
+func TestAttachWorkspacePassesConfiguredCredentialName(t *testing.T) {
+	runner := &recordingOpenWorkspaceRunner{}
+	var protectedNames []string
+	oldNewRunner := newAddWorkspaceRunner
+	t.Cleanup(func() { newAddWorkspaceRunner = oldNewRunner })
+	newAddWorkspaceRunner = func(names []string) openWorkspaceRunner {
+		protectedNames = append([]string(nil), names...)
+		return runner
+	}
+	cfg := &models.Config{
+		Fleet: models.FleetConfig{TokenEnv: "Custom_Fleet_Token"},
+	}
+
+	err := attachWorkspace(
+		&url.RepositoryInfo{FullPath: "github.com/acme/widget"},
+		"feature",
+		t.TempDir(),
+		tmux.BlankLayout(),
+		cfg,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, runner.attached)
+	assert.ElementsMatch(
+		t,
+		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN", "Custom_Fleet_Token"},
+		protectedNames,
+	)
+}
+
 func putFakeTmuxOnPath(t *testing.T) {
 	t.Helper()
 
@@ -166,6 +348,7 @@ func resetAddCommandFlags(t *testing.T) {
 	oldAddLayout := addLayout
 	oldAddSelectLayout := addSelectLayout
 	oldAddNoLaunch := addNoLaunch
+	oldAddFrom := addFrom
 
 	t.Cleanup(func() {
 		addBranch = oldAddBranch
@@ -175,6 +358,7 @@ func resetAddCommandFlags(t *testing.T) {
 		addLayout = oldAddLayout
 		addSelectLayout = oldAddSelectLayout
 		addNoLaunch = oldAddNoLaunch
+		addFrom = oldAddFrom
 	})
 
 	addBranch = false
@@ -184,6 +368,7 @@ func resetAddCommandFlags(t *testing.T) {
 	addLayout = ""
 	addSelectLayout = false
 	addNoLaunch = false
+	addFrom = ""
 }
 
 func initCommandTestConfig(t *testing.T, baseDir string) {

@@ -6,9 +6,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/duration"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/tmux"
@@ -25,6 +27,12 @@ var (
 	addLayout       string
 	addSelectLayout bool
 	addNoLaunch     bool
+	addFrom         string
+
+	newAddWorkspaceRunner = func(names []string) openWorkspaceRunner {
+		tmuxCommand := tmux.NewTmuxCommandWithStripNames("", names)
+		return tmux.NewWorkspaceRunner(tmuxCommand, names)
+	}
 )
 
 // addCmd represents the add command.
@@ -38,7 +46,13 @@ Use -i flag to interactively select a branch using fuzzy finder.
 
 When -b creates a branch, kwt fetches origin and starts from its default branch.
 If that remote base is unavailable, it falls back to local main, then master,
-then the branch checked out in the primary worktree.`,
+then the branch checked out in the primary worktree.
+
+Use --from with a fetched remote ref to create a local tracking branch and its
+worktree. Shorthand such as origin/topic is verified and resolved to its full
+refs/remotes/... identity before creation. Existing-branch worktrees skip
+repository setup and workspace launch until you inspect the checkout and
+explicitly open it.`,
 	Example: `  # Create worktree from existing branch
   kwt add feature/new-ui
 
@@ -47,6 +61,9 @@ then the branch checked out in the primary worktree.`,
 
   # Create new branch and worktree
   kwt add -b feature/api-v2
+
+  # Create a tracking worktree from a remote branch
+  kwt add --from origin/feature/review feature/review
 
   # Interactive branch selection
   kwt add -i
@@ -72,20 +89,30 @@ func init() {
 		"Fuzzy-pick a workspace layout")
 	addCmd.Flags().BoolVar(&addNoLaunch, "no-launch", false,
 		"Create the worktree without launching a workspace")
+	addCmd.Flags().StringVar(&addFrom, "from", "",
+		"Create a local tracking branch from this remote ref")
+	if err := addCmd.RegisterFlagCompletionFunc(
+		"from",
+		getRemoteBranchCompletions,
+	); err != nil {
+		panic(err)
+	}
 	addCmd.MarkFlagsMutuallyExclusive("layout", "select-layout")
+	addCmd.MarkFlagsMutuallyExclusive("branch", "from", "interactive")
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	return ExecuteWithArgs(true, func(ctx *CommandContext, cmd *cobra.Command, args []string) error {
 		var branch string
 		var path string
+		remoteSource := addFrom
 
 		if addInteractive {
 			if len(args) > 0 {
 				return fmt.Errorf("cannot specify branch name with -i flag")
 			}
 
-			branches, err := ctx.Git.ListBranches(true)
+			branches, err := ctx.Git.ListAvailableBranches()
 			if err != nil {
 				return fmt.Errorf("failed to list branches: %w", err)
 			}
@@ -97,8 +124,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 			branch = selectedBranch.Name
 			if selectedBranch.IsRemote {
-				branch = selectedBranch.Name[len("origin/"):]
-				addBranch = true
+				remoteSource = selectedBranch.Source
 			}
 		} else {
 			if len(args) < 1 {
@@ -136,13 +162,24 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		// repository identity failure never leaves a stray worktree behind.
 		// Only worktree creation and the tmux attach below are side-effecting,
 		// so they run after this point.
+		layoutRequested := addLayout != "" || addSelectLayout
+		unreviewedSource := !addBranch
+		if unreviewedSource && layoutRequested {
+			return fmt.Errorf(
+				"existing branches cannot be combined with --layout/--select-layout; " +
+					"inspect the checkout, then run kwt open",
+			)
+		}
 		launch, err := shouldLaunch(
 			ctx.Config.Layouts.AutoLaunchOnAdd,
-			addLayout != "" || addSelectLayout,
+			layoutRequested,
 			addNoLaunch,
 		)
 		if err != nil {
 			return err
+		}
+		if unreviewedSource {
+			launch = false
 		}
 		var layout models.Layout
 		var info *url.RepositoryInfo
@@ -153,7 +190,27 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		worktreePath, err := ctx.WorktreeManager.Add(branch, path, addBranch)
+		var worktreePath string
+		if remoteSource != "" {
+			branches, listErr := ctx.Git.ListBranches(true)
+			if listErr != nil {
+				return fmt.Errorf("list fetched remote refs: %w", listErr)
+			}
+			remoteSource, err = resolveRemoteBranchSource(
+				branches,
+				remoteSource,
+			)
+			if err != nil {
+				return err
+			}
+			worktreePath, err = ctx.WorktreeManager.AddTracking(
+				branch,
+				remoteSource,
+				path,
+			)
+		} else {
+			worktreePath, err = ctx.WorktreeManager.Add(branch, path, addBranch)
+		}
 		if err != nil {
 			return err
 		}
@@ -170,13 +227,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			t := time.Now().Add(expiresDuration)
 			expiresAt = &t
 
-			entry := &registry.WorktreeEntry{
-				Repository: repoURL,
-				Branch:     branch,
-				Path:       worktreePath,
-				IsMain:     false,
-				ExpiresAt:  expiresAt,
+			entry := &registry.WorktreeEntry{}
+			if existing, ok := reg.Get(worktreePath); ok {
+				*entry = *existing
 			}
+			entry.Repository = repoURL
+			entry.Branch = branch
+			entry.Path = worktreePath
+			entry.IsMain = false
+			entry.ExpiresAt = expiresAt
 
 			if err := reg.Register(entry); err != nil {
 				return fmt.Errorf("failed to register worktree: %w", err)
@@ -184,13 +243,55 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 
 		printAddResult(os.Stdout, branch, expiresAt)
+		if unreviewedSource {
+			_, _ = fmt.Fprintln(os.Stdout, existingBranchReviewMessage())
+		}
 		publishFleetBestEffortForCommand(cmd, ctx.Config)
 
 		if launch {
-			return attachWorkspace(info, branch, worktreePath, layout)
+			return attachWorkspace(
+				info,
+				branch,
+				worktreePath,
+				layout,
+				ctx.Config,
+			)
 		}
 		return nil
 	})(cmd, args)
+}
+
+func resolveRemoteBranchSource(
+	branches []models.Branch,
+	requested string,
+) (string, error) {
+	var match string
+	for _, branch := range branches {
+		if !branch.IsRemote {
+			continue
+		}
+		shortSource := strings.TrimPrefix(
+			branch.Source,
+			"refs/remotes/",
+		)
+		if requested != branch.Source && requested != shortSource {
+			continue
+		}
+		if match != "" && match != branch.Source {
+			return "", fmt.Errorf(
+				"remote ref %q is ambiguous; use a full refs/remotes/... ref",
+				requested,
+			)
+		}
+		match = branch.Source
+	}
+	if match == "" {
+		return "", fmt.Errorf(
+			"remote ref %q was not found; fetch it first",
+			requested,
+		)
+	}
+	return match, nil
 }
 
 // printAddResult reports a successful worktree creation.
@@ -199,6 +300,10 @@ func printAddResult(w io.Writer, branch string, expiresAt *time.Time) {
 	if expiresAt != nil {
 		_, _ = fmt.Fprintf(w, "Worktree expires at %s\n", expiresAt.Format(time.RFC3339))
 	}
+}
+
+func existingBranchReviewMessage() string {
+	return "Review the existing-branch checkout, then run 'kwt open' to select it and start its workspace."
 }
 
 // shouldLaunch implements the add launch-decision rule.
@@ -256,9 +361,14 @@ func prepareLaunch(ctx *CommandContext) (models.Layout, *url.RepositoryInfo, err
 // creating the session first if needed. Called only after prepareLaunch has
 // already validated tmux, resolved the layout, and parsed the repository
 // URL, and after the worktree exists.
-func attachWorkspace(info *url.RepositoryInfo, branch, worktreePath string, layout models.Layout) error {
+func attachWorkspace(
+	info *url.RepositoryInfo,
+	branch, worktreePath string,
+	layout models.Layout,
+	cfg *models.Config,
+) error {
 	session := tmux.WorkspaceSessionName(info, branch, worktreePath)
-	runner := tmux.NewWorkspaceRunner(tmux.NewTmuxCommand(""))
+	runner := newAddWorkspaceRunner(credentials.ProtectedNames(cfg))
 	return runner.EnsureAndAttach(
 		context.Background(), session, worktreePath, layout, os.Getenv("TMUX") != "",
 	)

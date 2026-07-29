@@ -209,7 +209,10 @@ func TestBuildManifestGlobalFallbackPreservesRegisteredIdentity(t *testing.T) {
 		ListProjectWorktrees: func(context.Context, models.Project) ([]models.Worktree, error) {
 			return nil, errors.New("configured listing unavailable")
 		},
-		DiscoverGlobalWorktrees: func(string, []models.Project) ([]*discovery.GlobalWorktreeEntry, error) {
+		DiscoverGlobalWorktrees: func(
+			string,
+			[]models.Project,
+		) ([]*discovery.GlobalWorktreeEntry, error) {
 			return []*discovery.GlobalWorktreeEntry{{
 				RepositoryURL:  "https://github.com/fork/kwt.git",
 				RepositoryInfo: registered,

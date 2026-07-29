@@ -99,8 +99,8 @@ func (c *StatusCollector) CollectAll(ctx context.Context, worktrees []*models.Wo
 }
 
 func (c *StatusCollector) collectOne(ctx context.Context, worktree *models.Worktree) (*models.WorktreeStatus, error) {
-	g := git.New(worktree.Path)
 	repository := strings.TrimSpace(worktree.Repository)
+	g := git.New(worktree.Path)
 	if repository == "" {
 		repository = c.repositoryIdentity(g, worktree.Path)
 	}

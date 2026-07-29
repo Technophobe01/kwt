@@ -201,7 +201,10 @@ func collectWorktreeStatuses(ctx context.Context, cfg *models.Config, printer *u
 
 	g, err := git.NewFromCwd()
 	if err != nil || statusGlobal {
-		globalEntries, err := discovery.DiscoverGlobalWorktrees(cfg.Worktree.BaseDir, cfg.Projects)
+		globalEntries, err := discovery.DiscoverGlobalWorktrees(
+			cfg.Worktree.BaseDir,
+			cfg.Projects,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover worktrees: %w", err)
 		}

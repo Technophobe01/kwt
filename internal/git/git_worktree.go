@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	gitworktree "go.kenn.io/kit/git/worktree"
@@ -67,6 +68,298 @@ func (g *Git) AddWorktree(path, branch string, createBranch bool) error {
 	}
 	if _, err := g.run(args...); err != nil {
 		return fmt.Errorf("failed to add worktree: %w", err)
+	}
+	return nil
+}
+
+// AddWorktreeExisting checks out an existing branch without allowing the
+// checkout to run repository-configured hooks or filters, and without exposing
+// protected credentials to Git.
+func (g *Git) AddWorktreeExisting(
+	path, branch string,
+	protectedNames []string,
+) error {
+	if err := g.validateLocalBranchName(branch, protectedNames); err != nil {
+		return err
+	}
+	hooksDir, err := os.MkdirTemp("", "kwt-empty-hooks-")
+	if err != nil {
+		return fmt.Errorf("create empty hooks directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(hooksDir) }()
+
+	isolationArgs, err := g.checkoutIsolationArgs(
+		protectedNames,
+		"",
+		hooksDir,
+	)
+	if err != nil {
+		return err
+	}
+	args := append([]string(nil), isolationArgs...)
+	args = append(
+		args,
+		"worktree", "add", "--no-checkout", "--detach",
+		"--", path, "refs/heads/"+branch,
+	)
+	if _, err := g.runWithoutCredentials(protectedNames, args...); err != nil {
+		return fmt.Errorf("failed to add existing-branch worktree: %w", err)
+	}
+	if err := g.checkoutIsolatedWorktree(
+		path,
+		branch,
+		protectedNames,
+		hooksDir,
+	); err != nil {
+		if cleanupErr := g.removeIsolatedWorktree(
+			path,
+			protectedNames,
+			isolationArgs,
+		); cleanupErr != nil {
+			return fmt.Errorf(
+				"failed to check out existing-branch worktree: %w (failed to remove incomplete worktree: %v)",
+				err,
+				cleanupErr,
+			)
+		}
+		return fmt.Errorf("failed to check out existing-branch worktree: %w", err)
+	}
+	return nil
+}
+
+// AddWorktreeTracking creates a local branch and worktree that track a
+// specific remote branch.
+func (g *Git) AddWorktreeTracking(
+	path, branch, remoteBranch string,
+	protectedNames []string,
+) error {
+	if err := g.validateLocalBranchName(branch, protectedNames); err != nil {
+		return err
+	}
+	hooksDir, err := os.MkdirTemp("", "kwt-empty-hooks-")
+	if err != nil {
+		return fmt.Errorf("create empty hooks directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(hooksDir) }()
+	isolationArgs, err := g.checkoutIsolationArgs(
+		protectedNames,
+		"",
+		hooksDir,
+	)
+	if err != nil {
+		return err
+	}
+
+	if _, err := g.runWithoutCredentials(
+		protectedNames,
+		append(
+			append([]string(nil), isolationArgs...),
+			"branch", "--track", "--", branch, remoteBranch,
+		)...,
+	); err != nil {
+		return fmt.Errorf(
+			"failed to create branch tracking %s: %w",
+			remoteBranch,
+			err,
+		)
+	}
+	worktreeArgs := append([]string(nil), isolationArgs...)
+	worktreeArgs = append(
+		worktreeArgs,
+		"worktree", "add", "--no-checkout", "--", path, branch,
+	)
+	if _, err := g.runWithoutCredentials(
+		protectedNames,
+		worktreeArgs...,
+	); err != nil {
+		if _, rollbackErr := g.runWithoutCredentials(
+			protectedNames,
+			append(
+				append([]string(nil), isolationArgs...),
+				"branch", "-D", "--", branch,
+			)...,
+		); rollbackErr != nil {
+			return fmt.Errorf(
+				"failed to add worktree tracking %s: %w (failed to remove branch %s: %v)",
+				remoteBranch,
+				err,
+				branch,
+				rollbackErr,
+			)
+		}
+		return fmt.Errorf(
+			"failed to add worktree tracking %s: %w",
+			remoteBranch,
+			err,
+		)
+	}
+	if err := g.checkoutIsolatedWorktree(
+		path,
+		"",
+		protectedNames,
+		hooksDir,
+	); err != nil {
+		if cleanupErr := g.removeIsolatedWorktree(
+			path,
+			protectedNames,
+			isolationArgs,
+		); cleanupErr != nil {
+			return fmt.Errorf(
+				"failed to check out worktree tracking %s: %w (failed to remove incomplete worktree: %v)",
+				remoteBranch,
+				err,
+				cleanupErr,
+			)
+		}
+		if _, cleanupErr := g.runWithoutCredentials(
+			protectedNames,
+			append(
+				append([]string(nil), isolationArgs...),
+				"branch", "-D", "--", branch,
+			)...,
+		); cleanupErr != nil {
+			return fmt.Errorf(
+				"failed to check out worktree tracking %s: %w (failed to remove branch %s: %v)",
+				remoteBranch,
+				err,
+				branch,
+				cleanupErr,
+			)
+		}
+		return fmt.Errorf(
+			"failed to check out worktree tracking %s: %w",
+			remoteBranch,
+			err,
+		)
+	}
+	return nil
+}
+
+func (g *Git) validateLocalBranchName(
+	branch string,
+	protectedNames []string,
+) error {
+	if _, err := g.runWithoutCredentials(
+		protectedNames,
+		"check-ref-format", "--branch", branch,
+	); err != nil {
+		return fmt.Errorf("invalid local branch name %q: %w", branch, err)
+	}
+	return nil
+}
+
+func (g *Git) removeIsolatedWorktree(
+	path string,
+	protectedNames []string,
+	isolationArgs []string,
+) error {
+	args := append([]string(nil), isolationArgs...)
+	args = append(args, "worktree", "remove", "--force", "--", path)
+	if _, err := g.runWithoutCredentials(protectedNames, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *Git) checkoutIsolationArgs(
+	protectedNames []string,
+	workDir string,
+	hooksDir string,
+) ([]string, error) {
+	configArgs := make([]string, 0, 5)
+	if workDir != "" {
+		configArgs = append(configArgs, "-C", workDir)
+	}
+	configArgs = append(configArgs, "-c", "submodule.recurse=false")
+	configArgs = append(configArgs, "config", "--null", "--list")
+	output, err := g.runWithoutCredentials(protectedNames, configArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("list configured checkout isolation: %w", err)
+	}
+	drivers := make(map[string]bool)
+	hooks := make(map[string]bool)
+	for record := range strings.SplitSeq(output, "\x00") {
+		key, _, _ := strings.Cut(record, "\n")
+		key = strings.TrimSpace(key)
+		lowerKey := strings.ToLower(key)
+		switch {
+		case strings.HasPrefix(lowerKey, "filter."):
+			rest := key[len("filter."):]
+			propertyAt := strings.LastIndex(rest, ".")
+			if propertyAt <= 0 {
+				continue
+			}
+			switch strings.ToLower(rest[propertyAt+1:]) {
+			case "smudge", "process", "required":
+				drivers[rest[:propertyAt]] = true
+			}
+		case strings.HasPrefix(lowerKey, "hook."):
+			rest := key[len("hook."):]
+			propertyAt := strings.LastIndex(rest, ".")
+			if propertyAt <= 0 {
+				continue
+			}
+			switch strings.ToLower(rest[propertyAt+1:]) {
+			case "command", "enabled", "event", "parallel":
+				hooks[rest[:propertyAt]] = true
+			}
+		}
+	}
+	hookNames := make([]string, 0, len(hooks))
+	for hook := range hooks {
+		hookNames = append(hookNames, hook)
+	}
+	sort.Strings(hookNames)
+	driverNames := make([]string, 0, len(drivers))
+	for driver := range drivers {
+		driverNames = append(driverNames, driver)
+	}
+	sort.Strings(driverNames)
+
+	args := make([]string, 0, 6+len(hookNames)*2+len(driverNames)*6)
+	args = append(
+		args,
+		"-c", "core.hooksPath="+hooksDir,
+		"-c", "core.fsmonitor=false",
+		"-c", "submodule.recurse=false",
+	)
+	for _, hook := range hookNames {
+		args = append(args, "-c", "hook."+hook+".enabled=false")
+	}
+	for _, driver := range driverNames {
+		prefix := "filter." + driver + "."
+		args = append(
+			args,
+			"-c", prefix+"smudge=cat",
+			"-c", prefix+"process=",
+			"-c", prefix+"required=false",
+		)
+	}
+	return args, nil
+}
+
+func (g *Git) checkoutIsolatedWorktree(
+	path string,
+	branch string,
+	protectedNames []string,
+	hooksDir string,
+) error {
+	isolationArgs, err := g.checkoutIsolationArgs(
+		protectedNames,
+		path,
+		hooksDir,
+	)
+	if err != nil {
+		return err
+	}
+	args := []string{"-C", path}
+	args = append(args, isolationArgs...)
+	args = append(args, "checkout", "--force", "--no-recurse-submodules")
+	if branch != "" {
+		args = append(args, branch, "--")
+	}
+	if _, err := g.runWithoutCredentials(protectedNames, args...); err != nil {
+		return err
 	}
 	return nil
 }

@@ -25,7 +25,8 @@ type ManifestBuilderOptions struct {
 	Now                     func() time.Time
 	Hostname                func() (string, error)
 	DiscoverGlobalWorktrees func(
-		baseDir string, projects []models.Project,
+		baseDir string,
+		projects []models.Project,
 	) ([]*discovery.GlobalWorktreeEntry, error)
 	ListProjectWorktrees func(ctx context.Context, project models.Project) ([]models.Worktree, error)
 }
@@ -35,7 +36,8 @@ type ManifestBuilder struct {
 	now                     func() time.Time
 	hostname                func() (string, error)
 	discoverGlobalWorktrees func(
-		baseDir string, projects []models.Project,
+		baseDir string,
+		projects []models.Project,
 	) ([]*discovery.GlobalWorktreeEntry, error)
 	listProjectWorktrees func(ctx context.Context, project models.Project) ([]models.Worktree, error)
 }
@@ -223,7 +225,10 @@ func (b *ManifestBuilder) addGlobalWorktrees(
 		return nil
 	}
 
-	entries, err := b.discoverGlobalWorktrees(baseDir, cfg.Projects)
+	entries, err := b.discoverGlobalWorktrees(
+		baseDir,
+		cfg.Projects,
+	)
 	if err != nil {
 		return fmt.Errorf("discover global worktrees: %w", err)
 	}

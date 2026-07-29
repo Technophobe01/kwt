@@ -16,7 +16,8 @@ kwt workspace remove protos
 Names default to the directory base name and must be unique. Re-adding the same
 directory updates its name. `remove` only unregisters: it never deletes the
 directory, and a live tmux session is left running with a hint on how to kill
-it.
+it. Workspace paths cannot contain `#`, which tmux reserves for format
+expansion.
 
 ## Open from the dashboard
 
@@ -28,8 +29,8 @@ auto-registered.
 Workspace rows show the workspace name under REPO, the path under BRANCH, and
 session liveness under WORKSPACE; Git-specific columns show `-`. Rows match `/`
 search by name and path. `K` kills a live session, and `d` unregisters the
-workspace after confirmation. Git actions such as `n` (new branch) and `s`
-(sync) do not apply and say so in the status line.
+workspace after confirmation. Git actions such as `n` (new branch), `b`
+(existing branch), and `s` (sync) do not apply and say so in the status line.
 
 ## Sessions and layouts
 

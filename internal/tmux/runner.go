@@ -72,9 +72,16 @@ func NewProtectedWorkspaceRunner(
 	}
 }
 
-// NewWorkspaceRunner returns a runner backed by the given tmux surface.
-func NewWorkspaceRunner(t workspaceTmux) *WorkspaceRunner {
-	return &WorkspaceRunner{tmux: t}
+// NewWorkspaceRunner returns a runner backed by the given tmux surface while
+// ensuring caller-owned credential variables cannot reach workspace panes.
+func NewWorkspaceRunner(
+	t workspaceTmux,
+	credentialNames []string,
+) *WorkspaceRunner {
+	return &WorkspaceRunner{
+		tmux:            t,
+		extraStripNames: cleanNames(credentialNames),
+	}
 }
 
 func cleanNames(names []string) []string {
@@ -82,10 +89,11 @@ func cleanNames(names []string) []string {
 	seen := make(map[string]bool)
 	for _, name := range names {
 		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
+		folded := strings.ToLower(name)
+		if name == "" || seen[folded] {
 			continue
 		}
-		seen[name] = true
+		seen[folded] = true
 		cleaned = append(cleaned, name)
 	}
 	return cleaned
@@ -115,6 +123,9 @@ func (r *WorkspaceRunner) EnsureAndAttach(
 func (r *WorkspaceRunner) Ensure(
 	ctx context.Context, session, worktreeDir string, layout models.Layout,
 ) error {
+	if err := ValidateStartDirectory(worktreeDir); err != nil {
+		return err
+	}
 	sessionExists := r.tmux.HasSession(session)
 	if r.protected {
 		if err := r.validateProtectedState(
@@ -146,6 +157,9 @@ func (r *WorkspaceRunner) AttachProtected(
 	if !r.protected {
 		return fmt.Errorf("protected attachment requires a protected workspace runner")
 	}
+	if err := ValidateStartDirectory(worktreeDir); err != nil {
+		return err
+	}
 	if !r.tmux.HasSession(session) {
 		return &SessionSafetyError{Reason: fmt.Sprintf(
 			"protected tmux session %q is not running",
@@ -159,6 +173,18 @@ func (r *WorkspaceRunner) AttachProtected(
 		return err
 	}
 	return r.tmux.AttachSessionWithoutEnvironment(ctx, session)
+}
+
+// ValidateStartDirectory rejects paths tmux would interpret as format syntax
+// when they are passed as pane and window start directories.
+func ValidateStartDirectory(worktreeDir string) error {
+	if strings.Contains(worktreeDir, "#") {
+		return fmt.Errorf(
+			"workspace path %q contains tmux format syntax ('#'); choose a path without '#'",
+			worktreeDir,
+		)
+	}
+	return nil
 }
 
 // EnsureAndAttachProtected creates or repairs a protected workspace session
@@ -237,10 +263,10 @@ func (r *WorkspaceRunner) validateProtectedState(
 func firstMatchingName(names, sensitive []string) (string, bool) {
 	sensitiveSet := make(map[string]bool, len(sensitive))
 	for _, name := range sensitive {
-		sensitiveSet[name] = true
+		sensitiveSet[strings.ToLower(name)] = true
 	}
 	for _, name := range names {
-		if sensitiveSet[name] {
+		if sensitiveSet[strings.ToLower(name)] {
 			return name, true
 		}
 	}
@@ -271,14 +297,26 @@ func firstMatchingName(names, sensitive []string) (string, bool) {
 // A show-environment failure on either query falls back to whichever sources
 // remain.
 func (r *WorkspaceRunner) sessionStripNames(session string, sessionExists bool) []string {
-	launcher := StripEnvNames(os.Environ())
+	launcherEnv := os.Environ()
+	launcher := append(
+		StripEnvNames(launcherEnv),
+		matchingProtectedEnvironmentNames(launcherEnv, r.extraStripNames)...,
+	)
 	var serverDerived, sessionDerived []string
 	if output, err := r.tmux.GlobalEnvironment(); err == nil {
-		serverDerived = CanonicalStripNames(ParseServerEnvNames(output))
+		serverNames := ParseServerEnvNames(output)
+		serverDerived = append(
+			CanonicalStripNames(serverNames),
+			matchingProtectedNames(serverNames, r.extraStripNames)...,
+		)
 	}
 	if sessionExists {
 		if output, err := r.tmux.SessionEnvironment(session); err == nil {
-			sessionDerived = CanonicalStripNames(ParseServerEnvNames(output))
+			sessionNames := ParseServerEnvNames(output)
+			sessionDerived = append(
+				CanonicalStripNames(sessionNames),
+				matchingProtectedNames(sessionNames, r.extraStripNames)...,
+			)
 		}
 	}
 	return MergeStripNames(
@@ -288,6 +326,32 @@ func (r *WorkspaceRunner) sessionStripNames(session string, sessionExists bool) 
 		serverDerived,
 		sessionDerived,
 	)
+}
+
+func matchingProtectedEnvironmentNames(
+	env, protectedNames []string,
+) []string {
+	names := make([]string, 0, len(env))
+	for _, entry := range env {
+		if name, _, ok := strings.Cut(entry, "="); ok {
+			names = append(names, name)
+		}
+	}
+	return matchingProtectedNames(names, protectedNames)
+}
+
+func matchingProtectedNames(names, protectedNames []string) []string {
+	protected := make(map[string]bool, len(protectedNames))
+	for _, name := range protectedNames {
+		protected[strings.ToLower(name)] = true
+	}
+	var matched []string
+	for _, name := range names {
+		if protected[strings.ToLower(name)] {
+			matched = append(matched, name)
+		}
+	}
+	return matched
 }
 
 // create spawns the first pane as an inert placeholder (it spawns before the

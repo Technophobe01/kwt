@@ -7,6 +7,7 @@ stable command surface.
 | ---------------- | ------------------------------------------------------ |
 | `kwt`, `kwt tui` | Open the cross-project and multi-machine dashboard.    |
 | `kwt add`        | Create a worktree and optionally launch its workspace. |
+| `kwt branches`   | List branches available for a new worktree.            |
 | `kwt open`       | Open or establish a worktree workspace session.        |
 | `kwt list`       | List worktrees.                                        |
 | `kwt status`     | Show Git status, sync state, and activity.             |
@@ -27,6 +28,8 @@ stable command surface.
 
 ```sh
 kwt add -b fix/parser-race
+kwt add --from origin/fix/review fix/review
+kwt branches --json
 kwt open parser
 kwt open /path/to/worktree --start-session
 kwt status
@@ -44,6 +47,27 @@ kwt config set --local layouts.default stack
 When `kwt add -b` creates a branch, it fetches `origin` and starts from its
 default branch. If that remote base is unavailable, it falls back to local
 `main`, then `master`, then the branch checked out in the primary worktree.
+
+`kwt add <branch>` checks out an existing local branch. Use
+`kwt add --from <remote-ref> <branch>` when a remote candidate must become a
+local tracking branch. Shorthand such as `origin/topic` is accepted, but kwt
+verifies it against fetched refs and passes the full `refs/remotes/...` identity
+to Git. Neither existing-branch path copies files, runs setup commands, or
+launches a workspace; `--layout` and `--select-layout` are rejected.
+Git branch mutation and checkout run with an empty hooks directory, configured
+smudge and process filters disabled, and kwt credential variables removed.
+Environment references in the source-derived branch name remain literal when
+kwt builds the destination path. Submodules are not recursively updated during
+creation; inspect the superproject first, then update submodules explicitly
+after acknowledgement.
+
+The created worktree participates in ordinary status and fleet observation.
+Review the checkout and run `kwt open <worktree>` as the explicit
+acknowledgement that opts in to its layout and pane commands.
+
+`kwt branches --json` emits only candidates not already checked out, with
+`name`, a source-qualified display `label`, the full source ref, and
+`is_remote` fields for interactive clients.
 
 ## `kwt open`
 
@@ -196,15 +220,16 @@ explicit, documented exception, so they cannot silently drift apart:
   itself now keeps them.
 
 The full list: exact names `__CFBundleIdentifier`, `EDITOR`,
-`KWT_GITHUB_TOKEN`, `OLDPWD`, `PROMPT`, `PROMPT_COMMAND`, `PWD`, `RPROMPT`,
-`SHLVL`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`, `WINDOWID`, `_`; and
-prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`, `KITTY_`, `NVM_`, `PYENV_`,
-`STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`, `VSCODE_`. Operational kwt
-variables such as `KWT_HOME` are preserved. PR workspace bootstrap additionally
-removes the exact variable named by `fleet.token_env`, both from tmux
-subprocesses and from the session environment. `EDITOR` and
-`VISUAL` are excluded from exec-time sanitization only, per above; every
-other name in this list is treated identically by both mechanisms.
+`KWT_FLEET_TOKEN`, `KWT_GITHUB_TOKEN`, `OLDPWD`, `PROMPT`, `PROMPT_COMMAND`,
+`PWD`, `RPROMPT`, `SHLVL`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `VISUAL`,
+`WINDOWID`, `_`; and prefixes `ALACRITTY_`, `CONDA_`, `FZF_`, `ITERM`,
+`KITTY_`, `NVM_`, `PYENV_`, `STARSHIP_`, `VIRTUAL_ENV`, `WEZTERM_`, `WT_`,
+`VSCODE_`. Every kwt workspace also removes the exact variable named by
+`fleet.token_env`, case-insensitively, both from tmux subprocesses and from
+the session environment. Operational kwt variables such as `KWT_HOME` are
+preserved. `EDITOR` and `VISUAL` are excluded from exec-time sanitization
+only, per above; every other name in this list is treated identically by both
+mechanisms.
 
 `TERMINFO` is deliberately excluded from the whole list: it is functional
 terminal configuration (a custom terminfo database path), not transient
