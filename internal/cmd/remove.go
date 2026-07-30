@@ -3,6 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	pathpkg "path"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -10,17 +13,24 @@ import (
 	"go.kenn.io/kwt/internal/finder"
 	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/registry"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
 
 var (
-	removeForce       bool
-	removeDryRun      bool
-	removeGlobal      bool
-	deleteBranch      bool
-	forceDeleteBranch bool
+	removeForce        bool
+	removeDryRun       bool
+	removeGlobal       bool
+	removeIfGeneration string
+	deleteBranch       bool
+	forceDeleteBranch  bool
 )
+
+type removalGenerationCondition struct {
+	generation string
+	specified  bool
+}
 
 // removeCmd represents the remove command.
 var removeCmd = &cobra.Command{
@@ -73,11 +83,16 @@ func init() {
 	removeCmd.Flags().BoolVarP(&removeForce, "force", "f", false, "Force delete even if dirty")
 	removeCmd.Flags().BoolVarP(&removeDryRun, "dry-run", "d", false, "Show deletion targets only")
 	removeCmd.Flags().BoolVarP(&removeGlobal, "global", "g", false, "Remove from any worktree in the configured base directory")
+	removeCmd.Flags().StringVar(&removeIfGeneration, "if-generation", "", "Remove only if the worktree generation matches")
 	removeCmd.Flags().BoolVarP(&deleteBranch, "delete-branch", "b", false, "Also delete the branch after removing worktree")
 	removeCmd.Flags().BoolVar(&forceDeleteBranch, "force-delete-branch", false, "Force delete the branch even if not merged")
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
+	generationCondition, err := requestedRemovalGeneration(cmd)
+	if err != nil {
+		return err
+	}
 	return ExecuteWithArgs(false, func(ctx *CommandContext, cmd *cobra.Command, args []string) error {
 		// Try to get git context, but don't fail if we're not in a git repo
 		gitCtx, gitErr := NewGitCommandContext()
@@ -88,30 +103,53 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return ctx.WithGlobalLocalSupport(
 			removeGlobal,
 			func(ctx *CommandContext) error {
-				removed, err := removeLocalWorktree(ctx, args)
-				if err != nil {
-					return err
-				}
+				removed, err := removeLocalWorktree(
+					ctx,
+					args,
+					generationCondition,
+				)
 				if removed > 0 {
 					publishFleetBestEffortForCommand(cmd, ctx.Config)
 				}
-				return nil
+				return err
 			},
 			func(ctx *CommandContext) error {
-				removed, err := removeGlobalWorktree(ctx, args)
-				if err != nil {
-					return err
-				}
+				removed, err := removeGlobalWorktree(
+					ctx,
+					args,
+					generationCondition,
+				)
 				if removed > 0 {
 					publishFleetBestEffortForCommand(cmd, ctx.Config)
 				}
-				return nil
+				return err
 			},
 		)
 	})(cmd, args)
 }
 
-func removeLocalWorktree(ctx *CommandContext, args []string) (int, error) {
+func requestedRemovalGeneration(
+	cmd *cobra.Command,
+) (removalGenerationCondition, error) {
+	if !cmd.Flags().Changed("if-generation") {
+		return removalGenerationCondition{}, nil
+	}
+	if err := git.ValidateWorktreeGeneration(removeIfGeneration); err != nil {
+		return removalGenerationCondition{}, fmt.Errorf(
+			"--if-generation must be a 32-character hexadecimal value",
+		)
+	}
+	return removalGenerationCondition{
+		generation: removeIfGeneration,
+		specified:  true,
+	}, nil
+}
+
+func removeLocalWorktree(
+	ctx *CommandContext,
+	args []string,
+	generationCondition removalGenerationCondition,
+) (int, error) {
 	worktrees, err := ctx.WorktreeManager.List()
 	if err != nil {
 		return 0, fmt.Errorf("failed to list worktrees: %w", err)
@@ -169,16 +207,32 @@ func removeLocalWorktree(ctx *CommandContext, args []string) (int, error) {
 		}
 		return 0, nil
 	}
+	if generationCondition.specified && len(toRemove) != 1 {
+		return 0, fmt.Errorf(
+			"--if-generation requires exactly one worktree",
+		)
+	}
 
 	removed := 0
 	for _, wt := range toRemove {
+		registryRecord := registeredWorktreeForRemoval(wt.Path)
 		if deleteBranch {
-			if err := ctx.WorktreeManager.RemoveWithBranch(wt.Path, wt.Branch, removeForce, deleteBranch, forceDeleteBranch); err != nil {
-				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
+			if err := ctx.WorktreeManager.RemoveWithBranch(
+				wt.Path,
+				wt.Branch,
+				removeForce,
+				deleteBranch,
+				forceDeleteBranch,
+				generationCondition.generation,
+			); err != nil {
 				if worktreePathRemoved(wt.Path) {
 					removed++
-					unregisterWorktreePath(wt.Path)
+					unregisterWorktreeRecord(registryRecord)
 				}
+				if generationCondition.specified {
+					return removed, err
+				}
+				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
 				continue
 			}
 			ctx.Printer.PrintSuccess(fmt.Sprintf("Removed worktree: %s", wt.Branch))
@@ -186,12 +240,19 @@ func removeLocalWorktree(ctx *CommandContext, args []string) (int, error) {
 				ctx.Printer.PrintSuccess(fmt.Sprintf("Deleted branch: %s", wt.Branch))
 			}
 		} else {
-			if err := ctx.WorktreeManager.Remove(wt.Path, removeForce); err != nil {
-				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
+			if err := ctx.WorktreeManager.Remove(
+				wt.Path,
+				removeForce,
+				generationCondition.generation,
+			); err != nil {
 				if worktreePathRemoved(wt.Path) {
 					removed++
-					unregisterWorktreePath(wt.Path)
+					unregisterWorktreeRecord(registryRecord)
 				}
+				if generationCondition.specified {
+					return removed, err
+				}
+				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s: %v", wt.Branch, err))
 				continue
 			}
 			ctx.Printer.PrintSuccess(fmt.Sprintf("Removed worktree: %s", wt.Branch))
@@ -199,7 +260,7 @@ func removeLocalWorktree(ctx *CommandContext, args []string) (int, error) {
 		removed++
 
 		// Clean up registry entry after successful removal
-		unregisterWorktreePath(wt.Path)
+		unregisterWorktreeRecord(registryRecord)
 	}
 
 	return removed, nil
@@ -215,7 +276,11 @@ func filterNonMainWorktrees(worktrees []models.Worktree) []models.Worktree {
 	return filtered
 }
 
-func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
+func removeGlobalWorktree(
+	ctx *CommandContext,
+	args []string,
+	generationCondition removalGenerationCondition,
+) (int, error) {
 	entries, err := discovery.DiscoverGlobalWorktrees(ctx.Config.Worktree.BaseDir, ctx.Config.Projects)
 	if err != nil {
 		return 0, fmt.Errorf("failed to discover worktrees: %w", err)
@@ -240,25 +305,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 	var toRemove []*discovery.GlobalWorktreeEntry
 
 	if len(args) > 0 {
-		// Pattern matching
-		pattern := strings.ToLower(args[0])
-		var matches []*discovery.GlobalWorktreeEntry
-
-		for _, entry := range nonMainEntries {
-			branchLower := strings.ToLower(entry.Branch)
-			var repoName string
-			if entry.RepositoryInfo != nil {
-				repoName = strings.ToLower(entry.RepositoryInfo.Repository)
-			}
-
-			// Match against branch name, path, repo name, or repo:branch pattern
-			if strings.Contains(branchLower, pattern) ||
-				strings.Contains(strings.ToLower(entry.Path), pattern) ||
-				strings.Contains(repoName, pattern) ||
-				strings.Contains(repoName+":"+branchLower, pattern) {
-				matches = append(matches, entry)
-			}
-		}
+		matches := matchGlobalRemovalEntries(nonMainEntries, args[0])
 
 		if len(matches) == 0 {
 			return 0, fmt.Errorf("no worktree matches pattern: %s", args[0])
@@ -330,10 +377,16 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 		}
 		return 0, nil
 	}
+	if generationCondition.specified && len(toRemove) != 1 {
+		return 0, fmt.Errorf(
+			"--if-generation requires exactly one worktree",
+		)
+	}
 
 	// Remove each worktree by changing to its repository directory
 	removed := 0
 	for _, entry := range toRemove {
+		registryRecord := registeredWorktreeForRemoval(entry.Path)
 		// Change to the repository directory to run git commands
 		originalDir, err := os.Getwd()
 		if err != nil {
@@ -361,30 +414,49 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 		wm := worktree.New(g, ctx.Config)
 
 		if deleteBranch {
-			if err := wm.RemoveWithBranch(entry.Path, entry.Branch, removeForce, deleteBranch, forceDeleteBranch); err != nil {
+			if err := wm.RemoveWithBranch(
+				entry.Path,
+				entry.Branch,
+				removeForce,
+				deleteBranch,
+				forceDeleteBranch,
+				generationCondition.generation,
+			); err != nil {
+				if worktreePathRemoved(entry.Path) {
+					removed++
+					unregisterWorktreeRecord(registryRecord)
+				}
+				if generationCondition.specified {
+					_ = os.Chdir(originalDir)
+					return removed, err
+				}
 				repoName := "unknown"
 				if entry.RepositoryInfo != nil {
 					repoName = entry.RepositoryInfo.Repository
 				}
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s:%s: %v", repoName, entry.Branch, err))
-				if worktreePathRemoved(entry.Path) {
-					removed++
-					unregisterWorktreePath(entry.Path)
-				}
 				_ = os.Chdir(originalDir)
 				continue
 			}
 		} else {
-			if err := wm.Remove(entry.Path, removeForce); err != nil {
+			if err := wm.Remove(
+				entry.Path,
+				removeForce,
+				generationCondition.generation,
+			); err != nil {
+				if worktreePathRemoved(entry.Path) {
+					removed++
+					unregisterWorktreeRecord(registryRecord)
+				}
+				if generationCondition.specified {
+					_ = os.Chdir(originalDir)
+					return removed, err
+				}
 				repoName := "unknown"
 				if entry.RepositoryInfo != nil {
 					repoName = entry.RepositoryInfo.Repository
 				}
 				ctx.Printer.PrintError(fmt.Errorf("failed to remove %s:%s: %v", repoName, entry.Branch, err))
-				if worktreePathRemoved(entry.Path) {
-					removed++
-					unregisterWorktreePath(entry.Path)
-				}
 				_ = os.Chdir(originalDir)
 				continue
 			}
@@ -400,7 +472,7 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 		}
 
 		// Clean up registry entry after successful removal
-		unregisterWorktreePath(entry.Path)
+		unregisterWorktreeRecord(registryRecord)
 		removed++
 
 		// Change back to original directory
@@ -410,13 +482,106 @@ func removeGlobalWorktree(ctx *CommandContext, args []string) (int, error) {
 	return removed, nil
 }
 
+func matchGlobalRemovalEntries(
+	entries []*discovery.GlobalWorktreeEntry,
+	pattern string,
+) []*discovery.GlobalWorktreeEntry {
+	if patternPath, ok := globalRemovalPathKey(pattern); ok {
+		var exactPathMatches []*discovery.GlobalWorktreeEntry
+		for _, entry := range entries {
+			entryPath, entryOK := globalRemovalPathKey(entry.Path)
+			if entryOK && entryPath == patternPath {
+				exactPathMatches = append(exactPathMatches, entry)
+			}
+		}
+		if len(exactPathMatches) > 0 {
+			return exactPathMatches
+		}
+	}
+
+	lowerPattern := globalRemovalSearchKey(pattern)
+	var matches []*discovery.GlobalWorktreeEntry
+	for _, entry := range entries {
+		branchLower := strings.ToLower(entry.Branch)
+		pathLower := globalRemovalSearchKey(entry.Path)
+		var repoName string
+		if entry.RepositoryInfo != nil {
+			repoName = strings.ToLower(entry.RepositoryInfo.Repository)
+		}
+
+		if strings.Contains(branchLower, lowerPattern) ||
+			strings.Contains(pathLower, lowerPattern) ||
+			strings.Contains(repoName, lowerPattern) ||
+			strings.Contains(repoName+":"+branchLower, lowerPattern) {
+			matches = append(matches, entry)
+		}
+	}
+	return matches
+}
+
+func globalRemovalPathKey(rawPath string) (string, bool) {
+	windowsPath := windowsStyleRemovalPath(rawPath)
+	if !filepath.IsAbs(rawPath) && !windowsPath {
+		return "", false
+	}
+	if !windowsPath {
+		return utils.PathKey(rawPath), true
+	}
+	key := pathpkg.Clean(
+		strings.ReplaceAll(filepath.ToSlash(rawPath), `\`, "/"),
+	)
+	return strings.ToLower(key), true
+}
+
+func globalRemovalSearchKey(rawPath string) string {
+	key := filepath.ToSlash(rawPath)
+	if runtime.GOOS == "windows" || windowsStyleRemovalPath(rawPath) {
+		key = strings.ReplaceAll(key, `\`, "/")
+	}
+	return strings.ToLower(key)
+}
+
+func windowsStyleRemovalPath(rawPath string) bool {
+	return (len(rawPath) >= 2 && rawPath[1] == ':') ||
+		strings.HasPrefix(rawPath, `\\`) ||
+		strings.HasPrefix(rawPath, "//")
+}
+
 func worktreePathRemoved(path string) bool {
 	_, err := os.Stat(path)
 	return os.IsNotExist(err)
 }
 
-func unregisterWorktreePath(path string) {
+type removalRegistryRecord struct {
+	path       string
+	generation string
+	present    bool
+}
+
+func registeredWorktreeForRemoval(path string) removalRegistryRecord {
+	reg, err := registry.New()
+	if err != nil {
+		return removalRegistryRecord{}
+	}
+	entry, ok := reg.Get(path)
+	if !ok {
+		return removalRegistryRecord{}
+	}
+	return removalRegistryRecord{
+		path:       entry.Path,
+		generation: entry.Generation,
+		present:    true,
+	}
+}
+
+func unregisterWorktreeRecord(record removalRegistryRecord) {
+	if !record.present {
+		return
+	}
 	if reg, err := registry.New(); err == nil {
-		_ = reg.Unregister(path)
+		_, _ = reg.UnregisterIfGeneration(
+			record.path,
+			record.generation,
+		)
 	}
 }

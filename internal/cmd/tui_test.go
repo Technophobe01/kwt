@@ -28,6 +28,7 @@ import (
 	"go.kenn.io/kwt/internal/tmux"
 	dashboard "go.kenn.io/kwt/internal/tui"
 	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -520,6 +521,46 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 		rowPathForHandoff(rows[0]),
 		rowPathForHandoff(rows[1]),
 	})
+}
+
+func TestTUIBackendListPropagatesIncompleteRegisteredProjectInventory(
+	t *testing.T,
+) {
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: "/global"},
+		Projects: []models.Project{{
+			Repository: "github.com/example/tools",
+			Path:       "/repos/tools",
+		}},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, "")
+	stubTUIProjectRegistration(backend)
+	backend.discoverGlobalWorktrees = func(
+		string,
+	) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	incomplete := &git.IncompleteInventoryError{
+		Path: "/repos/tools",
+		Err:  errors.New("generation is unreadable"),
+	}
+	backend.discoverProjectWorktrees = func(
+		string,
+	) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, incomplete
+	}
+	backend.discoverLaunchWorktrees = func(
+		string,
+	) ([]*discovery.GlobalWorktreeEntry, error) {
+		return nil, nil
+	}
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+
+	rows, _, err := backend.ListFast(context.Background())
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, incomplete)
+	assert.Nil(t, rows)
 }
 
 func TestDashboardFleetInfoSummarizesPrimaryObservations(t *testing.T) {
@@ -1670,6 +1711,7 @@ func TestTUIBackendRemoveWorktreeFallsBackToRegisteredProjectRoot(t *testing.T) 
 	repoPath := newTUITestRepo(t)
 	worktreePath := filepath.Join(t.TempDir(), "stale-worktree")
 	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/stale", worktreePath)
+	generation := tuiTestWorktreeGeneration(t, repoPath, worktreePath)
 	require.NoError(t, os.RemoveAll(worktreePath))
 
 	cfg := &models.Config{
@@ -1688,8 +1730,9 @@ func TestTUIBackendRemoveWorktreeFallsBackToRegisteredProjectRoot(t *testing.T) 
 			Repository: "service-api",
 			FullPath:   "github.com/example/service-api",
 		},
-		Branch: "codex/stale",
-		Path:   worktreePath,
+		Branch:     "codex/stale",
+		Path:       worktreePath,
+		Generation: generation,
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
@@ -1890,6 +1933,11 @@ func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 		},
 		Branch: "codex/removable",
 		Path:   worktreePath,
+		Generation: tuiTestWorktreeGeneration(
+			t,
+			repoPath,
+			worktreePath,
+		),
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
@@ -1897,6 +1945,174 @@ func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, published)
+}
+
+func TestTUIBackendRemoveWorktreeUnregistersLegacyEntry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "legacy-registry-worktree")
+	runTUITestGit(
+		t,
+		repoPath,
+		"worktree",
+		"add",
+		"-b",
+		"codex/legacy-registry",
+		worktreePath,
+	)
+	reg, err := registry.New()
+	require.NoError(t, err)
+	require.NoError(t, reg.Register(&registry.WorktreeEntry{
+		Path:                   worktreePath,
+		Branch:                 "codex/legacy-registry",
+		UnreviewedRemoteSource: true,
+	}))
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch: "codex/legacy-registry",
+		Path:   worktreePath,
+		Generation: tuiTestWorktreeGeneration(
+			t,
+			repoPath,
+			worktreePath,
+		),
+	}}
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: t.TempDir()},
+	}, "")
+
+	err = backend.RemoveWorktree(context.Background(), row, false)
+
+	require.NoError(t, err)
+	refreshedRegistry, err := registry.New()
+	require.NoError(t, err)
+	_, registered := refreshedRegistry.Get(worktreePath)
+	assert.False(t, registered)
+}
+
+func TestTUIBackendRemoveWorktreeRejectsReplacementGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "replacement-worktree")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/original", worktreePath)
+	worktrees, err := git.New(repoPath).ListWorktrees()
+	require.NoError(t, err)
+	var originalGeneration string
+	for _, worktree := range worktrees {
+		if utils.CanonicalPath(worktree.Path) == utils.CanonicalPath(worktreePath) {
+			originalGeneration = worktree.Generation
+		}
+	}
+	require.NotEmpty(t, originalGeneration)
+
+	runTUITestGit(t, repoPath, "worktree", "remove", worktreePath)
+	runTUITestGit(t, repoPath, "branch", "-D", "codex/original")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/replacement", worktreePath)
+	replacementGeneration := tuiTestWorktreeGeneration(
+		t,
+		repoPath,
+		worktreePath,
+	)
+	require.NotEqual(t, originalGeneration, replacementGeneration)
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch:     "codex/original",
+		Path:       worktreePath,
+		Generation: originalGeneration,
+	}}
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: t.TempDir()},
+	}, "")
+
+	err = backend.RemoveWorktree(context.Background(), row, true)
+
+	require.ErrorContains(t, err, "generation changed")
+	assert.DirExists(t, worktreePath)
+}
+
+func TestTUIBackendRejectsRepositoryRootFromDifferentIdentity(t *testing.T) {
+	repoA := newTUITestRepo(t)
+	repoB := newTUITestRepo(t)
+	runTUITestGit(
+		t,
+		repoA,
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/example/repo-a.git",
+	)
+	runTUITestGit(
+		t,
+		repoB,
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/example/repo-b.git",
+	)
+	repoAInfo, err := url.ParseRepositoryURL(
+		"https://github.com/example/repo-a.git",
+	)
+	require.NoError(t, err)
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Projects: []models.Project{{
+			Repository: "github.com/example/repo-a",
+			Path:       repoA,
+		}},
+	}, "")
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Path:           repoB,
+		RepositoryInfo: repoAInfo,
+	}}
+
+	_, err = backend.repositoryRootForRow(row)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "repository identity changed")
+}
+
+func TestTUIBackendAcceptsDiscoveryLocalRepositoryIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin func(*testing.T, string)
+	}{
+		{name: "without origin"},
+		{
+			name: "filesystem origin",
+			origin: func(t *testing.T, repoPath string) {
+				runTUITestGit(
+					t,
+					repoPath,
+					"remote",
+					"add",
+					"origin",
+					filepath.Join(t.TempDir(), "upstream.git"),
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoPath := newTUITestRepo(t)
+			if tt.origin != nil {
+				tt.origin(t, repoPath)
+			}
+			repoInfo, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+			require.NoError(t, err)
+			backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+			row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+				Path:           repoPath,
+				RepositoryInfo: repoInfo,
+			}}
+
+			root, err := backend.repositoryRootForRow(row)
+
+			require.NoError(t, err)
+			assert.True(t, samePath(repoPath, root))
+		})
+	}
 }
 
 func TestTUIBackendRemoveWorktreeDirtyErrorDoesNotSuggestCLIForce(t *testing.T) {
@@ -1925,6 +2141,11 @@ func TestTUIBackendRemoveWorktreeDirtyErrorDoesNotSuggestCLIForce(t *testing.T) 
 		},
 		Branch: "codex/dirty",
 		Path:   worktreePath,
+		Generation: tuiTestWorktreeGeneration(
+			t,
+			repoPath,
+			worktreePath,
+		),
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
@@ -1962,6 +2183,11 @@ func TestTUIBackendForceRemoveDeletesDirtyWorktree(t *testing.T) {
 		},
 		Branch: "codex/dirty",
 		Path:   worktreePath,
+		Generation: tuiTestWorktreeGeneration(
+			t,
+			repoPath,
+			worktreePath,
+		),
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
@@ -2367,6 +2593,7 @@ func TestTUIBackendMaterializeWorktreeUnregistersWhenHeadCannotBeRead(t *testing
 		context.Background(),
 		repoPath,
 		worktreePath,
+		tuiTestWorktreeGeneration(t, repoPath, worktreePath),
 		&dashboard.FleetInfo{
 			Branch:     "feature/studio-only",
 			RemoteHead: strings.Repeat("b", 40),
@@ -2379,6 +2606,60 @@ func TestTUIBackendMaterializeWorktreeUnregistersWhenHeadCannotBeRead(t *testing
 	reg, registryErr := registry.New()
 	require.NoError(t, registryErr)
 	assert.False(t, reg.IsUnreviewedRemoteSource(worktreePath))
+}
+
+func TestTUIBackendMaterializationCleanupPreservesReplacementWorktree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "materialized")
+	runTUITestGit(t, repoPath, "branch", "feature/materialized")
+	runTUITestGit(
+		t,
+		repoPath,
+		"worktree",
+		"add",
+		worktreePath,
+		"feature/materialized",
+	)
+	originalGeneration := tuiTestWorktreeGeneration(
+		t,
+		repoPath,
+		worktreePath,
+	)
+	runTUITestGit(t, repoPath, "worktree", "remove", "--force", worktreePath)
+	runTUITestGit(t, repoPath, "branch", "feature/replacement")
+	runTUITestGit(
+		t,
+		repoPath,
+		"worktree",
+		"add",
+		worktreePath,
+		"feature/replacement",
+	)
+
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	err := backend.failMaterializedHeadVerification(
+		repoPath,
+		worktreePath,
+		originalGeneration,
+		errors.New("stale materialized head"),
+	)
+
+	require.Error(t, err)
+	assert.DirExists(t, worktreePath)
+	assert.Equal(
+		t,
+		"feature/replacement",
+		strings.TrimSpace(runTUITestGitOutput(
+			t,
+			worktreePath,
+			"rev-parse",
+			"--abbrev-ref",
+			"HEAD",
+		)),
+	)
 }
 
 func tuiTestBranchExists(repoPath string, branch string) bool {
@@ -2502,13 +2783,14 @@ func TestTUIBackendMaterializeWorktreeExplainsUnavailableBranch(t *testing.T) {
 	assert.Contains(t, err.Error(), "push or fetch it first")
 }
 
-func TestTUIBackendRemoveWorktreeRepairsBrokenGitFile(t *testing.T) {
+func TestTUIBackendRemoveWorktreeRejectsBrokenGitFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	repoPath := newTUITestRepo(t)
 	worktreePath := filepath.Join(t.TempDir(), "broken-worktree")
 	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/broken", worktreePath)
+	generation := tuiTestWorktreeGeneration(t, repoPath, worktreePath)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(worktreePath, ".git"),
 		[]byte("gitdir: /missing/repo/.git/worktrees/broken-worktree\n"),
@@ -2531,68 +2813,50 @@ func TestTUIBackendRemoveWorktreeRepairsBrokenGitFile(t *testing.T) {
 			Repository: "service-api",
 			FullPath:   "github.com/example/service-api",
 		},
-		Branch: "codex/broken",
-		Path:   worktreePath,
+		Branch:     "codex/broken",
+		Path:       worktreePath,
+		Generation: generation,
 	}}
 	backend := newTUIBackendWithLaunchDir(cfg, "")
 
 	err := backend.RemoveWorktree(context.Background(), row, false)
 
-	require.NoError(t, err)
+	require.Error(t, err)
 	output := runTUITestGitOutput(t, repoPath, "worktree", "list", "--porcelain")
-	assert.NotContains(t, output, worktreePath)
-	assert.NoDirExists(t, worktreePath)
+	assert.Contains(t, output, "branch refs/heads/codex/broken")
+	assert.DirExists(t, worktreePath)
 }
 
-func TestRepairLinkedWorktreeGitFileRejectsSymlink(t *testing.T) {
-	repoPath := newTUITestRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "symlink-worktree")
-	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/symlink", worktreePath)
+func TestTUIBackendRemoveWorktreePreservesCrossRepositoryReplacementWithBrokenGitFile(
+	t *testing.T,
+) {
+	repoA := newTUITestRepo(t)
+	repoB := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "replaced-worktree")
+	runTUITestGit(t, repoA, "worktree", "add", "-b", "codex/original", worktreePath)
+	generation := tuiTestWorktreeGeneration(t, repoA, worktreePath)
 
-	victimPath := filepath.Join(t.TempDir(), "victim")
-	const victimContents = "do not replace me\n"
-	require.NoError(t, os.WriteFile(victimPath, []byte(victimContents), 0644))
+	require.NoError(t, os.RemoveAll(worktreePath))
+	runTUITestGit(t, repoB, "worktree", "add", "-b", "codex/replacement", worktreePath)
+	const sentinel = "repository B must survive\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(worktreePath, "replacement.txt"),
+		[]byte(sentinel),
+		0644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(worktreePath, ".git"),
+		[]byte("gitdir: /missing/repository-b/worktree\n"),
+		0644,
+	))
 
-	gitFilePath := filepath.Join(worktreePath, ".git")
-	require.NoError(t, os.Remove(gitFilePath))
-	if err := os.Symlink(victimPath, gitFilePath); err != nil {
-		t.Skipf("symbolic links are not supported or allowed on this filesystem: %v", err)
-	}
-
-	err := repairLinkedWorktreeGitFile(repoPath, worktreePath)
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	err := backend.removeWorktreeFromRoot(repoA, worktreePath, true, generation)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "symbolic link")
-	data, readErr := os.ReadFile(victimPath)
+	data, readErr := os.ReadFile(filepath.Join(worktreePath, "replacement.txt"))
 	require.NoError(t, readErr)
-	assert.Equal(t, victimContents, string(data))
-}
-
-func TestRepairLinkedWorktreeGitFileReplacesHardLinkWithoutClobberingTarget(t *testing.T) {
-	repoPath := newTUITestRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "hardlink-worktree")
-	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/hardlink", worktreePath)
-
-	victimPath := filepath.Join(t.TempDir(), "victim")
-	const victimContents = "do not replace me\n"
-	require.NoError(t, os.WriteFile(victimPath, []byte(victimContents), 0644))
-
-	gitFilePath := filepath.Join(worktreePath, ".git")
-	require.NoError(t, os.Remove(gitFilePath))
-	if err := os.Link(victimPath, gitFilePath); err != nil {
-		t.Skipf("hard links are not supported on this filesystem: %v", err)
-	}
-
-	err := repairLinkedWorktreeGitFile(repoPath, worktreePath)
-
-	require.NoError(t, err)
-	victimData, readErr := os.ReadFile(victimPath)
-	require.NoError(t, readErr)
-	assert.Equal(t, victimContents, string(victimData))
-	gitData, readErr := os.ReadFile(gitFilePath)
-	require.NoError(t, readErr)
-	assert.Contains(t, string(gitData), "gitdir: ")
-	assert.NotEqual(t, string(gitData), string(victimData))
+	assert.Equal(t, sentinel, string(data))
 }
 
 func TestTUIBackendResolveLayoutFallsBackToRegisteredProjectRoot(t *testing.T) {
@@ -2688,6 +2952,54 @@ func TestDiscoverLaunchRepoWorktreesListsLocalOnlyRepository(t *testing.T) {
 	assert.Equal(t, filepath.Base(repoPath), entries[0].RepositoryInfo.Repository)
 }
 
+func TestTUIBackendRemovesLaunchWorktreeOutsideGlobalBase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "outside-global-base")
+	runTUITestGit(
+		t,
+		repoPath,
+		"worktree",
+		"add",
+		"-b",
+		"feature/outside",
+		worktreePath,
+	)
+	cfg := &models.Config{
+		Worktree: models.WorktreeConfig{
+			BaseDir: filepath.Join(t.TempDir(), "global"),
+		},
+	}
+	backend := newTUIBackendWithLaunchDir(cfg, repoPath)
+	backend.listSessions = func() ([]string, error) { return nil, nil }
+	backend.registerProject = func(models.Project) error { return nil }
+	backend.registerWorkspace = func(
+		workspace models.Workspace,
+	) (models.Workspace, error) {
+		return workspace, nil
+	}
+
+	rows, _, err := backend.ListFast(context.Background())
+	require.NoError(t, err)
+	var row dashboard.Row
+	for _, candidate := range rows {
+		if candidate.Entry != nil &&
+			samePath(candidate.Entry.Path, worktreePath) {
+			row = candidate
+			break
+		}
+	}
+	require.NotNil(t, row.Entry)
+	require.NotEmpty(t, row.Entry.Generation)
+
+	err = backend.RemoveWorktree(context.Background(), row, false)
+
+	require.NoError(t, err)
+	assert.NoDirExists(t, worktreePath)
+}
+
 // TestDiscoverLaunchRepoWorktreesRejectsRelativeDotlessRemote pins the
 // remote-provenance gate on launch discovery: a relative dotless filesystem
 // remote must not surface as a shareable identity. The entry retains the raw
@@ -2738,6 +3050,25 @@ func runTUITestGitOutput(t *testing.T, dir string, args ...string) string {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, fmt.Sprintf("git %s failed:\n%s", strings.Join(args, " "), output))
 	return string(output)
+}
+
+func tuiTestWorktreeGeneration(
+	t *testing.T,
+	repoPath string,
+	worktreePath string,
+) string {
+	t.Helper()
+	worktrees, err := git.New(repoPath).ListWorktrees()
+	require.NoError(t, err)
+	for _, worktree := range worktrees {
+		if utils.CanonicalPath(worktree.Path) ==
+			utils.CanonicalPath(worktreePath) {
+			require.NotEmpty(t, worktree.Generation)
+			return worktree.Generation
+		}
+	}
+	t.Fatalf("worktree %s not found", worktreePath)
+	return ""
 }
 
 func stubTUIProjectRegistration(backend *tuiBackend) {

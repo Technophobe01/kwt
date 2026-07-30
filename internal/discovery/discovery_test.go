@@ -3,7 +3,9 @@ package discovery
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -362,6 +364,92 @@ func TestDiscoverGlobalWorktrees_MainAndLinkedWorktrees(t *testing.T) {
 	}
 	if linkedCount != 1 {
 		t.Errorf("Expected 1 linked worktree, got %d", linkedCount)
+	}
+}
+
+func TestDiscoverGlobalWorktreesReportsRepositorySnapshotFailure(t *testing.T) {
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "repo", "main")
+	repo := initRepoAt(t, repoDir, "https://github.com/user/repo.git")
+	repo.CreateBranch(t, "feature")
+	worktreeDir := filepath.Join(baseDir, "repo", "feature")
+	repo.CreateWorktree(t, worktreeDir, "feature")
+
+	dotGit, err := os.ReadFile(filepath.Join(worktreeDir, ".git"))
+	if err != nil {
+		t.Fatalf("read linked worktree .git file: %v", err)
+	}
+	gitDir := strings.TrimSpace(
+		strings.TrimPrefix(strings.TrimSpace(string(dotGit)), "gitdir: "),
+	)
+	if err := os.Mkdir(
+		filepath.Join(gitDir, "kwt-generation"),
+		0o700,
+	); err != nil {
+		t.Fatalf("block worktree generation initialization: %v", err)
+	}
+
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
+
+	if err == nil {
+		t.Fatalf(
+			"DiscoverGlobalWorktrees() entries = %v, want snapshot error",
+			entries,
+		)
+	}
+}
+
+func TestDiscoverGlobalWorktreesListsEachRepositoryOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell wrapper")
+	}
+
+	baseDir := t.TempDir()
+	repoDir := filepath.Join(baseDir, "github.com", "user", "repo", "main")
+	repo := initRepoAt(t, repoDir, "https://github.com/user/repo.git")
+	for _, branch := range []string{"feature-a", "feature-b"} {
+		repo.CreateBranch(t, branch)
+		repo.CreateWorktree(
+			t,
+			filepath.Join(baseDir, "github.com", "user", "repo", branch),
+			branch,
+		)
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("find git executable: %v", err)
+	}
+	countPath := filepath.Join(t.TempDir(), "worktree-list-count")
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := `#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "list" ]; then
+	printf '1\n' >> "$WORKTREE_LIST_COUNT"
+fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0755); err != nil {
+		t.Fatalf("write git wrapper: %v", err)
+	}
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("WORKTREE_LIST_COUNT", countPath)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	entries, err := DiscoverGlobalWorktrees(baseDir, nil)
+
+	if err != nil {
+		t.Fatalf("DiscoverGlobalWorktrees() error = %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("Expected 3 entries, got %d", len(entries))
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read worktree list count: %v", err)
+	}
+	if got := strings.Count(string(count), "\n"); got != 1 {
+		t.Fatalf("git worktree list calls = %d, want 1", got)
 	}
 }
 

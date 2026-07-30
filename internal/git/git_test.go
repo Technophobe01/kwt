@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -538,6 +540,214 @@ exec "$REAL_GIT" "$@"
 	})
 }
 
+func TestHookReentrantWorktreeList(t *testing.T) {
+	if os.Getenv("KWT_TEST_HOOK_REENTRANT_LIST") != "1" {
+		t.Skip("helper process")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		worktrees, err := New(
+			os.Getenv("KWT_TEST_HOOK_REPO"),
+		).ListWorktrees()
+		reservedPath := os.Getenv("KWT_TEST_HOOK_WORKTREE")
+		for _, worktree := range worktrees {
+			if utils.CanonicalPath(worktree.Path) ==
+				utils.CanonicalPath(reservedPath) {
+				err = fmt.Errorf(
+					"in-progress worktree was visible during checkout",
+				)
+			}
+		}
+		if _, generationErr := New(
+			os.Getenv("KWT_TEST_HOOK_REPO"),
+		).readWorktreeGeneration(reservedPath); generationErr == nil {
+			err = fmt.Errorf(
+				"in-progress worktree generation was initialized during listing",
+			)
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		fmt.Fprintln(os.Stderr, "hook could not re-enter kwt worktree listing")
+		os.Exit(2)
+	}
+}
+
+func TestHookCapableWorktreeAddsAllowHookToListWorktrees(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test hook uses a POSIX shell")
+	}
+
+	tests := []struct {
+		name string
+		add  func(*Git, string) error
+	}{
+		{
+			name: "default base",
+			add: func(g *Git, path string) error {
+				return g.AddWorktree(path, "hook-default-base", true)
+			},
+		},
+		{
+			name: "explicit base",
+			add: func(g *Git, path string) error {
+				return g.AddWorktreeFromBase(path, "hook-explicit-base", "main")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewTestRepository(t)
+			hooksDir := filepath.Join(repo.Path, ".git", "hooks")
+			hookPath := filepath.Join(hooksDir, "post-checkout")
+			hook := `#!/bin/sh
+"$KWT_TEST_BINARY" -test.run=^TestHookReentrantWorktreeList$
+`
+			require.NoError(t, os.WriteFile(hookPath, []byte(hook), 0755))
+			t.Setenv("KWT_TEST_BINARY", os.Args[0])
+			t.Setenv("KWT_TEST_HOOK_REENTRANT_LIST", "1")
+			t.Setenv("KWT_TEST_HOOK_REPO", repo.Path)
+
+			worktreePath := filepath.Join(t.TempDir(), "hook-worktree")
+			t.Setenv("KWT_TEST_HOOK_WORKTREE", worktreePath)
+			require.NoError(t, tt.add(New(repo.Path), worktreePath))
+			assert.DirExists(t, worktreePath)
+		})
+	}
+}
+
+func TestWorktreeCreationReservationHidesAndProtectsCheckout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test hook uses a POSIX shell")
+	}
+
+	repo := NewTestRepository(t)
+	startedPath := filepath.Join(t.TempDir(), "hook-started")
+	releasePath := filepath.Join(t.TempDir(), "hook-release")
+	hookPath := filepath.Join(repo.Path, ".git", "hooks", "post-checkout")
+	hook := `#!/bin/sh
+touch "$KWT_TEST_HOOK_STARTED"
+while [ ! -f "$KWT_TEST_HOOK_RELEASE" ]; do
+	sleep 0.01
+done
+`
+	require.NoError(t, os.WriteFile(hookPath, []byte(hook), 0755))
+	t.Setenv("KWT_TEST_HOOK_STARTED", startedPath)
+	t.Setenv("KWT_TEST_HOOK_RELEASE", releasePath)
+	t.Cleanup(func() {
+		_ = os.WriteFile(releasePath, nil, 0644)
+	})
+
+	g := New(repo.Path)
+	worktreePath := filepath.Join(t.TempDir(), "reserved-worktree")
+	addErr := make(chan error, 1)
+	go func() {
+		addErr <- g.AddWorktree(worktreePath, "reserved-worktree", true)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(startedPath)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	worktrees, err := g.ListWorktrees()
+	require.NoError(t, err)
+	for _, worktree := range worktrees {
+		assert.NotEqual(
+			t,
+			utils.CanonicalPath(worktreePath),
+			utils.CanonicalPath(worktree.Path),
+		)
+	}
+	require.ErrorContains(
+		t,
+		g.RemoveWorktree(worktreePath, false, ""),
+		"creation in progress",
+	)
+	assert.DirExists(t, worktreePath)
+
+	require.NoError(t, os.WriteFile(releasePath, nil, 0644))
+	require.NoError(t, <-addErr)
+}
+
+func TestHookCapableWorktreeAddRecoversGenerationInitializationFailure(
+	t *testing.T,
+) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test hook uses POSIX permissions")
+	}
+
+	tests := []struct {
+		name string
+		add  func(*Git, string) error
+	}{
+		{
+			name: "default base",
+			add: func(g *Git, path string) error {
+				return g.AddWorktree(path, "recover-default-base", true)
+			},
+		},
+		{
+			name: "explicit base",
+			add: func(g *Git, path string) error {
+				return g.AddWorktreeFromBase(
+					path,
+					"recover-explicit-base",
+					"main",
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewTestRepository(t)
+			lockPath := filepath.Join(
+				repo.Path,
+				".git",
+				"kwt-worktree.lock",
+			)
+			require.NoError(t, os.WriteFile(lockPath, nil, 0600))
+			t.Cleanup(func() { _ = os.Chmod(lockPath, 0600) })
+			hookPath := filepath.Join(
+				repo.Path,
+				".git",
+				"hooks",
+				"post-checkout",
+			)
+			hook := `#!/bin/sh
+chmod 000 "$KWT_TEST_MUTATION_LOCK"
+`
+			require.NoError(t, os.WriteFile(hookPath, []byte(hook), 0755))
+			t.Setenv("KWT_TEST_MUTATION_LOCK", lockPath)
+
+			worktreePath := filepath.Join(t.TempDir(), "worktree")
+			require.NoError(t, tt.add(New(repo.Path), worktreePath))
+			assert.DirExists(t, worktreePath)
+
+			require.NoError(t, os.Chmod(lockPath, 0600))
+			worktrees, err := New(repo.Path).ListWorktrees()
+			require.NoError(t, err)
+			for _, worktree := range worktrees {
+				if utils.CanonicalPath(worktree.Path) ==
+					utils.CanonicalPath(worktreePath) {
+					assert.NotEmpty(t, worktree.Generation)
+					return
+				}
+			}
+			t.Fatal("created worktree missing after generation retry")
+		})
+	}
+}
+
 func TestAddWorktreeExistingDisablesCheckoutHooks(t *testing.T) {
 	repo := NewTestRepository(t)
 	repo.CreateBranch(t, "existing-unreviewed")
@@ -729,7 +939,7 @@ func TestRemoveWorktree(t *testing.T) {
 	repo.CreateWorktree(t, worktreePath, "to-remove")
 
 	// Remove the worktree
-	err := g.RemoveWorktree(worktreePath, false)
+	err := g.RemoveWorktree(worktreePath, false, "")
 	if err != nil {
 		t.Fatalf("RemoveWorktree() error = %v", err)
 	}
@@ -741,6 +951,245 @@ func TestRemoveWorktree(t *testing.T) {
 			t.Error("Worktree still exists in list after removal")
 		}
 	}
+}
+
+func TestListWorktreesKeepsGenerationStableWhenDirectoryChanges(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "stable-generation")
+	worktreePath := filepath.Join(t.TempDir(), "stable-generation")
+	repo.CreateWorktree(t, worktreePath, "stable-generation")
+
+	before, err := g.ListWorktrees()
+	require.NoError(t, err)
+	var generation string
+	for _, worktree := range before {
+		if utils.CanonicalPath(worktree.Path) == utils.CanonicalPath(worktreePath) {
+			generation = worktree.Generation
+		}
+	}
+	require.NotEmpty(t, generation)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(worktreePath, "ordinary-change"),
+		[]byte("content"),
+		0644,
+	))
+
+	after, err := g.ListWorktrees()
+	require.NoError(t, err)
+	for _, worktree := range after {
+		if utils.CanonicalPath(worktree.Path) == utils.CanonicalPath(worktreePath) {
+			assert.Equal(t, generation, worktree.Generation)
+			return
+		}
+	}
+	t.Fatal("worktree missing after ordinary directory change")
+}
+
+func TestListWorktreesDoesNotAdoptGenerationFromAnotherRepository(t *testing.T) {
+	repoA := NewTestRepository(t)
+	repoB := NewTestRepository(t)
+	repoA.CreateBranch(t, "repo-a-worktree")
+	repoB.CreateBranch(t, "repo-b-worktree")
+	worktreePath := filepath.Join(t.TempDir(), "reused-worktree")
+	repoA.CreateWorktree(t, worktreePath, "repo-a-worktree")
+
+	before, err := New(repoA.Path).ListWorktrees()
+	require.NoError(t, err)
+	var repoAGeneration string
+	for _, worktree := range before {
+		if utils.PathKey(worktree.Path) == utils.PathKey(worktreePath) {
+			repoAGeneration = worktree.Generation
+			break
+		}
+	}
+	require.NotEmpty(t, repoAGeneration)
+
+	require.NoError(t, os.RemoveAll(worktreePath))
+	repoB.CreateWorktree(t, worktreePath, "repo-b-worktree")
+	repoBGeneration, err := New(repoB.Path).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+	require.NotEqual(t, repoAGeneration, repoBGeneration)
+
+	_, err = New(repoA.Path).ListWorktrees()
+
+	require.ErrorContains(t, err, "belongs to a different repository")
+}
+
+func TestWorktreeGenerationRecoversFromRelativeAdministrativeGitDir(
+	t *testing.T,
+) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "relative-admin-gitdir")
+	worktreePath := filepath.Join(t.TempDir(), "relative-admin-gitdir")
+	repo.CreateWorktree(t, worktreePath, "relative-admin-gitdir")
+	generation, err := g.WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+	adminDir, err := g.worktreeGitDir(worktreePath)
+	require.NoError(t, err)
+	relativeDotGit, err := filepath.Rel(
+		adminDir,
+		filepath.Join(worktreePath, ".git"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(adminDir, "gitdir"),
+		[]byte(relativeDotGit+"\n"),
+		0o600,
+	))
+	require.NoError(t, os.Remove(filepath.Join(worktreePath, ".git")))
+	unrelatedCWD := filepath.Join(
+		t.TempDir(),
+		strings.Repeat("unrelated/", 20),
+	)
+	require.NoError(t, os.MkdirAll(unrelatedCWD, 0o755))
+	t.Chdir(unrelatedCWD)
+
+	recovered, err := g.WorktreeGeneration(worktreePath)
+
+	require.NoError(t, err)
+	assert.Equal(t, generation, recovered)
+}
+
+func TestWorktreeGenerationRecoversInterruptedInitialization(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "interrupted-generation")
+	worktreePath := filepath.Join(t.TempDir(), "interrupted-generation")
+	repo.CreateWorktree(t, worktreePath, "interrupted-generation")
+	adminDir, err := g.worktreeGitDir(worktreePath)
+	require.NoError(t, err)
+	generationPath := filepath.Join(adminDir, "kwt-generation")
+	require.NoError(t, os.WriteFile(generationPath, []byte("partial"), 0o600))
+
+	generation, err := g.WorktreeGeneration(worktreePath)
+
+	require.NoError(t, err)
+	require.NoError(t, ValidateWorktreeGeneration(generation))
+	data, err := os.ReadFile(generationPath)
+	require.NoError(t, err)
+	assert.Equal(t, generation, strings.TrimSpace(string(data)))
+}
+
+func TestListWorktreesReportsGenerationInitializationFailure(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "broken-generation")
+	worktreePath := filepath.Join(t.TempDir(), "broken-generation")
+	repo.CreateWorktree(t, worktreePath, "broken-generation")
+	adminDir, err := g.worktreeGitDir(worktreePath)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(
+		filepath.Join(adminDir, "kwt-generation"),
+		0700,
+	))
+
+	_, err = g.ListWorktrees()
+
+	require.ErrorContains(t, err, "worktree generation")
+}
+
+func TestListWorktreesWaitsForConcurrentWorktreeReplacement(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "original")
+	worktreePath := filepath.Join(t.TempDir(), "replacement")
+	repo.CreateWorktree(t, worktreePath, "original")
+	before, err := g.ListWorktrees()
+	require.NoError(t, err)
+	var originalGeneration string
+	for _, worktree := range before {
+		if utils.CanonicalPath(worktree.Path) ==
+			utils.CanonicalPath(worktreePath) {
+			originalGeneration = worktree.Generation
+		}
+	}
+	require.NotEmpty(t, originalGeneration)
+
+	lock := flock.New(
+		filepath.Join(repo.Path, ".git", "kwt-worktree.lock"),
+		flock.SetPermissions(0600),
+	)
+	require.NoError(t, lock.Lock())
+	t.Cleanup(func() { _ = lock.Unlock() })
+
+	result := make(chan []models.Worktree, 1)
+	listErr := make(chan error, 1)
+	go func() {
+		worktrees, err := g.ListWorktrees()
+		if err != nil {
+			listErr <- err
+			return
+		}
+		result <- worktrees
+	}()
+
+	select {
+	case err := <-listErr:
+		require.NoError(t, err)
+	case <-result:
+		t.Fatal("worktree listing completed while replacement lock was held")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	gitOutput(t, repo.Path, "worktree", "remove", worktreePath)
+	gitOutput(t, repo.Path, "branch", "-D", "original")
+	gitOutput(
+		t,
+		repo.Path,
+		"worktree",
+		"add",
+		"-b",
+		"replacement",
+		worktreePath,
+	)
+	require.NoError(t, lock.Unlock())
+
+	select {
+	case err := <-listErr:
+		require.NoError(t, err)
+	case worktrees := <-result:
+		for _, worktree := range worktrees {
+			if utils.CanonicalPath(worktree.Path) ==
+				utils.CanonicalPath(worktreePath) {
+				assert.Equal(t, "replacement", worktree.Branch)
+				assert.NotEqual(
+					t,
+					originalGeneration,
+					worktree.Generation,
+				)
+				return
+			}
+		}
+		t.Fatal("replacement worktree missing from locked snapshot")
+	case <-time.After(5 * time.Second):
+		t.Fatal("worktree listing did not resume after replacement")
+	}
+}
+
+func TestRemoveWorktreeRejectsChangedGeneration(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	repo.CreateBranch(t, "replacement")
+	worktreePath := filepath.Join(t.TempDir(), "replacement")
+	repo.CreateWorktree(t, worktreePath, "replacement")
+
+	worktrees, err := g.ListWorktrees()
+	require.NoError(t, err)
+	var generation string
+	for _, worktree := range worktrees {
+		if utils.CanonicalPath(worktree.Path) == utils.CanonicalPath(worktreePath) {
+			generation = worktree.Generation
+		}
+	}
+	require.NotEmpty(t, generation)
+
+	err = g.RemoveWorktree(worktreePath, false, "replacement-generation")
+
+	require.ErrorContains(t, err, "generation changed")
+	assert.DirExists(t, worktreePath)
 }
 
 func TestRemoveWorktreeCleansDirectoryAfterGitDeregistersWorktree(t *testing.T) {
@@ -775,7 +1224,7 @@ exec "$REAL_GIT" "$@"
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	err = New(worktreePath).RemoveWorktree(worktreePath, false)
+	err = New(worktreePath).RemoveWorktree(worktreePath, false, "")
 
 	if err != nil {
 		t.Fatalf("RemoveWorktree() error = %v", err)
@@ -783,6 +1232,52 @@ exec "$REAL_GIT" "$@"
 	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
 		t.Fatalf("worktree path still exists after removal: stat error = %v", statErr)
 	}
+}
+
+func TestConditionalRemoveWorktreePreservesDirectoryAfterGitDeregistersWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell wrapper")
+	}
+
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "partially-removed-conditionally")
+	worktreePath := filepath.Join(t.TempDir(), "remove-wt")
+	repo.CreateWorktree(t, worktreePath, "partially-removed-conditionally")
+
+	g := New(worktreePath)
+	worktrees, err := g.ListWorktrees()
+	require.NoError(t, err)
+	var generation string
+	for _, worktree := range worktrees {
+		if utils.CanonicalPath(worktree.Path) == utils.CanonicalPath(worktreePath) {
+			generation = worktree.Generation
+			break
+		}
+	}
+	require.NotEmpty(t, generation)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := `#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then
+	"$REAL_GIT" "$@" || exit $?
+	mkdir -p "$3"
+	printf 'replacement created during removal\n' > "$3/replacement"
+	printf "error: failed to delete '%s': Directory not empty\n" "$3" >&2
+	exit 1
+fi
+exec "$REAL_GIT" "$@"
+`
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0755))
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err = g.RemoveWorktree(worktreePath, false, generation)
+
+	require.ErrorContains(t, err, "failed to remove worktree")
+	assert.FileExists(t, filepath.Join(worktreePath, "replacement"))
 }
 
 func TestPruneWorktrees(t *testing.T) {
@@ -812,6 +1307,23 @@ func TestPruneWorktrees(t *testing.T) {
 			t.Error("Deleted worktree still exists after prune")
 		}
 	}
+}
+
+func TestPruneWorktreesRejectsActiveCreationReservation(t *testing.T) {
+	repo := NewTestRepository(t)
+	g := New(repo.Path)
+	reservation, err := g.reserveWorktreeCreation(
+		filepath.Join(t.TempDir(), "creating-worktree"),
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, reservation.release())
+	})
+
+	err = g.PruneWorktrees()
+
+	require.ErrorContains(t, err, "worktree creation in progress")
 }
 
 func TestListBranches(t *testing.T) {
@@ -1369,6 +1881,109 @@ func TestAddWorktreeTrackingRejectsOptionLikeBranchName(t *testing.T) {
 	assert.Contains(t, err.Error(), `invalid local branch name "-M"`)
 	assert.Equal(t, "main", gitOutput(t, repo.Path, "branch", "--show-current"))
 	assert.NoDirExists(t, worktreePath)
+}
+
+func TestAddWorktreeTrackingReusesMatchingOrphanBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	gitOutput(t, repo.Path, "remote", "add", "origin", repo.Path)
+	gitOutput(
+		t,
+		repo.Path,
+		"update-ref",
+		"refs/remotes/origin/orphaned",
+		"HEAD",
+	)
+	gitOutput(
+		t,
+		repo.Path,
+		"branch",
+		"--track",
+		"orphaned",
+		"refs/remotes/origin/orphaned",
+	)
+	worktreePath := filepath.Join(t.TempDir(), "orphaned")
+
+	err := New(repo.Path).AddWorktreeTracking(
+		worktreePath,
+		"orphaned",
+		"refs/remotes/origin/orphaned",
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.DirExists(t, worktreePath)
+	assert.Equal(
+		t,
+		"origin/orphaned",
+		gitOutput(
+			t,
+			worktreePath,
+			"rev-parse",
+			"--abbrev-ref",
+			"@{upstream}",
+		),
+	)
+}
+
+func TestAddWorktreeTrackingRejectsDivergentOrphanBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	gitOutput(t, repo.Path, "remote", "add", "origin", repo.Path)
+	gitOutput(
+		t,
+		repo.Path,
+		"update-ref",
+		"refs/remotes/origin/diverged",
+		"HEAD",
+	)
+	gitOutput(
+		t,
+		repo.Path,
+		"branch",
+		"--track",
+		"diverged",
+		"refs/remotes/origin/diverged",
+	)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repo.Path, "local-only"),
+		[]byte("different content"),
+		0o600,
+	))
+	gitOutput(t, repo.Path, "add", "local-only")
+	gitOutput(t, repo.Path, "commit", "-m", "advance local branch source")
+	gitOutput(t, repo.Path, "update-ref", "refs/heads/diverged", "HEAD")
+	worktreePath := filepath.Join(t.TempDir(), "diverged")
+
+	err := New(repo.Path).AddWorktreeTracking(
+		worktreePath,
+		"diverged",
+		"refs/remotes/origin/diverged",
+		nil,
+	)
+
+	require.ErrorContains(t, err, "points to a different commit")
+	assert.NoDirExists(t, worktreePath)
+}
+
+func TestAddWorktreeExistingRefusesGenerationlessRegisteredWorktree(
+	t *testing.T,
+) {
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "legacy-existing")
+	worktreePath := filepath.Join(t.TempDir(), "legacy-existing")
+	repo.CreateWorktree(t, worktreePath, "legacy-existing")
+	keepPath := filepath.Join(worktreePath, "keep")
+	require.NoError(t, os.WriteFile(keepPath, []byte("preserve me"), 0o600))
+
+	err := New(repo.Path).AddWorktreeExisting(
+		worktreePath,
+		"legacy-existing",
+		nil,
+	)
+
+	require.ErrorContains(t, err, "already registered without a generation")
+	data, readErr := os.ReadFile(keepPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "preserve me", string(data))
 }
 
 func TestAddWorktreeExistingRemovesWorktreeAfterCheckoutFailure(t *testing.T) {

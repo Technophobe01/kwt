@@ -2,11 +2,15 @@
 package worktree
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/registry"
@@ -21,15 +25,28 @@ import (
 type GitInterface interface {
 	ListWorktrees() ([]models.Worktree, error)
 	AddWorktree(path, branch string, createBranch bool) error
+	AddWorktreeWithGeneration(
+		path, branch string,
+		createBranch bool,
+	) (string, error)
 	AddWorktreeExisting(path, branch string, protectedNames []string) error
+	AddWorktreeExistingWithGeneration(
+		path, branch string,
+		protectedNames []string,
+	) (string, error)
 	AddWorktreeTracking(
 		path, branch, remoteBranch string,
 		protectedNames []string,
 	) error
+	AddWorktreeTrackingWithGeneration(
+		path, branch, remoteBranch string,
+		protectedNames []string,
+	) (string, error)
 	AddWorktreeFromBase(path, branch, baseBranch string) error
-	RemoveWorktree(path string, force bool) error
+	RemoveWorktree(path string, force bool, ifGeneration string) error
 	DeleteBranch(branch string, force bool) error
 	PruneWorktrees() error
+	ReadWorktreeGeneration(path string) (string, error)
 	GetRepositoryName() (string, error)
 	GetRecentCommits(path string, limit int) ([]models.CommitInfo, error)
 	GetRepositoryURL() (string, error)
@@ -44,9 +61,24 @@ type Manager struct {
 }
 
 type remoteSourceState interface {
-	Register(*registry.WorktreeEntry) error
-	Unregister(string) error
+	AbortCreation(
+		string,
+		string,
+		*registry.WorktreeEntry,
+	) (bool, error)
+	AcquireCreation(string) (func() error, bool, error)
+	CompareAndSwap(
+		string,
+		*registry.WorktreeEntry,
+		*registry.WorktreeEntry,
+	) (bool, error)
+	CompleteCreation(string, string, string) (bool, error)
 	Get(string) (*registry.WorktreeEntry, bool)
+	ReclaimCreation(
+		string,
+		string,
+		*registry.WorktreeEntry,
+	) (bool, error)
 }
 
 // AddOptions controls optional behavior for creating a worktree.
@@ -91,78 +123,290 @@ func (m *Manager) AddWithOptions(branch string, customPath string, createBranch 
 	return path, nil
 }
 
-func (m *Manager) addExisting(branch, customPath string) (string, error) {
+// AddWithGeneration creates a worktree and returns the durable generation
+// captured before creation synchronization is released.
+func (m *Manager) AddWithGeneration(
+	branch string,
+	customPath string,
+	createBranch bool,
+	opts AddOptions,
+) (string, string, error) {
+	if !createBranch {
+		return m.addExistingWithGeneration(branch, customPath)
+	}
+
 	path, err := m.preparePath(customPath, branch, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return m.addUnreviewedSource(path, branch, func() error {
-		return m.git.AddWorktreeExisting(
-			path,
-			branch,
-			credentials.ProtectedNames(m.config),
-		)
-	})
+	generation, err := m.git.AddWorktreeWithGeneration(
+		path,
+		branch,
+		createBranch,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if !opts.SkipSetup {
+		m.runPostWorktreeSetup(branch, path)
+	}
+	return path, generation, nil
+}
+
+func (m *Manager) addExisting(branch, customPath string) (string, error) {
+	path, _, err := m.addExistingWithGeneration(branch, customPath)
+	return path, err
+}
+
+func (m *Manager) addExistingWithGeneration(
+	branch,
+	customPath string,
+) (string, string, error) {
+	path, err := m.preparePath(customPath, branch, nil)
+	if err != nil {
+		return "", "", err
+	}
+	return m.addUnreviewedSource(
+		path,
+		branch,
+		func() (string, error) {
+			return m.git.AddWorktreeExistingWithGeneration(
+				path,
+				branch,
+				credentials.ProtectedNames(m.config),
+			)
+		},
+	)
 }
 
 // AddTracking creates a worktree on a local branch that tracks remoteBranch.
 // Repository setup is intentionally deferred: the remote checkout is
 // untrusted until the user has reviewed it.
 func (m *Manager) AddTracking(branch, remoteBranch, customPath string) (string, error) {
+	path, _, err := m.AddTrackingWithGeneration(
+		branch,
+		remoteBranch,
+		customPath,
+	)
+	return path, err
+}
+
+// AddTrackingWithGeneration creates a tracking worktree and returns the
+// generation captured before its mutation lock is released.
+func (m *Manager) AddTrackingWithGeneration(
+	branch,
+	remoteBranch,
+	customPath string,
+) (string, string, error) {
 	path, err := m.preparePath(customPath, branch, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-
-	return m.addUnreviewedSource(path, branch, func() error {
-		return m.git.AddWorktreeTracking(
-			path,
-			branch,
-			remoteBranch,
-			credentials.ProtectedNames(m.config),
-		)
-	})
+	return m.addUnreviewedSource(
+		path,
+		branch,
+		func() (string, error) {
+			return m.git.AddWorktreeTrackingWithGeneration(
+				path,
+				branch,
+				remoteBranch,
+				credentials.ProtectedNames(m.config),
+			)
+		},
+	)
 }
 
 func (m *Manager) addUnreviewedSource(
-	path, branch string,
-	add func() error,
-) (string, error) {
+	path,
+	branch string,
+	add func() (string, error),
+) (resultPath string, resultGeneration string, resultErr error) {
 	state, err := m.openRemoteSourceState()
 	if err != nil {
-		return "", fmt.Errorf("open remote-source state: %w", err)
+		return "", "", fmt.Errorf("open remote-source state: %w", err)
 	}
+	release, acquired, err := state.AcquireCreation(path)
+	if err != nil {
+		return "", "", fmt.Errorf("lock remote-source creation: %w", err)
+	}
+	if !acquired {
+		return "", "", fmt.Errorf(
+			"worktree creation in progress for %s",
+			path,
+		)
+	}
+	defer func() {
+		if err := release(); err != nil && resultErr == nil {
+			resultErr = fmt.Errorf(
+				"release remote-source creation lock: %w",
+				err,
+			)
+		}
+	}()
+
 	previous, existed := state.Get(path)
+	creationToken, err := newRegistryCreationToken()
+	if err != nil {
+		return "", "", err
+	}
 	entry := &registry.WorktreeEntry{
 		Branch:                 branch,
 		Path:                   path,
+		RegisteredAt:           time.Now(),
+		CreationToken:          creationToken,
 		UnreviewedRemoteSource: true,
 	}
-	if err := state.Register(entry); err != nil {
-		return "", fmt.Errorf("mark remote-source worktree unreviewed: %w", err)
-	}
-
-	if err := add(); err != nil {
-		var restoreErr error
-		switch {
-		case existed:
-			restoreErr = state.Register(previous)
-		default:
-			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-				restoreErr = state.Unregister(path)
+	var claimed bool
+	reclaimedAbandoned := false
+	if existed && previous.CreationToken != "" {
+		generation, found, recoveryErr := m.registeredGeneration(path)
+		if recoveryErr == nil && found {
+			completed, completeErr := state.CompleteCreation(
+				path,
+				previous.CreationToken,
+				generation,
+			)
+			if completeErr != nil {
+				return "", "", fmt.Errorf(
+					"recover completed remote-source worktree: %w",
+					completeErr,
+				)
 			}
-		}
-		if restoreErr != nil {
-			return "", fmt.Errorf(
-				"%w (failed to restore remote-source state: %v)",
-				err,
-				restoreErr,
+			if !completed {
+				return "", "", fmt.Errorf(
+					"registry ownership changed for %s; retry creation",
+					path,
+				)
+			}
+			return "", "", fmt.Errorf(
+				"recovered completed remote-source worktree at %s; retry after reviewing it",
+				path,
 			)
 		}
-		return "", err
+		claimed, err = state.ReclaimCreation(
+			path,
+			previous.CreationToken,
+			entry,
+		)
+		reclaimedAbandoned = claimed
+	} else {
+		var expected *registry.WorktreeEntry
+		if existed {
+			expected = previous
+		}
+		claimed, err = state.CompareAndSwap(path, expected, entry)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("mark remote-source worktree unreviewed: %w", err)
+	}
+	if !claimed {
+		return "", "", fmt.Errorf(
+			"registry ownership changed for %s; retry creation",
+			path,
+		)
 	}
 
-	return path, nil
+	generation, err := add()
+	if err != nil {
+		var cleaned bool
+		var cleanupErr error
+		if errorCreatedWorktree(err) {
+			recoveredGeneration, found, recoveryErr :=
+				m.registeredGeneration(path)
+			if recoveryErr == nil && found {
+				cleaned, cleanupErr = state.CompleteCreation(
+					path,
+					creationToken,
+					recoveredGeneration,
+				)
+			} else {
+				cleaned, cleanupErr = state.CompleteCreation(
+					path,
+					creationToken,
+					"",
+				)
+			}
+		} else {
+			restore := previous
+			if reclaimedAbandoned {
+				if pathExists(path) {
+					finalized := *previous
+					finalized.CreationToken = ""
+					restore = &finalized
+				} else {
+					restore = nil
+				}
+			}
+			cleaned, cleanupErr = state.AbortCreation(
+				path,
+				creationToken,
+				restore,
+			)
+		}
+		if cleanupErr != nil {
+			return "", "", fmt.Errorf(
+				"%w (failed to finalize remote-source state: %v)",
+				err,
+				cleanupErr,
+			)
+		}
+		if !cleaned {
+			return "", "", fmt.Errorf(
+				"%w (registry ownership changed for %s; preserved)",
+				err,
+				path,
+			)
+		}
+		return "", "", err
+	}
+	replaced, err := state.CompleteCreation(
+		path,
+		creationToken,
+		generation,
+	)
+	if err != nil {
+		return "", "", fmt.Errorf(
+			"record remote-source worktree generation: %w",
+			err,
+		)
+	}
+	if !replaced {
+		return "", "", fmt.Errorf(
+			"worktree created at %s but registry ownership changed; preserved",
+			path,
+		)
+	}
+	return path, generation, nil
+}
+
+func errorCreatedWorktree(err error) bool {
+	var created interface {
+		WorktreeCreated() bool
+	}
+	return errors.As(err, &created) && created.WorktreeCreated()
+}
+
+func (m *Manager) registeredGeneration(
+	path string,
+) (string, bool, error) {
+	generation, err := m.git.ReadWorktreeGeneration(path)
+	if err != nil {
+		return "", false, err
+	}
+	return generation, true, nil
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func newRegistryCreationToken() (string, error) {
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("generate registry creation token: %w", err)
+	}
+	return hex.EncodeToString(tokenBytes), nil
 }
 
 // AddFromBase creates a new worktree with a branch from a specific base branch
@@ -182,14 +426,29 @@ func (m *Manager) AddFromBase(branch string, baseBranch string, customPath strin
 }
 
 // Remove deletes a worktree.
-func (m *Manager) Remove(path string, force bool) error {
-	return m.git.RemoveWorktree(path, force)
+func (m *Manager) Remove(
+	path string,
+	force bool,
+	ifGeneration string,
+) error {
+	return m.git.RemoveWorktree(path, force, ifGeneration)
 }
 
 // RemoveWithBranch deletes a worktree and optionally its branch.
-func (m *Manager) RemoveWithBranch(path string, branch string, forceWorktree bool, deleteBranch bool, forceBranch bool) error {
+func (m *Manager) RemoveWithBranch(
+	path string,
+	branch string,
+	forceWorktree bool,
+	deleteBranch bool,
+	forceBranch bool,
+	ifGeneration string,
+) error {
 	// First remove the worktree
-	if err := m.git.RemoveWorktree(path, forceWorktree); err != nil {
+	if err := m.git.RemoveWorktree(
+		path,
+		forceWorktree,
+		ifGeneration,
+	); err != nil {
 		return err
 	}
 
@@ -239,16 +498,51 @@ func (m *Manager) GetMatchingWorktrees(pattern string) ([]models.Worktree, error
 		return nil, err
 	}
 
-	var matches []models.Worktree
-	pattern = strings.ToLower(pattern)
+	var exactBranchMatches []models.Worktree
 	for _, wt := range worktrees {
-		if strings.Contains(strings.ToLower(wt.Branch), pattern) ||
-			strings.Contains(strings.ToLower(wt.Path), pattern) {
-			matches = append(matches, wt)
+		if strings.EqualFold(wt.Branch, pattern) {
+			exactBranchMatches = append(exactBranchMatches, wt)
+		}
+	}
+	if len(exactBranchMatches) > 0 {
+		return exactBranchMatches, nil
+	}
+
+	if filepath.IsAbs(pattern) {
+		canonicalPattern := utils.PathKey(pattern)
+		var exactPathMatches []models.Worktree
+		for _, wt := range worktrees {
+			if utils.PathKey(wt.Path) == canonicalPattern {
+				exactPathMatches = append(exactPathMatches, wt)
+			}
+		}
+		if len(exactPathMatches) > 0 {
+			return exactPathMatches, nil
 		}
 	}
 
-	return matches, nil
+	lowerPattern := strings.ToLower(pattern)
+	var branchMatches []models.Worktree
+	for _, wt := range worktrees {
+		if strings.Contains(strings.ToLower(wt.Branch), lowerPattern) {
+			branchMatches = append(branchMatches, wt)
+		}
+	}
+	if len(branchMatches) > 0 {
+		return branchMatches, nil
+	}
+
+	pathPattern := strings.ToLower(filepath.ToSlash(pattern))
+	var pathMatches []models.Worktree
+	for _, wt := range worktrees {
+		if strings.Contains(
+			strings.ToLower(filepath.ToSlash(wt.Path)),
+			pathPattern,
+		) {
+			pathMatches = append(pathMatches, wt)
+		}
+	}
+	return pathMatches, nil
 }
 
 // ValidateWorktreePath checks if a path can be used for a new worktree.

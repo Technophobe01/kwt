@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWorktreeEntry_IsExpired(t *testing.T) {
@@ -369,6 +372,331 @@ func TestRegistryConcurrentAcknowledgementPreservesOtherMutation(t *testing.T) {
 	if !reloaded.IsUnreviewedRemoteSource("/worktrees/new") {
 		t.Error("concurrent registration was lost")
 	}
+}
+
+func TestRegistryConditionalUnregisterPreservesReplacementGeneration(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "reused-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:       path,
+		Generation: "0123456789abcdef0123456789abcdef",
+	}))
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:       path,
+		Generation: "fedcba9876543210fedcba9876543210",
+	}))
+
+	removed, err := r.UnregisterIfGeneration(
+		path,
+		"0123456789abcdef0123456789abcdef",
+	)
+
+	require.NoError(t, err)
+	assert.False(t, removed)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Equal(t, "fedcba9876543210fedcba9876543210", entry.Generation)
+}
+
+func TestRegistryCreationFinalizationPreservesReplacementOwner(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "reused-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:          path,
+		Branch:        "feature/original",
+		CreationToken: "original-creation",
+	}))
+	observed, ok := r.Get(path)
+	require.True(t, ok)
+	replacementExpiry := time.Now().Add(time.Hour)
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:       path,
+		Branch:     "feature/replacement",
+		Generation: "fedcba9876543210fedcba9876543210",
+		ExpiresAt:  &replacementExpiry,
+	}))
+
+	finalized, err := r.CompareAndSwap(
+		path,
+		observed,
+		&WorktreeEntry{
+			Path:       path,
+			Branch:     "feature/original",
+			Generation: "0123456789abcdef0123456789abcdef",
+		},
+	)
+
+	require.NoError(t, err)
+	assert.False(t, finalized)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Equal(t, "feature/replacement", entry.Branch)
+	assert.Equal(t, "fedcba9876543210fedcba9876543210", entry.Generation)
+	require.NotNil(t, entry.ExpiresAt)
+	assert.True(t, entry.ExpiresAt.Equal(replacementExpiry))
+}
+
+func TestRegistryCreationLockDistinguishesActiveAndAbandonedClaims(
+	t *testing.T,
+) {
+	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	first := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    registryPath,
+	}
+	second := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    registryPath,
+	}
+	worktreePath := filepath.Join(t.TempDir(), "creating-worktree")
+
+	releaseFirst, acquired, err := first.AcquireCreation(worktreePath)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	_, acquired, err = second.AcquireCreation(worktreePath)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+
+	require.NoError(t, releaseFirst())
+	releaseSecond, acquired, err := second.AcquireCreation(worktreePath)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NoError(t, releaseSecond())
+}
+
+func TestRegistryCreationLockKeepsIdentityAfterDestinationAppears(
+	t *testing.T,
+) {
+	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	first := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    registryPath,
+	}
+	second := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    registryPath,
+	}
+	canonicalParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(canonicalParent, aliasParent))
+	aliasPath := filepath.Join(aliasParent, "creating-worktree")
+	canonicalPath := filepath.Join(canonicalParent, "creating-worktree")
+
+	release, acquired, err := first.AcquireCreation(aliasPath)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NoError(t, os.Mkdir(canonicalPath, 0755))
+
+	_, acquired, err = second.AcquireCreation(canonicalPath)
+
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	require.NoError(t, release())
+}
+
+func TestRegistryReclaimsAliasedAbandonedCreation(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	canonicalParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(canonicalParent, aliasParent))
+	aliasPath := filepath.Join(aliasParent, "creating-worktree")
+	canonicalPath := filepath.Join(canonicalParent, "creating-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:                   aliasPath,
+		Branch:                 "feature/abandoned",
+		CreationToken:          "abandoned-creation",
+		UnreviewedRemoteSource: true,
+	}))
+	replacement := &WorktreeEntry{
+		Path:                   canonicalPath,
+		Branch:                 "feature/recovered",
+		CreationToken:          "replacement-creation",
+		UnreviewedRemoteSource: true,
+	}
+
+	reclaimed, err := r.ReclaimCreation(
+		canonicalPath,
+		"abandoned-creation",
+		replacement,
+	)
+
+	require.NoError(t, err)
+	require.True(t, reclaimed)
+	assert.Len(t, r.List(), 1)
+	require.NoError(t, os.Mkdir(canonicalPath, 0755))
+	completed, err := r.CompleteCreation(
+		canonicalPath,
+		"replacement-creation",
+		"0123456789abcdef0123456789abcdef",
+	)
+	require.NoError(t, err)
+	require.True(t, completed)
+	assert.Len(t, r.List(), 1)
+	entry, ok := r.Get(aliasPath)
+	require.True(t, ok)
+	assert.Equal(t, canonicalPath, entry.Path)
+	assert.Empty(t, entry.CreationToken)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", entry.Generation)
+}
+
+func TestRegistryCreationFinalizationPreservesAcknowledgement(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "created-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:                   path,
+		Branch:                 "feature/reviewed",
+		CreationToken:          "creation-owner",
+		UnreviewedRemoteSource: true,
+	}))
+	require.NoError(t, r.AcknowledgeRemoteSource(path))
+
+	finalized, err := r.CompleteCreation(
+		path,
+		"creation-owner",
+		"0123456789abcdef0123456789abcdef",
+	)
+
+	require.NoError(t, err)
+	require.True(t, finalized)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Empty(t, entry.CreationToken)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", entry.Generation)
+	assert.False(t, entry.UnreviewedRemoteSource)
+}
+
+func TestRegistryCreationAbortPreservesReviewedState(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "reviewed-worktree")
+	previous := &WorktreeEntry{
+		Path:                   path,
+		Branch:                 "feature/reviewed",
+		UnreviewedRemoteSource: false,
+	}
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:                   path,
+		Branch:                 "feature/replacement",
+		CreationToken:          "creation-owner",
+		UnreviewedRemoteSource: true,
+	}))
+
+	aborted, err := r.AbortCreation(path, "creation-owner", previous)
+
+	require.NoError(t, err)
+	require.True(t, aborted)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Equal(t, "feature/reviewed", entry.Branch)
+	assert.False(t, entry.UnreviewedRemoteSource)
+}
+
+func TestRegistryExpirationUpdatePreservesAcknowledgement(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "expiring-worktree")
+	generation := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:                   path,
+		Branch:                 "feature/reviewed",
+		Generation:             generation,
+		UnreviewedRemoteSource: true,
+	}))
+	require.NoError(t, r.AcknowledgeRemoteSource(path))
+	expiresAt := time.Now().Add(time.Hour)
+
+	updated, err := r.SetExpirationIfGeneration(
+		path,
+		generation,
+		"https://github.com/example/repository.git",
+		"feature/reviewed",
+		&expiresAt,
+	)
+
+	require.NoError(t, err)
+	require.True(t, updated)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.False(t, entry.UnreviewedRemoteSource)
+	assert.Equal(t, generation, entry.Generation)
+	assert.Equal(t, "https://github.com/example/repository.git", entry.Repository)
+	require.NotNil(t, entry.ExpiresAt)
+	assert.True(t, entry.ExpiresAt.Equal(expiresAt))
+}
+
+func TestRegistryCreationClaimRejectsChangedObservedEntry(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "reused-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:       path,
+		Branch:     "feature/observed",
+		Generation: "0123456789abcdef0123456789abcdef",
+	}))
+	observed, ok := r.Get(path)
+	require.True(t, ok)
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:       path,
+		Branch:     "feature/replacement",
+		Generation: "fedcba9876543210fedcba9876543210",
+	}))
+
+	claimed, err := r.CompareAndSwap(
+		path,
+		observed,
+		&WorktreeEntry{
+			Path:          path,
+			Branch:        "feature/claimant",
+			CreationToken: "claimant-creation",
+		},
+	)
+
+	require.NoError(t, err)
+	assert.False(t, claimed)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Equal(t, "feature/replacement", entry.Branch)
+	assert.Equal(t, "fedcba9876543210fedcba9876543210", entry.Generation)
+}
+
+func TestRegistryLegacyCleanupPreservesProvisionalCreation(t *testing.T) {
+	r := &Registry{
+		entries: make(map[string]*WorktreeEntry),
+		path:    filepath.Join(t.TempDir(), "registry.json"),
+	}
+	path := filepath.Join(t.TempDir(), "provisional-worktree")
+	require.NoError(t, r.Register(&WorktreeEntry{
+		Path:          path,
+		Branch:        "feature/creating",
+		CreationToken: "active-creation",
+	}))
+
+	removed, err := r.UnregisterIfGeneration(path, "")
+
+	require.NoError(t, err)
+	assert.False(t, removed)
+	entry, ok := r.Get(path)
+	require.True(t, ok)
+	assert.Equal(t, "active-creation", entry.CreationToken)
 }
 
 func TestWorktreeEntry_ExpiresAt_JSONMarshal(t *testing.T) {

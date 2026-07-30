@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/duration"
+	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
@@ -190,7 +191,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		var worktreePath string
+		var (
+			worktreePath       string
+			worktreeGeneration string
+		)
 		if remoteSource != "" {
 			branches, listErr := ctx.Git.ListBranches(true)
 			if listErr != nil {
@@ -203,13 +207,36 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return err
 			}
-			worktreePath, err = ctx.WorktreeManager.AddTracking(
-				branch,
-				remoteSource,
-				path,
-			)
+			if addExpires != "" {
+				worktreePath, worktreeGeneration, err =
+					ctx.WorktreeManager.AddTrackingWithGeneration(
+						branch,
+						remoteSource,
+						path,
+					)
+			} else {
+				worktreePath, err = ctx.WorktreeManager.AddTracking(
+					branch,
+					remoteSource,
+					path,
+				)
+			}
 		} else {
-			worktreePath, err = ctx.WorktreeManager.Add(branch, path, addBranch)
+			if addExpires != "" {
+				worktreePath, worktreeGeneration, err =
+					ctx.WorktreeManager.AddWithGeneration(
+						branch,
+						path,
+						addBranch,
+						worktree.AddOptions{},
+					)
+			} else {
+				worktreePath, err = ctx.WorktreeManager.Add(
+					branch,
+					path,
+					addBranch,
+				)
+			}
 		}
 		if err != nil {
 			return err
@@ -227,17 +254,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			t := time.Now().Add(expiresDuration)
 			expiresAt = &t
 
-			entry := &registry.WorktreeEntry{}
-			if existing, ok := reg.Get(worktreePath); ok {
-				*entry = *existing
-			}
-			entry.Repository = repoURL
-			entry.Branch = branch
-			entry.Path = worktreePath
-			entry.IsMain = false
-			entry.ExpiresAt = expiresAt
-
-			if err := reg.Register(entry); err != nil {
+			if err := registerWorktreeExpiration(
+				ctx.Git,
+				reg,
+				worktreePath,
+				worktreeGeneration,
+				repoURL,
+				branch,
+				expiresAt,
+			); err != nil {
 				return fmt.Errorf("failed to register worktree: %w", err)
 			}
 		}
@@ -259,6 +284,47 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	})(cmd, args)
+}
+
+func registerWorktreeExpiration(
+	g *git.Git,
+	reg *registry.Registry,
+	worktreePath string,
+	generation string,
+	repository string,
+	branch string,
+	expiresAt *time.Time,
+) error {
+	return g.WithWorktreeGeneration(
+		worktreePath,
+		generation,
+		func() error {
+			updated, err := reg.SetExpirationIfGeneration(
+				worktreePath,
+				generation,
+				repository,
+				branch,
+				expiresAt,
+			)
+			if err != nil {
+				return err
+			}
+			if !updated {
+				if observed, ok := reg.Get(worktreePath); ok &&
+					observed.CreationToken != "" {
+					return fmt.Errorf(
+						"worktree creation in progress for %s",
+						worktreePath,
+					)
+				}
+				return fmt.Errorf(
+					"registry ownership changed for %s",
+					worktreePath,
+				)
+			}
+			return nil
+		},
+	)
 }
 
 func resolveRemoteBranchSource(

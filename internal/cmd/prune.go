@@ -26,7 +26,8 @@ var pruneCmd = &cobra.Command{
 This command removes administrative files from .git/worktrees for worktrees
 whose working directories have been deleted from the filesystem.
 
-With --expired flag, removes worktrees that have passed their expiration date.`,
+With --expired, a live worktree is removed only when its recorded generation
+still matches. Legacy expiration records without a generation are skipped.`,
 	Example: `  # Clean up stale worktree information
   kwt prune
 
@@ -99,14 +100,42 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 				removed++
 				continue
 			}
-			if err := reg.Unregister(entry.Path); err != nil {
+			unregistered, err := reg.UnregisterIfGeneration(
+				entry.Path,
+				entry.Generation,
+			)
+			if err != nil {
 				fmt.Printf("Warning: failed to unregister %s: %v\n", entry.Path, err)
+				skipped++
+				continue
+			}
+			if !unregistered {
+				fmt.Printf(
+					"Skipping (registry generation changed): %s\n",
+					entry.Path,
+				)
 				skipped++
 				continue
 			}
 			fmt.Printf("Unregistered (already deleted): %s\n", entry.Path)
 			removed++
 			changed++
+			continue
+		}
+
+		if err := git.ValidateWorktreeGeneration(entry.Generation); err != nil {
+			if pruneDryRun {
+				fmt.Printf(
+					"Would skip (missing worktree generation): %s\n",
+					entry.Path,
+				)
+			} else {
+				fmt.Printf(
+					"Skipping (missing worktree generation): %s\n",
+					entry.Path,
+				)
+			}
+			skipped++
 			continue
 		}
 
@@ -137,7 +166,11 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 
 		// Remove the worktree using git
 		g := git.New(entry.Path)
-		if err := g.RemoveWorktree(entry.Path, pruneForce); err != nil {
+		if err := g.RemoveWorktree(
+			entry.Path,
+			pruneForce,
+			entry.Generation,
+		); err != nil {
 			fmt.Printf("Failed to remove worktree %s: %v\n", entry.Path, err)
 			skipped++
 			continue
@@ -145,7 +178,10 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 		changed++
 
 		// Unregister from registry
-		if err := reg.Unregister(entry.Path); err != nil {
+		if _, err := reg.UnregisterIfGeneration(
+			entry.Path,
+			entry.Generation,
+		); err != nil {
 			fmt.Printf("Warning: failed to unregister %s: %v\n", entry.Path, err)
 		}
 

@@ -2,6 +2,7 @@
 package registry
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"go.kenn.io/kwt/internal/utils"
 )
 
 // WorktreeEntry represents a registered worktree.
@@ -21,6 +23,8 @@ type WorktreeEntry struct {
 	IsMain                 bool       `json:"is_main"`
 	RegisteredAt           time.Time  `json:"registered_at"`
 	ExpiresAt              *time.Time `json:"expires_at,omitempty"`
+	Generation             string     `json:"generation,omitempty"`
+	CreationToken          string     `json:"creation_token,omitempty"`
 	UnreviewedRemoteSource bool       `json:"unreviewed_remote_source,omitempty"`
 }
 
@@ -194,6 +198,216 @@ func (r *Registry) Register(entry *WorktreeEntry) error {
 	})
 }
 
+// CompareAndSwap replaces a path only while its complete registry entry still
+// matches the caller's observed state. A nil expected entry claims an
+// unregistered path; a nil replacement removes the matched entry.
+func (r *Registry) CompareAndSwap(
+	path string,
+	expected *WorktreeEntry,
+	replacement *WorktreeEntry,
+) (bool, error) {
+	var copied *WorktreeEntry
+	if replacement != nil {
+		value := *replacement
+		if value.RegisteredAt.IsZero() {
+			value.RegisteredAt = time.Now()
+		}
+		copied = &value
+	}
+
+	replaced := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		keys := matchingRegistryKeys(entries, path)
+		if expected == nil {
+			if len(keys) != 0 {
+				return false
+			}
+		} else {
+			if len(keys) != 1 ||
+				!sameWorktreeEntry(entries[keys[0]], expected) {
+				return false
+			}
+		}
+		for _, key := range keys {
+			delete(entries, key)
+		}
+		if copied != nil {
+			entries[copied.Path] = copied
+		}
+		replaced = true
+		return true
+	})
+	return replaced, err
+}
+
+// AcquireCreation holds path's creation ownership until the returned release
+// function is called. The operating system releases the lock if the creating
+// process exits, allowing a later operation to recover its provisional entry.
+func (r *Registry) AcquireCreation(
+	path string,
+) (func() error, bool, error) {
+	if err := os.MkdirAll(filepath.Dir(r.path), 0755); err != nil {
+		return nil, false, fmt.Errorf(
+			"failed to create registry directory: %w",
+			err,
+		)
+	}
+	pathHash := sha256.Sum256([]byte(comparableRegistryPath(path)))
+	lockPath := filepath.Join(
+		filepath.Dir(r.path),
+		fmt.Sprintf(".creation-%x.lock", pathHash),
+	)
+	lock := flock.New(lockPath, flock.SetPermissions(0600))
+	acquired, err := lock.TryLock()
+	if err != nil {
+		return nil, false, fmt.Errorf("lock worktree creation: %w", err)
+	}
+	if !acquired {
+		return nil, false, nil
+	}
+	return lock.Unlock, true, nil
+}
+
+// CompleteCreation finalizes only the provisional owner named by token. Other
+// fields are retained so acknowledgement or metadata updates are not lost.
+func (r *Registry) CompleteCreation(
+	path string,
+	token string,
+	generation string,
+) (bool, error) {
+	completed := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		keys := matchingRegistryKeys(entries, path)
+		if len(keys) != 1 || entries[keys[0]].CreationToken != token {
+			return false
+		}
+		entry := entries[keys[0]]
+		entry.CreationToken = ""
+		entry.Generation = generation
+		completed = true
+		return true
+	})
+	return completed, err
+}
+
+// ReclaimCreation transfers an abandoned provisional entry to a new owner.
+func (r *Registry) ReclaimCreation(
+	path string,
+	token string,
+	replacement *WorktreeEntry,
+) (bool, error) {
+	copied := *replacement
+	if copied.RegisteredAt.IsZero() {
+		copied.RegisteredAt = time.Now()
+	}
+	reclaimed := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		keys := matchingRegistryKeys(entries, path)
+		if len(keys) != 1 || entries[keys[0]].CreationToken != token {
+			return false
+		}
+		delete(entries, keys[0])
+		entries[copied.Path] = &copied
+		reclaimed = true
+		return true
+	})
+	return reclaimed, err
+}
+
+// AbortCreation restores the state replaced by token, preserving any
+// acknowledgement made while creation was active.
+func (r *Registry) AbortCreation(
+	path string,
+	token string,
+	previous *WorktreeEntry,
+) (bool, error) {
+	aborted := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		keys := matchingRegistryKeys(entries, path)
+		if len(keys) != 1 || entries[keys[0]].CreationToken != token {
+			return false
+		}
+		current := entries[keys[0]]
+		delete(entries, keys[0])
+		if previous != nil {
+			restored := *previous
+			restored.UnreviewedRemoteSource =
+				previous.UnreviewedRemoteSource &&
+					current.UnreviewedRemoteSource
+			entries[restored.Path] = &restored
+		}
+		aborted = true
+		return true
+	})
+	return aborted, err
+}
+
+// SetExpirationIfGeneration updates expiration metadata only while path still
+// names generation. Unrelated fields are retained.
+func (r *Registry) SetExpirationIfGeneration(
+	path string,
+	generation string,
+	repository string,
+	branch string,
+	expiresAt *time.Time,
+) (bool, error) {
+	updated := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		keys := matchingRegistryKeys(entries, path)
+		if len(keys) == 0 {
+			entries[path] = &WorktreeEntry{
+				Repository:   repository,
+				Branch:       branch,
+				Path:         path,
+				RegisteredAt: time.Now(),
+				ExpiresAt:    expiresAt,
+				Generation:   generation,
+			}
+			updated = true
+			return true
+		}
+		if len(keys) != 1 {
+			return false
+		}
+		entry := entries[keys[0]]
+		if entry.CreationToken != "" ||
+			entry.Generation != generation {
+			return false
+		}
+		entry.Repository = repository
+		entry.Branch = branch
+		entry.Path = path
+		entry.IsMain = false
+		entry.ExpiresAt = expiresAt
+		updated = true
+		return true
+	})
+	return updated, err
+}
+
+func sameWorktreeEntry(left *WorktreeEntry, right *WorktreeEntry) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Repository == right.Repository &&
+		left.Branch == right.Branch &&
+		left.Path == right.Path &&
+		left.Hash == right.Hash &&
+		left.IsMain == right.IsMain &&
+		left.RegisteredAt.Equal(right.RegisteredAt) &&
+		sameOptionalTime(left.ExpiresAt, right.ExpiresAt) &&
+		left.Generation == right.Generation &&
+		left.CreationToken == right.CreationToken &&
+		left.UnreviewedRemoteSource == right.UnreviewedRemoteSource
+}
+
+func sameOptionalTime(left *time.Time, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Equal(*right)
+}
+
 // Unregister removes a worktree entry by path.
 func (r *Registry) Unregister(path string) error {
 	return r.mutate(func(entries map[string]*WorktreeEntry) bool {
@@ -203,6 +417,27 @@ func (r *Registry) Unregister(path string) error {
 		}
 		return len(keys) > 0
 	})
+}
+
+// UnregisterIfGeneration removes path only while its registry entry still
+// names the generation the caller acted on.
+func (r *Registry) UnregisterIfGeneration(
+	path string,
+	generation string,
+) (bool, error) {
+	removed := false
+	err := r.mutate(func(entries map[string]*WorktreeEntry) bool {
+		for _, key := range matchingRegistryKeys(entries, path) {
+			if entries[key].CreationToken != "" ||
+				entries[key].Generation != generation {
+				continue
+			}
+			delete(entries, key)
+			removed = true
+		}
+		return removed
+	})
+	return removed, err
 }
 
 // List returns all registered worktrees.
@@ -310,10 +545,22 @@ func comparableRegistryPath(path string) string {
 	if absolute, err := filepath.Abs(path); err == nil {
 		path = absolute
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	current := filepath.Clean(path)
+	var missing []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return utils.PathKey(resolved)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return utils.PathKey(path)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
 	}
-	return filepath.Clean(path)
 }
 
 // ListExpired returns all worktrees that have expired.

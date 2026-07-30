@@ -3,8 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -109,6 +109,7 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 		launchEntries     []*discovery.GlobalWorktreeEntry
 		sessions          []string
 		discoveryErr      error
+		registeredErr     error
 		launchErr         error
 		sessionsErr       error
 		startup           sync.WaitGroup
@@ -122,7 +123,8 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	}()
 	go func() {
 		defer startup.Done()
-		registeredEntries = b.discoverRegisteredProjectWorktrees()
+		registeredEntries, registeredErr =
+			b.discoverRegisteredProjectWorktrees()
 	}()
 	go func() {
 		defer startup.Done()
@@ -136,6 +138,12 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 
 	if discoveryErr != nil {
 		return nil, nil, fmt.Errorf("failed to discover worktrees: %w", discoveryErr)
+	}
+	if registeredErr != nil {
+		return nil, nil, fmt.Errorf(
+			"failed to discover registered project worktrees: %w",
+			registeredErr,
+		)
 	}
 	if launchErr != nil {
 		return nil, nil, fmt.Errorf("failed to discover launch repository worktrees: %w", launchErr)
@@ -305,10 +313,14 @@ func localFleetObservation(currentHost string, localRow dashboard.Row, now time.
 	return observation, true
 }
 
-func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWorktreeEntry {
+func (b *tuiBackend) discoverRegisteredProjectWorktrees() (
+	[]*discovery.GlobalWorktreeEntry,
+	error,
+) {
 	// Each project discovery spawns git subprocesses; run them concurrently
 	// and merge in config order so results stay deterministic.
 	results := make([][]*discovery.GlobalWorktreeEntry, len(b.cfg.Projects))
+	projectErrors := make([]error, len(b.cfg.Projects))
 	var wg sync.WaitGroup
 	for i, project := range b.cfg.Projects {
 		if project.Path == "" {
@@ -319,6 +331,9 @@ func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWor
 			defer wg.Done()
 			projectEntries, err := b.discoverProjectWorktrees(project.Path)
 			if err != nil {
+				if git.IsIncompleteInventory(err) {
+					projectErrors[i] = err
+				}
 				return
 			}
 			results[i] = applyProjectIdentityFallback(projectEntries, project)
@@ -330,7 +345,7 @@ func (b *tuiBackend) discoverRegisteredProjectWorktrees() []*discovery.GlobalWor
 	for _, projectEntries := range results {
 		entries = mergeTUIEntries(entries, projectEntries)
 	}
-	return entries
+	return entries, errors.Join(projectErrors...)
 }
 
 // registerLaunchProject persists the launch repository at most once per TUI
@@ -555,6 +570,9 @@ func discoverLaunchRepoWorktrees(launchDir string) ([]*discovery.GlobalWorktreeE
 	g := git.New(launchDir)
 	worktrees, err := g.ListWorktrees()
 	if err != nil {
+		if git.IsIncompleteInventory(err) {
+			return nil, err
+		}
 		return nil, nil
 	}
 
@@ -583,6 +601,8 @@ func discoverLaunchRepoWorktrees(launchDir string) ([]*discovery.GlobalWorktreeE
 			Path:           wt.Path,
 			CommitHash:     wt.CommitHash,
 			IsMain:         wt.IsMain,
+			CreatedAt:      wt.CreatedAt,
+			Generation:     wt.Generation,
 		})
 	}
 	return entries, nil
@@ -956,6 +976,7 @@ func (b *tuiBackend) PreviewWorktree(row dashboard.Row, branch string) (dashboar
 	entry.CommitHash = ""
 	entry.IsMain = false
 	entry.CreatedAt = time.Time{}
+	entry.Generation = ""
 	return dashboard.Row{
 		Entry:  &entry,
 		Status: unknownStatusForEntry(&entry),
@@ -997,11 +1018,12 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	}
 	manager := worktree.New(repo, cfg)
 	var (
-		path          string
-		branchCreated bool
+		path               string
+		worktreeGeneration string
+		branchCreated      bool
 	)
 	if branchExisted {
-		path, err = manager.AddWithOptions(
+		path, worktreeGeneration, err = manager.AddWithGeneration(
 			row.Fleet.Branch,
 			"",
 			false,
@@ -1011,7 +1033,7 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		var source string
 		source, err = resolveFetchedRemoteSource(repo, row.Fleet.Branch)
 		if err == nil {
-			path, err = manager.AddTracking(
+			path, worktreeGeneration, err = manager.AddTrackingWithGeneration(
 				row.Fleet.Branch,
 				source,
 				"",
@@ -1027,7 +1049,13 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		)
 		return "", syncErr
 	}
-	if err := b.verifyMaterializedHead(ctx, project.Path, path, row.Fleet); err != nil {
+	if err := b.verifyMaterializedHead(
+		ctx,
+		project.Path,
+		path,
+		worktreeGeneration,
+		row.Fleet,
+	); err != nil {
 		if branchCreated {
 			err = b.rollbackMaterializedBranch(
 				repo,
@@ -1087,7 +1115,13 @@ func (b *tuiBackend) rollbackMaterializedBranch(
 	return materializeErr
 }
 
-func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string, worktreePath string, info *dashboard.FleetInfo) error {
+func (b *tuiBackend) verifyMaterializedHead(
+	ctx context.Context,
+	repoRoot string,
+	worktreePath string,
+	worktreeGeneration string,
+	info *dashboard.FleetInfo,
+) error {
 	if info == nil || strings.TrimSpace(info.RemoteHead) == "" {
 		return nil
 	}
@@ -1097,6 +1131,7 @@ func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string
 		return b.failMaterializedHeadVerification(
 			repoRoot,
 			worktreePath,
+			worktreeGeneration,
 			fmt.Errorf(
 				"could not verify synced head for %s; push or fetch it first: %w",
 				info.Branch,
@@ -1111,6 +1146,7 @@ func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string
 	return b.failMaterializedHeadVerification(
 		repoRoot,
 		worktreePath,
+		worktreeGeneration,
 		fmt.Errorf(
 			"synced %s at %s, but hub reported head %s; push or fetch the reported commit first",
 			info.Branch,
@@ -1123,11 +1159,19 @@ func (b *tuiBackend) verifyMaterializedHead(ctx context.Context, repoRoot string
 func (b *tuiBackend) failMaterializedHeadVerification(
 	repoRoot string,
 	worktreePath string,
+	worktreeGeneration string,
 	verificationErr error,
 ) error {
+	if err := git.ValidateWorktreeGeneration(worktreeGeneration); err != nil {
+		return fmt.Errorf(
+			"%w (rejected worktree preserved because its generation is unavailable)",
+			verificationErr,
+		)
+	}
 	if err := worktree.New(git.New(repoRoot), b.cfg).Remove(
 		worktreePath,
 		true,
+		worktreeGeneration,
 	); err != nil {
 		return fmt.Errorf(
 			"%w (failed to remove rejected worktree: %v)",
@@ -1143,7 +1187,10 @@ func (b *tuiBackend) failMaterializedHeadVerification(
 			err,
 		)
 	}
-	if err := reg.Unregister(worktreePath); err != nil {
+	if _, err := reg.UnregisterIfGeneration(
+		worktreePath,
+		worktreeGeneration,
+	); err != nil {
 		return fmt.Errorf(
 			"%w (worktree removed, but failed to unregister it: %v)",
 			verificationErr,
@@ -1225,12 +1272,22 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, forc
 	if row.Entry.IsMain {
 		return fmt.Errorf("refusing to remove a main worktree")
 	}
+	generation := row.Entry.Generation
+	if strings.TrimSpace(generation) == "" {
+		return fmt.Errorf("worktree generation unavailable; refresh before removing")
+	}
+	registryRecord := registeredWorktreeForRemoval(row.Entry.Path)
 
 	repoRoot, err := b.repositoryRootForRow(row)
 	if err != nil {
 		return err
 	}
-	if err := b.removeWorktreeFromRoot(repoRoot, row.Entry.Path, force); err != nil {
+	if err := b.removeWorktreeFromRoot(
+		repoRoot,
+		row.Entry.Path,
+		force,
+		generation,
+	); err != nil {
 		if strings.Contains(err.Error(), "contains modified or untracked files") ||
 			strings.Contains(err.Error(), "has local changes") {
 			return fmt.Errorf("worktree has uncommitted changes")
@@ -1238,9 +1295,7 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, forc
 		return err
 	}
 
-	if reg, err := registry.New(); err == nil {
-		_ = reg.Unregister(row.Entry.Path)
-	}
+	unregisterWorktreeRecord(registryRecord)
 
 	publishTUIFleetBestEffort(ctx, b.cfg)
 
@@ -1257,6 +1312,12 @@ func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {
 
 	repoRoot, err := git.New(row.Entry.Path).GetMainRepositoryPath()
 	if err == nil {
+		if identityErr := b.validateRepositoryRootForRow(
+			repoRoot,
+			row,
+		); identityErr != nil {
+			return "", identityErr
+		}
 		return repoRoot, nil
 	}
 	directErr := err
@@ -1268,12 +1329,63 @@ func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {
 			}
 			repoRoot, err := git.New(project.Path).GetMainRepositoryPath()
 			if err == nil {
+				if identityErr := b.validateRepositoryRootForRow(
+					repoRoot,
+					row,
+				); identityErr != nil {
+					return "", identityErr
+				}
 				return repoRoot, nil
 			}
 		}
 	}
 
 	return "", fmt.Errorf("failed to find repository root: %w", directErr)
+}
+
+func (b *tuiBackend) validateRepositoryRootForRow(
+	repoRoot string,
+	row dashboard.Row,
+) error {
+	if row.Entry == nil || len(rowRepositoryIdentityCandidates(
+		row.Entry.RepositoryInfo,
+	)) == 0 {
+		return nil
+	}
+	if b.cfg != nil {
+		for _, project := range b.cfg.Projects {
+			if !projectMatchesRow(project, row) {
+				continue
+			}
+			projectRoot, err := git.New(project.Path).GetMainRepositoryPath()
+			if err == nil &&
+				utils.PathKey(projectRoot) == utils.PathKey(repoRoot) {
+				return nil
+			}
+		}
+	}
+
+	var projects []models.Project
+	if b.cfg != nil {
+		projects = b.cfg.Projects
+	}
+	liveInfo, err := worktree.RepositoryInfoWithProjects(
+		git.New(repoRoot),
+		projects,
+	)
+	if err == nil {
+		for _, candidate := range rowRepositoryIdentityCandidates(
+			row.Entry.RepositoryInfo,
+		) {
+			if sameRepositoryIdentity(liveInfo.FullPath, candidate) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf(
+		"repository identity changed for %s; refresh before removing",
+		row.Entry.Path,
+	)
 }
 
 func projectMatchesRow(project models.Project, row dashboard.Row) bool {
@@ -1314,123 +1426,17 @@ func rowRepositoryIdentityCandidates(info *url.RepositoryInfo) []string {
 	return candidates
 }
 
-func (b *tuiBackend) removeWorktreeFromRoot(repoRoot string, worktreePath string, force bool) error {
-	err := worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
-	if err == nil || !isWorktreeValidationError(err) {
-		return err
-	}
-
-	if repairErr := repairLinkedWorktreeGitFile(repoRoot, worktreePath); repairErr != nil {
-		return fmt.Errorf("%w (failed to repair worktree metadata: %v)", err, repairErr)
-	}
-	return worktree.New(git.New(repoRoot), b.cfg).Remove(worktreePath, force)
-}
-
-func isWorktreeValidationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	text := err.Error()
-	return strings.Contains(text, "validation failed, cannot remove working tree") &&
-		strings.Contains(text, ".git")
-}
-
-func repairLinkedWorktreeGitFile(repoRoot string, worktreePath string) error {
-	gitFilePath := filepath.Join(worktreePath, ".git")
-	info, err := os.Lstat(gitFilePath)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symbolic link", gitFilePath)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", gitFilePath)
-	}
-
-	adminDir, err := findLinkedWorktreeAdminDir(repoRoot, worktreePath)
-	if err != nil {
-		return err
-	}
-
-	mode := info.Mode().Perm()
-	if mode == 0 {
-		mode = 0644
-	}
-	return writeReplacementFile(gitFilePath, []byte("gitdir: "+adminDir+"\n"), mode)
-}
-
-func writeReplacementFile(path string, data []byte, mode os.FileMode) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".git.repair-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	n, err := tmp.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	removeTmp = false
-	return nil
-}
-
-func findLinkedWorktreeAdminDir(repoRoot string, worktreePath string) (string, error) {
-	commonDir, err := git.New(repoRoot).RunCommand("rev-parse", "--git-common-dir")
-	if err != nil {
-		return "", err
-	}
-	commonDir = strings.TrimSpace(commonDir)
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(repoRoot, commonDir)
-	}
-
-	worktreesDir := filepath.Join(commonDir, "worktrees")
-	entries, err := os.ReadDir(worktreesDir)
-	if err != nil {
-		return "", err
-	}
-
-	wantGitFile := filepath.Join(worktreePath, ".git")
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		adminDir := filepath.Join(worktreesDir, entry.Name())
-		gitdirPath := filepath.Join(adminDir, "gitdir")
-		data, err := os.ReadFile(gitdirPath)
-		if err != nil {
-			continue
-		}
-		gotGitFile := strings.TrimSpace(string(data))
-		if !filepath.IsAbs(gotGitFile) {
-			gotGitFile = filepath.Join(adminDir, gotGitFile)
-		}
-		if samePath(gotGitFile, wantGitFile) {
-			return adminDir, nil
-		}
-	}
-
-	return "", fmt.Errorf("no worktree admin dir found for %s", worktreePath)
+func (b *tuiBackend) removeWorktreeFromRoot(
+	repoRoot string,
+	worktreePath string,
+	force bool,
+	generation string,
+) error {
+	return worktree.New(git.New(repoRoot), b.cfg).Remove(
+		worktreePath,
+		force,
+		generation,
+	)
 }
 
 func samePath(a string, b string) bool {
@@ -1440,7 +1446,7 @@ func samePath(a string, b string) bool {
 }
 
 func cleanComparablePath(path string) string {
-	return utils.CanonicalPath(path)
+	return utils.PathKey(path)
 }
 
 func (b *tuiBackend) KillSession(row dashboard.Row) error {

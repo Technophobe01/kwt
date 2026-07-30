@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	configpkg "go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/registry"
+	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -36,21 +38,40 @@ type mockGit struct {
 }
 
 type mockRemoteSourceState struct {
-	entries map[string]*registry.WorktreeEntry
+	entries        map[string]*registry.WorktreeEntry
+	creationActive bool
 }
 
-func (m *mockRemoteSourceState) Register(entry *registry.WorktreeEntry) error {
+type materializedAddError struct {
+	error
+}
+
+func (materializedAddError) WorktreeCreated() bool {
+	return true
+}
+
+func (m *mockRemoteSourceState) CompareAndSwap(
+	path string,
+	expected *registry.WorktreeEntry,
+	replacement *registry.WorktreeEntry,
+) (bool, error) {
+	entry, ok := m.entries[path]
+	if expected == nil {
+		if ok {
+			return false, nil
+		}
+	} else if !ok || !reflect.DeepEqual(entry, expected) {
+		return false, nil
+	}
 	if m.entries == nil {
 		m.entries = make(map[string]*registry.WorktreeEntry)
 	}
-	copied := *entry
-	m.entries[entry.Path] = &copied
-	return nil
-}
-
-func (m *mockRemoteSourceState) Unregister(path string) error {
 	delete(m.entries, path)
-	return nil
+	if replacement != nil {
+		copied := *replacement
+		m.entries[replacement.Path] = &copied
+	}
+	return true, nil
 }
 
 func (m *mockRemoteSourceState) Get(
@@ -64,11 +85,85 @@ func (m *mockRemoteSourceState) Get(
 	return &copied, true
 }
 
+func (m *mockRemoteSourceState) AcquireCreation(
+	_ string,
+) (func() error, bool, error) {
+	if m.creationActive {
+		return nil, false, nil
+	}
+	m.creationActive = true
+	return func() error {
+		m.creationActive = false
+		return nil
+	}, true, nil
+}
+
+func (m *mockRemoteSourceState) CompleteCreation(
+	path string,
+	token string,
+	generation string,
+) (bool, error) {
+	entry, ok := m.entries[path]
+	if !ok || entry.CreationToken != token {
+		return false, nil
+	}
+	entry.CreationToken = ""
+	entry.Generation = generation
+	return true, nil
+}
+
+func (m *mockRemoteSourceState) ReclaimCreation(
+	path string,
+	token string,
+	replacement *registry.WorktreeEntry,
+) (bool, error) {
+	entry, ok := m.entries[path]
+	if !ok || entry.CreationToken != token {
+		return false, nil
+	}
+	copied := *replacement
+	m.entries[path] = &copied
+	return true, nil
+}
+
+func (m *mockRemoteSourceState) AbortCreation(
+	path string,
+	token string,
+	previous *registry.WorktreeEntry,
+) (bool, error) {
+	entry, ok := m.entries[path]
+	if !ok || entry.CreationToken != token {
+		return false, nil
+	}
+	delete(m.entries, path)
+	if previous != nil {
+		copied := *previous
+		copied.UnreviewedRemoteSource =
+			previous.UnreviewedRemoteSource &&
+				entry.UnreviewedRemoteSource
+		m.entries[path] = &copied
+	}
+	return true, nil
+}
+
 func (m *mockGit) ListWorktrees() ([]models.Worktree, error) {
 	if m.listError != nil {
 		return nil, m.listError
 	}
 	return m.worktrees, nil
+}
+
+func (m *mockGit) ReadWorktreeGeneration(path string) (string, error) {
+	for _, worktree := range m.worktrees {
+		if utils.PathKey(worktree.Path) != utils.PathKey(path) {
+			continue
+		}
+		if worktree.Generation == "" {
+			return "", errors.New("worktree generation is not initialized")
+		}
+		return worktree.Generation, nil
+	}
+	return "", errors.New("worktree not found")
 }
 
 func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
@@ -82,6 +177,17 @@ func (m *mockGit) AddWorktree(path, branch string, createBranch bool) error {
 	return nil
 }
 
+func (m *mockGit) AddWorktreeWithGeneration(
+	path,
+	branch string,
+	createBranch bool,
+) (string, error) {
+	if err := m.AddWorktree(path, branch, createBranch); err != nil {
+		return "", err
+	}
+	return "0123456789abcdef0123456789abcdef", nil
+}
+
 func (m *mockGit) AddWorktreeTracking(
 	path, branch, remoteBranch string,
 	protectedNames []string,
@@ -91,11 +197,41 @@ func (m *mockGit) AddWorktreeTracking(
 	}
 	m.trackingSource = remoteBranch
 	m.protectedNames = append([]string(nil), protectedNames...)
+	for i := range m.worktrees {
+		if utils.PathKey(m.worktrees[i].Path) == utils.PathKey(path) &&
+			m.worktrees[i].Generation == "" {
+			m.worktrees[i].Branch = branch
+			return nil
+		}
+	}
 	m.worktrees = append(m.worktrees, models.Worktree{
 		Path:   path,
 		Branch: branch,
 	})
 	return nil
+}
+
+func (m *mockGit) AddWorktreeTrackingWithGeneration(
+	path,
+	branch,
+	remoteBranch string,
+	protectedNames []string,
+) (string, error) {
+	if err := m.AddWorktreeTracking(
+		path,
+		branch,
+		remoteBranch,
+		protectedNames,
+	); err != nil {
+		return "", err
+	}
+	generation := "0123456789abcdef0123456789abcdef"
+	for i := range m.worktrees {
+		if utils.PathKey(m.worktrees[i].Path) == utils.PathKey(path) {
+			m.worktrees[i].Generation = generation
+		}
+	}
+	return generation, nil
 }
 
 func (m *mockGit) AddWorktreeExisting(
@@ -114,7 +250,22 @@ func (m *mockGit) AddWorktreeExisting(
 	return nil
 }
 
-func (m *mockGit) RemoveWorktree(path string, force bool) error {
+func (m *mockGit) AddWorktreeExistingWithGeneration(
+	path,
+	branch string,
+	protectedNames []string,
+) (string, error) {
+	if err := m.AddWorktreeExisting(path, branch, protectedNames); err != nil {
+		return "", err
+	}
+	return "0123456789abcdef0123456789abcdef", nil
+}
+
+func (m *mockGit) RemoveWorktree(
+	path string,
+	force bool,
+	ifGeneration string,
+) error {
 	if m.removeError != nil {
 		return m.removeError
 	}
@@ -299,6 +450,11 @@ func TestManagerAddTrackingUsesRemoteSource(t *testing.T) {
 	)
 	require.Contains(t, state.entries, worktreePath)
 	assert.True(t, state.entries[worktreePath].UnreviewedRemoteSource)
+	assert.Equal(
+		t,
+		"0123456789abcdef0123456789abcdef",
+		state.entries[worktreePath].Generation,
+	)
 	assert.NoFileExists(t, filepath.Join(worktreePath, "copy-me"))
 	assert.NoFileExists(t, filepath.Join(worktreePath, "setup-ran"))
 }
@@ -342,22 +498,36 @@ func TestManagerAddExistingMarksSourceUnreviewedAndSkipsSetup(t *testing.T) {
 	)
 	require.Contains(t, state.entries, worktreePath)
 	assert.True(t, state.entries[worktreePath].UnreviewedRemoteSource)
+	assert.Equal(
+		t,
+		"0123456789abcdef0123456789abcdef",
+		state.entries[worktreePath].Generation,
+	)
 	assert.NoFileExists(t, filepath.Join(worktreePath, "copy-me"))
 }
 
 func TestManagerAddTrackingRestoresExistingMarkerAfterGitFailure(t *testing.T) {
 	worktreePath := t.TempDir()
 	future := time.Now().Add(time.Hour)
+	generation := "fedcba9876543210fedcba9876543210"
 	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
 		worktreePath: {
 			Path:                   worktreePath,
 			Branch:                 "feature/existing",
 			Repository:             "github.com/acme/widget",
 			ExpiresAt:              &future,
-			UnreviewedRemoteSource: true,
+			Generation:             generation,
+			UnreviewedRemoteSource: false,
 		},
 	}}
-	manager := New(&mockGit{addError: errors.New("already checked out")}, &models.Config{})
+	manager := New(&mockGit{
+		addError: errors.New("already checked out"),
+		worktrees: []models.Worktree{{
+			Path:       worktreePath,
+			Branch:     "feature/existing",
+			Generation: generation,
+		}},
+	}, &models.Config{})
 	manager.openRemoteSourceState = func() (remoteSourceState, error) {
 		return state, nil
 	}
@@ -371,9 +541,10 @@ func TestManagerAddTrackingRestoresExistingMarkerAfterGitFailure(t *testing.T) {
 	require.Error(t, err)
 	entry, ok := state.entries[worktreePath]
 	require.True(t, ok, "failed repeated add must retain the safety marker")
-	assert.True(t, entry.UnreviewedRemoteSource)
+	assert.False(t, entry.UnreviewedRemoteSource)
 	assert.Equal(t, "github.com/acme/widget", entry.Repository)
 	assert.Equal(t, &future, entry.ExpiresAt)
+	assert.Equal(t, generation, entry.Generation)
 }
 
 func TestManagerAddTrackingReplacesStaleMetadataAfterSuccess(t *testing.T) {
@@ -411,7 +582,9 @@ func TestManagerAddTrackingReplacesStaleMetadataAfterSuccess(t *testing.T) {
 func TestManagerAddTrackingRetainsMarkerWhenFailedCheckoutPathExists(t *testing.T) {
 	worktreePath := t.TempDir()
 	state := &mockRemoteSourceState{}
-	manager := New(&mockGit{addError: errors.New("checkout failed")}, &models.Config{})
+	manager := New(&mockGit{addError: materializedAddError{
+		error: errors.New("checkout failed"),
+	}}, &models.Config{})
 	manager.openRemoteSourceState = func() (remoteSourceState, error) {
 		return state, nil
 	}
@@ -425,6 +598,145 @@ func TestManagerAddTrackingRetainsMarkerWhenFailedCheckoutPathExists(t *testing.
 	require.Error(t, err)
 	entry, ok := state.entries[worktreePath]
 	require.True(t, ok, "a possibly materialized checkout must remain isolated")
+	assert.True(t, entry.UnreviewedRemoteSource)
+	assert.Empty(t, entry.CreationToken)
+}
+
+func TestManagerAddTrackingRejectsActiveCreationMarker(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "creating-worktree")
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:          worktreePath,
+			Branch:        "feature/creating",
+			CreationToken: "active-creation",
+		},
+	}, creationActive: true}
+	mockG := &mockGit{}
+	manager := New(mockG, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/competing",
+		"refs/remotes/origin/feature/competing",
+		worktreePath,
+	)
+
+	require.ErrorContains(t, err, "worktree creation in progress")
+	assert.Empty(t, mockG.worktrees)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok)
+	assert.Equal(t, "active-creation", entry.CreationToken)
+}
+
+func TestManagerAddTrackingRecoversAbandonedCreationMarker(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "abandoned-worktree")
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:          worktreePath,
+			Branch:        "feature/abandoned",
+			CreationToken: "abandoned-creation",
+		},
+	}}
+	mockG := &mockGit{}
+	manager := New(mockG, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	path, err := manager.AddTracking(
+		"feature/recovered",
+		"refs/remotes/origin/feature/recovered",
+		worktreePath,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, worktreePath, path)
+	assert.Len(t, mockG.worktrees, 1)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok)
+	assert.Equal(t, "feature/recovered", entry.Branch)
+	assert.Empty(t, entry.CreationToken)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef", entry.Generation)
+	assert.True(t, entry.UnreviewedRemoteSource)
+}
+
+func TestManagerAddTrackingFinalizesAbandonedCompletedCheckout(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "completed-worktree")
+	generation := "fedcba9876543210fedcba9876543210"
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:                   worktreePath,
+			Branch:                 "feature/completed",
+			CreationToken:          "abandoned-creation",
+			UnreviewedRemoteSource: true,
+		},
+	}}
+	mockG := &mockGit{worktrees: []models.Worktree{{
+		Path:       worktreePath,
+		Branch:     "feature/completed",
+		Generation: generation,
+	}}}
+	manager := New(mockG, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/replacement",
+		"refs/remotes/origin/feature/replacement",
+		worktreePath,
+	)
+
+	require.ErrorContains(t, err, "recovered completed remote-source worktree")
+	assert.Len(t, mockG.worktrees, 1, "recovery must not replace the checkout")
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok)
+	assert.Equal(t, "feature/completed", entry.Branch)
+	assert.Empty(t, entry.CreationToken)
+	assert.Equal(t, generation, entry.Generation)
+	assert.True(t, entry.UnreviewedRemoteSource)
+}
+
+func TestManagerAddTrackingPreservesAbandonedGenerationlessCheckout(
+	t *testing.T,
+) {
+	worktreePath := filepath.Join(t.TempDir(), "incomplete-worktree")
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	state := &mockRemoteSourceState{entries: map[string]*registry.WorktreeEntry{
+		worktreePath: {
+			Path:                   worktreePath,
+			Branch:                 "feature/incomplete",
+			CreationToken:          "abandoned-creation",
+			UnreviewedRemoteSource: true,
+		},
+	}}
+	mockG := &mockGit{
+		addError: errors.New("already registered without a generation"),
+		worktrees: []models.Worktree{{
+			Path:   worktreePath,
+			Branch: "feature/incomplete",
+		}},
+	}
+	manager := New(mockG, &models.Config{})
+	manager.openRemoteSourceState = func() (remoteSourceState, error) {
+		return state, nil
+	}
+
+	_, err := manager.AddTracking(
+		"feature/incomplete",
+		"refs/remotes/origin/feature/incomplete",
+		worktreePath,
+	)
+
+	require.ErrorContains(t, err, "already registered without a generation")
+	assert.Empty(t, mockG.trackingSource)
+	entry, ok := state.entries[worktreePath]
+	require.True(t, ok)
+	assert.Empty(t, entry.CreationToken)
+	assert.Empty(t, entry.Generation)
+	assert.Equal(t, "feature/incomplete", entry.Branch)
 	assert.True(t, entry.UnreviewedRemoteSource)
 }
 
@@ -467,7 +779,7 @@ func TestManagerRemove(t *testing.T) {
 	m := New(mockG, &models.Config{})
 
 	// Remove worktree
-	err := m.Remove("/path/to/worktree1", false)
+	err := m.Remove("/path/to/worktree1", false, "")
 	if err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
@@ -639,6 +951,105 @@ func TestManagerGetMatchingWorktrees(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagerGetMatchingWorktreesResolvesEquivalentPaths(t *testing.T) {
+	target := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "worktree-alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	m := New(&mockGit{
+		worktrees: []models.Worktree{{
+			Path:   target,
+			Branch: "feature/equivalent-path",
+		}},
+	}, &models.Config{})
+
+	matches, err := m.GetMatchingWorktrees(alias)
+
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "feature/equivalent-path", matches[0].Branch)
+}
+
+func TestManagerGetMatchingWorktreesPrefersExactPath(t *testing.T) {
+	exactPath := filepath.Join(t.TempDir(), "task")
+	m := New(&mockGit{
+		worktrees: []models.Worktree{
+			{Path: exactPath, Branch: "feature/task"},
+			{Path: exactPath + "-old", Branch: "feature/task-old"},
+		},
+	}, &models.Config{})
+
+	matches, err := m.GetMatchingWorktrees(exactPath)
+
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "feature/task", matches[0].Branch)
+}
+
+func TestManagerGetMatchingWorktreesPrefersCaseFoldedWindowsExactPath(
+	t *testing.T,
+) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path comparison")
+	}
+	m := New(&mockGit{
+		worktrees: []models.Worktree{
+			{Path: `C:\work\foo`, Branch: "feature/foo"},
+			{Path: `C:\work\foo-old`, Branch: "feature/foo-old"},
+		},
+	}, &models.Config{})
+
+	matches, err := m.GetMatchingWorktrees(`c:\WORK\foo`)
+
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, `C:\work\foo`, matches[0].Path)
+}
+
+func TestManagerGetMatchingWorktreesPrefersAbsolutePathOverBranchSubstring(
+	t *testing.T,
+) {
+	exactPath := filepath.Join(t.TempDir(), "task")
+	unrelatedPath := filepath.Join(t.TempDir(), "unrelated")
+	m := New(&mockGit{
+		worktrees: []models.Worktree{
+			{Path: exactPath, Branch: "feature/task"},
+			{
+				Path:   unrelatedPath,
+				Branch: "topic" + filepath.ToSlash(exactPath),
+			},
+		},
+	}, &models.Config{})
+
+	matches, err := m.GetMatchingWorktrees(exactPath)
+
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, exactPath, matches[0].Path)
+}
+
+func TestManagerGetMatchingWorktreesPrefersBranchOverRelativeSymlink(t *testing.T) {
+	currentPath := t.TempDir()
+	mainPath := t.TempDir()
+	t.Chdir(currentPath)
+	if err := os.Symlink(".", "main"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	m := New(&mockGit{
+		worktrees: []models.Worktree{
+			{Path: currentPath, Branch: "feature/current"},
+			{Path: mainPath, Branch: "main"},
+		},
+	}, &models.Config{})
+
+	matches, err := m.GetMatchingWorktrees("main")
+
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, mainPath, matches[0].Path)
 }
 
 func TestManagerValidateWorktreePath(t *testing.T) {
