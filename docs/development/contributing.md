@@ -67,7 +67,13 @@ make docs-serve
 
 `make docs-check` runs the same strict Zensical build used for docs
 verification. Pull requests run that check in CI. `make docs-deploy` deploys the
-docs site with Vercel.
+generated `docs/site` output to the `kwt-docs` Vercel project. Override
+`VERCEL_SCOPE` or `VERCEL_PROJECT` when deploying a fork.
+
+Website binaries live on the orphan `website-assets` branch rather than in the
+documentation history. The docs targets fetch and materialize the required
+asset set into the ignored `docs/assets` directory before Zensical runs. Update
+and push that branch before building or deploying a refreshed screenshot.
 
 ## Releases
 
