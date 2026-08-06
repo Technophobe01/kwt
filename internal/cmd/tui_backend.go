@@ -1282,17 +1282,18 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, forc
 	if err != nil {
 		return err
 	}
-	if err := b.removeWorktreeFromRoot(
+	removalErr := b.removeWorktreeFromRoot(
 		repoRoot,
 		row.Entry.Path,
 		force,
 		generation,
-	); err != nil {
-		if strings.Contains(err.Error(), "contains modified or untracked files") ||
-			strings.Contains(err.Error(), "has local changes") {
+	)
+	if removalErr != nil && !git.WorktreeWasRemoved(removalErr) {
+		if strings.Contains(removalErr.Error(), "contains modified or untracked files") ||
+			strings.Contains(removalErr.Error(), "has local changes") {
 			return fmt.Errorf("worktree has uncommitted changes")
 		}
-		return err
+		return removalErr
 	}
 
 	unregisterWorktreeRecord(registryRecord)
@@ -1300,9 +1301,14 @@ func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, forc
 	publishTUIFleetBestEffort(ctx, b.cfg)
 
 	if row.SessionLive && row.SessionName != "" {
-		return b.tmux.KillSession(row.SessionName)
+		if err := b.tmux.KillSession(row.SessionName); err != nil {
+			if removalErr != nil {
+				return errors.Join(removalErr, err)
+			}
+			return err
+		}
 	}
-	return nil
+	return removalErr
 }
 
 func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {

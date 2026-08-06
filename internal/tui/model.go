@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -104,6 +105,7 @@ type Model struct {
 	showHelp            bool
 	message             string
 	err                 error
+	stickyError         bool
 	handoff             Handoff
 	anchorPath          string
 	// creating holds the destinations of worktree creations whose command has
@@ -390,6 +392,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	m.fetching = false
 	if msg.err != nil {
 		m.err = msg.err
+		m.stickyError = false
 		return m.startPendingRefresh()
 	}
 	m.warnings = msg.warnings
@@ -439,7 +442,9 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 		m.cursor = anchorCursorByPath(oldRows, oldCursor, newRows)
 	}
 	m.cursor = clampCursor(m.cursor, len(newRows))
-	m.err = nil
+	if !m.stickyError {
+		m.err = nil
+	}
 	if m.pendingRefresh {
 		return m.startPendingRefresh()
 	}
@@ -476,18 +481,20 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 			m = m.dropPendingRow(msg.pendingPath)
 		}
 		m.err = msg.err
+		m.stickyError = msg.refresh
 		m.message = ""
-		return m, nil
-	}
-	if msg.pendingPath != "" && msg.anchorPath != "" && msg.pendingPath != msg.anchorPath {
-		// The preview mispredicted the destination; drop the row it added so it
-		// cannot outlive the creation it stood in for.
-		m = m.dropPendingRow(msg.pendingPath)
-	}
-	m.err = nil
-	m.message = msg.message
-	if msg.anchorPath != "" {
-		m.anchorPath = msg.anchorPath
+	} else {
+		if msg.pendingPath != "" && msg.anchorPath != "" && msg.pendingPath != msg.anchorPath {
+			// The preview mispredicted the destination; drop the row it added so it
+			// cannot outlive the creation it stood in for.
+			m = m.dropPendingRow(msg.pendingPath)
+		}
+		m.err = nil
+		m.stickyError = false
+		m.message = msg.message
+		if msg.anchorPath != "" {
+			m.anchorPath = msg.anchorPath
+		}
 	}
 	if msg.refresh && m.fetching {
 		m.pendingRefresh = true
@@ -507,6 +514,7 @@ func (m Model) applyBranchList(msg branchListMsg) (Model, tea.Cmd) {
 	m.branchesLoading = false
 	if msg.err != nil {
 		m.err = msg.err
+		m.stickyError = false
 		return m, nil
 	}
 	m.branches = append([]models.Branch(nil), msg.branches...)
@@ -630,6 +638,7 @@ func (m Model) cancelFleetMerge() Model {
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.err != nil {
 		m.err = nil
+		m.stickyError = false
 	}
 
 	if m.showHelp {
@@ -794,6 +803,7 @@ func (m Model) startCreateWorktree(
 	planned, err := m.backend.PreviewWorktree(row, branch)
 	if err != nil {
 		m.err = err
+		m.stickyError = false
 		m.message = ""
 		return m, nil
 	}
@@ -832,6 +842,7 @@ func (m Model) startCreateWorktree(
 func (m Model) handlePaste(msg tea.PasteMsg) (Model, tea.Cmd) {
 	if m.err != nil {
 		m.err = nil
+		m.stickyError = false
 	}
 	if m.showHelp || m.confirm.kind != confirmNone || m.inputMode == inputNone {
 		return m, nil
@@ -1340,7 +1351,10 @@ func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
 func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.backend.RemoveWorktree(context.Background(), row, force); err != nil {
-			return actionDoneMsg{err: err}
+			return actionDoneMsg{
+				err:     err,
+				refresh: git.WorktreeWasRemoved(err),
+			}
 		}
 		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
 	}
