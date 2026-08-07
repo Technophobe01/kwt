@@ -376,19 +376,14 @@ func (b *tuiBackend) workspaceRows(sessions []string) []dashboard.Row {
 		return nil
 	}
 	rows := make([]dashboard.Row, 0, len(b.cfg.Workspaces))
-	for _, workspace := range b.cfg.Workspaces {
-		sessionName := tmux.DirWorkspaceSessionName(workspace.Name, workspace.Path)
-		sessionLive := false
-		// Match by path hash so a renamed workspace still finds (and later
-		// attaches to) its live session created under the old name.
-		if live, ok := tmux.MatchDirWorkspaceSession(sessions, workspace.Path); ok {
-			sessionName = live
-			sessionLive = true
-		}
+	for _, record := range directoryWorkspaceRecords(b.cfg.Workspaces, sessions) {
 		rows = append(rows, dashboard.Row{
-			Workspace:   &dashboard.WorkspaceInfo{Name: workspace.Name, Path: workspace.Path},
-			SessionName: sessionName,
-			SessionLive: sessionLive,
+			Workspace: &dashboard.WorkspaceInfo{
+				Name: record.Name,
+				Path: record.Path,
+			},
+			SessionName: record.SessionName,
+			SessionLive: record.SessionLive,
 		})
 	}
 	return rows
@@ -1519,19 +1514,27 @@ func rowPaneRoot(row dashboard.Row) string {
 }
 
 func (b *tuiBackend) resolveLayout(row dashboard.Row, layoutName string, interactive bool) (models.Layout, error) {
+	if row.Workspace != nil {
+		return resolveDirectoryWorkspaceLayout(
+			b.cfg,
+			models.Workspace{
+				Name: row.Workspace.Name,
+				Path: row.Workspace.Path,
+			},
+			layoutName,
+			false,
+			nil,
+			interactive,
+		)
+	}
 	var layout models.Layout
 	var err error
 	if layoutName != "" {
 		layout, err = tmux.ResolveLayout(b.cfg.Layouts, layoutName, false, "", nil)
 	} else {
-		var layoutRoot string
-		if row.Workspace != nil {
-			layoutRoot = row.Workspace.Path
-		} else {
-			layoutRoot, err = b.repositoryRootForRow(row)
-			if err != nil {
-				return models.Layout{}, err
-			}
+		layoutRoot, rootErr := b.repositoryRootForRow(row)
+		if rootErr != nil {
+			return models.Layout{}, rootErr
 		}
 		var targetDefault string
 		targetDefault, err = config.LoadRepoLayoutDefault(layoutRoot, interactive)
