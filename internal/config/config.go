@@ -42,6 +42,9 @@ func defaultAgents() map[string]string {
 }
 
 func applyGlobalDefaults(target *viper.Viper) {
+	target.SetDefault("daemon.idle_timeout", 2*time.Hour)
+	target.SetDefault("daemon.auto_restart", "newer")
+	target.SetDefault("daemon.replacement_grace", 5*time.Minute)
 	target.SetDefault("cd.launch_shell", true)
 	target.SetDefault("worktree.basedir", "~/.kwt/worktrees")
 	target.SetDefault("worktree.auto_mkdir", true)
@@ -53,6 +56,20 @@ func applyGlobalDefaults(target *viper.Viper) {
 		"/": "-",
 		":": "-",
 	})
+}
+
+// CanonicalHome returns the absolute, symlink-resolved kwt home. Init must
+// create the directory before callers canonicalize it.
+func CanonicalHome() (string, error) {
+	abs, err := filepath.Abs(getConfigDir())
+	if err != nil {
+		return "", fmt.Errorf("resolve kwt home: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize kwt home: %w", err)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // getConfigDir returns the configuration directory path.
@@ -96,8 +113,8 @@ func getLocalConfigPath() string {
 //   - If interactive is false (non-TTY), unknown files are skipped with a stderr warning.
 //   - On user rejection, the file is skipped (command continues, global config only).
 //   - Trust store write failures are non-fatal (merge proceeds with a stderr warning).
-//   - fleet.* keys are always ignored: sync settings are global-only because they
-//     control token sources and the hub endpoint.
+//   - fleet.* and daemon.* keys are always ignored because they control
+//     machine-level credentials, endpoints, and process authority.
 //
 // For repository_settings, merging is done by the `repository` field as the key.
 func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive bool) error {
@@ -178,6 +195,8 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 			// which hub they are sent to; accepting them from a repo-local
 			// file would let a repository exfiltrate arbitrary secrets.
 			fmt.Fprintf(os.Stderr, "kwt: ignoring %q in %s: sync settings are global-only\n", key, absPath)
+		case key == "daemon" || strings.HasPrefix(key, "daemon."):
+			fmt.Fprintf(os.Stderr, "kwt: ignoring %q in %s: daemon settings are global-only\n", key, absPath)
 		default:
 			viper.Set(key, localViper.Get(key))
 		}
@@ -321,7 +340,12 @@ func backfillWorkspaceConfig(configPath string) (bool, error) {
 }
 
 func defaultConfigTOML() string {
-	return fmt.Sprintf(`[worktree]
+	return fmt.Sprintf(`[daemon]
+idle_timeout = "2h"
+auto_restart = "newer"
+replacement_grace = "5m"
+
+[worktree]
 basedir = "~/.kwt/worktrees"
 auto_mkdir = true
 
@@ -502,7 +526,8 @@ func LoadForTarget(repoRoot string, interactive bool) (*models.Config, error) {
 					case key == "repository_settings":
 						mergeRepositorySettingsInto(target, local)
 					case key == "projects" || key == "workspaces" || strings.HasPrefix(key, "workspaces."),
-						key == "fleet" || strings.HasPrefix(key, "fleet."):
+						key == "fleet" || strings.HasPrefix(key, "fleet."),
+						key == "daemon" || strings.HasPrefix(key, "daemon."):
 						continue
 					default:
 						target.Set(key, local.Get(key))
@@ -651,9 +676,13 @@ func StdinInteractive() bool { return isStdinInteractive() }
 
 // Load loads and returns the current configuration.
 func Load() (*models.Config, error) {
+	applyGlobalDefaults(viper.GetViper())
 	var cfg models.Config
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+	if err := validateDaemonConfig(cfg.Daemon); err != nil {
+		return nil, err
 	}
 
 	if err := expandConfigPaths(&cfg); err != nil {
@@ -666,6 +695,21 @@ func Load() (*models.Config, error) {
 		cwdLocalNamingSanitizeMarker,
 	)
 	return &cfg, nil
+}
+
+func validateDaemonConfig(cfg models.DaemonConfig) error {
+	if cfg.IdleTimeout < 0 {
+		return fmt.Errorf("daemon idle_timeout must not be negative")
+	}
+	if cfg.ReplacementGrace <= 0 {
+		return fmt.Errorf("daemon replacement_grace must be positive")
+	}
+	switch cfg.AutoRestart {
+	case "newer", "never":
+		return nil
+	default:
+		return fmt.Errorf("daemon auto_restart must be newer or never")
+	}
 }
 
 // ProjectRegistration keeps the raw project value persisted in global TOML
@@ -705,6 +749,9 @@ func LoadGlobalSnapshot() (*GlobalSnapshot, error) {
 	var persisted models.Config
 	if err := globalViper.Unmarshal(&persisted); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal global config: %w", err)
+	}
+	if err := validateDaemonConfig(persisted.Daemon); err != nil {
+		return nil, err
 	}
 	effective := persisted
 	effective.Projects = slices.Clone(persisted.Projects)
