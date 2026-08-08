@@ -2,7 +2,15 @@
 
 Global config lives at `~/.config/kwt/config.toml`, or at
 `$KWT_HOME/config.toml` when `KWT_HOME` is set. Repository-local overrides live
-in `.kwt.toml` and are trust-gated before use.
+in `.kwt.toml` and are trust-gated before use. When `KWT_HOME` is set, that same
+directory also holds `registry.json` and `pull-requests.json`, isolating kwt's
+persistent state as a unit. Without it, each store follows its documented
+platform config-directory behavior.
+
+`KWT_HOME` is an isolation boundary: kwt never imports registry entries from
+the platform config directory automatically. To move an existing installation,
+stop other kwt processes and copy its `registry.json` into `KWT_HOME` before
+running kwt with the new home. Do not combine two registry files.
 
 The global file is the source of truth for worktree naming, tmux layouts, agent
 commands, repository setup rules, and the known project registry.
@@ -83,6 +91,9 @@ name = "kwt"
 path = "~/code/kwt"
 last_touched = "2026-07-04T12:00:00Z"
 ```
+
+Project refreshes update these known fields without discarding additional
+fields written by a newer kwt version.
 
 ## Directory workspaces
 
