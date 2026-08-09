@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -98,6 +99,7 @@ type Model struct {
 	inputMode           inputMode
 	confirm             confirmState
 	fetching            bool
+	inventoryCurrent    bool
 	fleetPending        bool
 	fleetCancel         context.CancelFunc
 	loadSeq             int
@@ -182,7 +184,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fastRowsMsg:
 		return m.applyFastRows(msg)
 	case rowsMsg:
-		return m.applyRows(msg)
+		return m.applyRows(msg, true)
 	case fleetRowsMsg:
 		return m.applyFleetRows(msg)
 	case actionDoneMsg:
@@ -253,12 +255,22 @@ func (m Model) filteredRows() []Row {
 
 func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 	pendingRefresh := m.pendingRefresh
+	initialAnchor := m.anchorPath
+	hadRows := len(m.rows) > 0
 	m.pendingRefresh = false
 	next, _ := m.applyRows(rowsMsg{
 		rows:     carryEnrichment(msg.rows, m.rows),
 		warnings: msg.warnings,
 		err:      msg.err,
-	})
+	}, false)
+	if !hadRows && initialAnchor != "" {
+		_, exact := identityRowIndex(next.rows, initialAnchor)
+		_, contained := containingRowIndex(next.rows, initialAnchor)
+		if !exact && !contained {
+			next.anchorPath = initialAnchor
+		}
+	}
+	next.inventoryCurrent = false
 	next = next.cancelFleetMerge()
 	next.fleetPending = false
 	if msg.err != nil {
@@ -388,12 +400,18 @@ func entryCommit(row Row) string {
 	return row.Entry.CommitHash
 }
 
-func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
+func (m Model) applyRows(msg rowsMsg, refreshLayouts bool) (Model, tea.Cmd) {
 	m.fetching = false
 	if msg.err != nil {
 		m.err = msg.err
 		m.stickyError = false
 		return m.startPendingRefresh()
+	}
+	if refreshLayouts {
+		m.layouts = m.backend.LayoutNames()
+		if m.selectedLayout != "" && !slices.Contains(m.layouts, m.selectedLayout) {
+			m.selectedLayout = ""
+		}
 	}
 	m.warnings = msg.warnings
 
@@ -404,6 +422,7 @@ func (m Model) applyRows(msg rowsMsg) (Model, tea.Cmd) {
 	rows = mergeCreatingRows(rows, m.rows, m.creating)
 	sortRows(rows)
 	m.rows = rows
+	m.inventoryCurrent = true
 	if !hadRows && m.anchorPath != "" {
 		m.projectPerspective = launchPerspective(rows, m.anchorPath)
 	}
@@ -549,6 +568,7 @@ func (m Model) startPendingRefresh() (Model, tea.Cmd) {
 func (m Model) startFetch() (Model, tea.Cmd) {
 	m.loadSeq++
 	m.fetching = true
+	m.inventoryCurrent = false
 	m.fleetPending = false
 	m = m.cancelFleetMerge()
 	return m, m.fetchFastRowsCmd()
@@ -652,6 +672,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	if m.inputMode != inputNone {
 		return m.handleInputKey(msg)
+	}
+	if !m.inventoryCurrent && (key.Matches(msg, m.keys.Open) ||
+		key.Matches(msg, m.keys.New) ||
+		key.Matches(msg, m.keys.Existing) ||
+		key.Matches(msg, m.keys.Delete) ||
+		key.Matches(msg, m.keys.Sync) ||
+		key.Matches(msg, m.keys.Shell) ||
+		key.Matches(msg, m.keys.Kill)) {
+		m.message = "inventory is refreshing; wait for current results"
+		return m, nil
 	}
 
 	switch {

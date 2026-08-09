@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"golang.org/x/term"
 )
 
@@ -89,12 +90,38 @@ func (s *TrustStore) IsTrusted(absPath, sha256 string) bool {
 	return false
 }
 
-// Add registers (absPath, sha256) as trusted and persists to disk with atomic rename.
+// Add registers (absPath, sha256) as trusted and persists to disk with a
+// lock-scoped reload and atomic rename.
 // Refuses to write if the trust store path is a symlink (anti-tampering).
 // If s.path is empty, the store is in-memory only and Add just updates entries.
 func (s *TrustStore) Add(absPath, sha256 string) error {
+	if s.path == "" {
+		s.add(absPath, sha256, time.Now().UTC())
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("create trust store dir: %w", err)
+	}
+	lock := flock.New(s.path+".lock", flock.SetPermissions(0o600))
+	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("lock trust store: %w", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	current, err := LoadTrustStore(s.path)
+	if err != nil {
+		return err
+	}
+	current.add(absPath, sha256, time.Now().UTC())
+	if err := current.save(); err != nil {
+		return err
+	}
+	s.entries = current.entries
+	return nil
+}
+
+func (s *TrustStore) add(absPath, sha256 string, now time.Time) {
 	// Update or insert entry (dedupe by path; sha256 may differ).
-	now := time.Now().UTC()
 	replaced := false
 	for i := range s.entries {
 		if s.entries[i].Path == absPath {
@@ -111,11 +138,6 @@ func (s *TrustStore) Add(absPath, sha256 string) error {
 			TrustedAt: now,
 		})
 	}
-
-	if s.path == "" {
-		return nil
-	}
-	return s.save()
 }
 
 // save serializes entries and writes them atomically.
@@ -227,14 +249,28 @@ func (p *stdioPrompter) PromptTrust(absPath string, content []byte) (bool, error
 		truncated = true
 	}
 
+	return p.PromptTrustPreview(
+		absPath,
+		len(content),
+		sanitizeForTerminal(string(preview)),
+		truncated,
+	)
+}
+
+func (p *stdioPrompter) PromptTrustPreview(
+	absPath string,
+	size int,
+	preview string,
+	truncated bool,
+) (bool, error) {
 	var b strings.Builder
 	b.WriteString("\nkwt: untrusted local config detected:\n")
 	fmt.Fprintf(&b, "  path: %s\n", sanitizeForTerminal(absPath))
-	fmt.Fprintf(&b, "  size: %d bytes\n\n", len(content))
+	fmt.Fprintf(&b, "  size: %d bytes\n\n", size)
 	b.WriteString("--- file contents ---\n")
-	b.WriteString(strings.TrimRight(sanitizeForTerminal(string(preview)), "\n"))
+	b.WriteString(strings.TrimRight(preview, "\n"))
 	if truncated {
-		fmt.Fprintf(&b, "\n... (truncated, showing first %d of %d bytes)", promptPreviewLimit, len(content))
+		fmt.Fprintf(&b, "\n... (truncated, showing first %d of %d bytes)", promptPreviewLimit, size)
 	}
 	b.WriteString("\n--------------------\n\n")
 	b.WriteString("Trust this file and load it? [y/N]: ")
@@ -248,6 +284,17 @@ func (p *stdioPrompter) PromptTrust(absPath string, content []byte) (bool, error
 	}
 	response = strings.ToLower(strings.TrimSpace(response))
 	return response == "y" || response == "yes", nil
+}
+
+// PromptTrustRequirement renders a daemon-provided, already bounded and
+// sanitized trust requirement using the ordinary foreground prompt.
+func PromptTrustRequirement(requirement TrustRequiredError) (bool, error) {
+	return newStdioPrompter().PromptTrustPreview(
+		requirement.Path,
+		requirement.Size,
+		requirement.Preview,
+		requirement.Truncated,
+	)
 }
 
 // sanitizeForTerminal replaces terminal control characters with a visible

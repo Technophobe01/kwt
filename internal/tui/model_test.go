@@ -228,6 +228,35 @@ func TestWorkspaceRowActions(t *testing.T) {
 	assert.Equal(t, "notes", backend.unregistered[0].Workspace.Name)
 }
 
+func TestCachedRowsBlockMutationsUntilCurrentRowsArrive(t *testing.T) {
+	row := Row{Workspace: &WorkspaceInfo{Name: "notes", Path: "/stale/notes"}}
+	model := NewModel(&fakeBackend{}, "/worktrees")
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{row}})
+	blocked, _ := updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmNone, blocked.confirm.kind)
+	assert.Contains(t, blocked.message, "refresh")
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+	current, _ := updateModel(t, model, press("d"))
+	assert.Equal(t, confirmUnregister, current.confirm.kind)
+}
+
+func TestCachedRowsPreserveUnresolvedInitialAnchor(t *testing.T) {
+	model := NewModel(&fakeBackend{}, "/worktrees")
+	model.anchorPath = "/launch"
+	cached := Row{Workspace: &WorkspaceInfo{Name: "cached", Path: "/cached"}}
+	current := Row{Workspace: &WorkspaceInfo{Name: "launch", Path: "/launch"}}
+
+	model, _ = updateModel(t, model, fastRowsMsg{rows: []Row{cached}})
+	assert.Equal(t, "/launch", model.anchorPath)
+
+	model, _ = updateModel(t, model, rowsMsg{rows: []Row{current}})
+	assert.Empty(t, model.anchorPath)
+	assert.Equal(t, "/launch", rowPath(model.selectedRow()))
+}
+
 func TestModelRowsMessageSortsRendersAndUsesAltScreen(t *testing.T) {
 	model := NewModel(&fakeBackend{}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{
@@ -506,6 +535,20 @@ func TestModelCyclesLayoutSelection(t *testing.T) {
 	assert.Empty(t, model.selectedLayout)
 	assert.Contains(t, stripANSI(viewContent(model)), "selected kwt:main · layout default · workspace offline")
 	assert.Equal(t, footerLine, lineIndexContaining(strings.Split(stripANSI(viewContent(model)), "\n"), "q quit"))
+}
+
+func TestModelRefreshesLayoutsAfterCurrentInventoryLoad(t *testing.T) {
+	backend := &fakeBackend{layoutNames: []string{"quad"}}
+	model := NewModel(backend, "/worktrees")
+	model.selectedLayout = "quad"
+	backend.layoutNames = []string{"focus"}
+
+	model, _ = updateModel(t, model, rowsMsg{
+		rows: []Row{testRow("kwt", "main", "/w/kwt/main")},
+	})
+
+	assert.Equal(t, []string{"focus"}, model.layouts)
+	assert.Empty(t, model.selectedLayout)
 }
 
 func TestModelCursorFilterAndEscape(t *testing.T) {
@@ -988,16 +1031,15 @@ func TestModelKeepsCreatedWorktreeUntilRefreshFindsIt(t *testing.T) {
 		createPath: "/w/kwt/feature-created",
 	}
 	model := NewModel(backend, "/worktrees")
-	model, staleFullCmd := updateModel(t, model, fastRowsMsg{rows: backend.rows})
-	require.NotNil(t, staleFullCmd)
+	model, _ = updateModel(t, model, rowsMsg{rows: backend.rows})
 
 	model, _ = updateModel(t, model, press("n"))
 	model, _ = updateModel(t, model, paste("feature-created"))
 	model, createCmd := updateModel(t, model, press("enter"))
-	model, _ = updateModel(t, model, createCmd())
-	require.True(t, model.pendingRefresh)
+	model, refreshCmd := updateModel(t, model, createCmd())
+	require.NotNil(t, refreshCmd)
 
-	model, _ = updateModel(t, model, staleFullCmd())
+	model, _ = updateModel(t, model, refreshCmd())
 
 	require.Len(t, model.rows, 2)
 	assert.Equal(t, "/w/kwt/feature-created", rowPath(model.selectedRow()))

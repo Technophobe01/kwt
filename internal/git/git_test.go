@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,33 @@ import (
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestGitOperationsUseInstanceContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := NewWithContext(ctx, t.TempDir()).RunCommand("version")
+
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestInventoryEnvironmentRemovesGitRoutingAndCredentials(t *testing.T) {
+	got := inventoryEnvironment([]string{
+		"PATH=/usr/bin",
+		"HOME=/home/test",
+		"GIT_DIR=/tmp/redirected.git",
+		"git_work_tree=/tmp/redirected-worktree",
+		"GIT_CONFIG_COUNT=1",
+		"KWT_GITHUB_TOKEN=builtin-secret",
+		"CUSTOM_FLEET_TOKEN=custom-secret",
+	}, []string{"CUSTOM_FLEET_TOKEN"})
+
+	assert.ElementsMatch(t, []string{
+		"PATH=/usr/bin",
+		"HOME=/home/test",
+		"GIT_TERMINAL_PROMPT=0",
+	}, got)
+}
 
 // TestRepository creates a test git repository
 type TestRepository struct {

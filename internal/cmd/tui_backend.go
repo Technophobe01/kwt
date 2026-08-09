@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,6 +27,8 @@ import (
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
+	"go.kenn.io/kwt/service"
+	publicworktree "go.kenn.io/kwt/worktree"
 )
 
 type tuiBackend struct {
@@ -52,6 +55,8 @@ type tuiBackend struct {
 	loadTargetConfig          func(string, bool) (*models.Config, error)
 	acknowledgeRemoteSource   func(string) error
 	now                       func() time.Time
+	queryInventory            func(context.Context, publicworktree.Request, bool, io.Writer) (publicworktree.Result, error)
+	stderr                    io.Writer
 }
 
 func newTUIBackend(cfg *models.Config) *tuiBackend {
@@ -62,7 +67,7 @@ func newTUIBackend(cfg *models.Config) *tuiBackend {
 func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBackend {
 	protectedNames := credentials.ProtectedNames(cfg)
 	tmuxCmd := tmux.NewTmuxCommandWithStripNames("", protectedNames)
-	return &tuiBackend{
+	backend := &tuiBackend{
 		cfg:            cfg,
 		tmux:           tmuxCmd,
 		protectedNames: protectedNames,
@@ -71,7 +76,7 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		// canonical identity wins over a fork origin (the same precedence
 		// applyProjectIdentityFallback applies to per-project discovery).
 		discoverGlobalWorktrees: func(baseDir string) ([]*discovery.GlobalWorktreeEntry, error) {
-			return discovery.DiscoverGlobalWorktrees(baseDir, cfg.Projects)
+			return discoverLegacyTUIWorktrees(baseDir, cfg.Projects)
 		},
 		discoverProjectWorktrees: discoverLaunchRepoWorktrees,
 		discoverLaunchWorktrees:  discoverLaunchRepoWorktrees,
@@ -85,10 +90,13 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		registerWorkspace:       config.RegisterWorkspace,
 		unregisterWorkspace:     config.UnregisterWorkspace,
 		readFleetState:          readTUIFleetState,
-		loadTargetConfig:        config.LoadForTarget,
 		acknowledgeRemoteSource: acknowledgeRemoteSourcePath,
 		now:                     time.Now,
 	}
+	backend.loadTargetConfig = func(repoRoot string, interactive bool) (*models.Config, error) {
+		return config.LoadForTargetFrom(backend.cfg, repoRoot, interactive)
+	}
+	return backend
 }
 
 func (b *tuiBackend) ListFast(ctx context.Context) ([]dashboard.Row, []string, error) {
@@ -102,6 +110,12 @@ func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error
 func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.queryInventory != nil {
+		return b.listDaemon(ctx, includeStatuses)
+	}
+	// The nil branch is retained only as an injected unit-test seam for the
+	// existing dashboard mutation/status tests. runTUI always installs the
+	// daemon query before the model can call ListFast or List.
 
 	var (
 		entries           []*discovery.GlobalWorktreeEntry
@@ -124,7 +138,7 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	go func() {
 		defer startup.Done()
 		registeredEntries, registeredErr =
-			b.discoverRegisteredProjectWorktrees()
+			b.loadRegisteredProjectInventory()
 	}()
 	go func() {
 		defer startup.Done()
@@ -184,6 +198,103 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	}
 	rows = append(rows, b.workspaceRows(sessions)...)
 	return rows, nil, nil
+}
+
+func (b *tuiBackend) listDaemon(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
+	result, err := b.queryInventory(
+		ctx,
+		publicworktree.Request{
+			View: publicworktree.ViewDashboard, LaunchDirectory: b.launchDir,
+			RequireCurrent: includeStatuses,
+		},
+		config.StdinInteractive(),
+		b.stderr,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	entries := make([]*discovery.GlobalWorktreeEntry, 0, len(result.Snapshot.Entries))
+	for _, entry := range result.Snapshot.Entries {
+		entries = append(entries, dashboardInventoryEntry(entry))
+	}
+	sessions, err := b.listSessions()
+	if err != nil {
+		return nil, nil, err
+	}
+	renderWorkspaces := result.Snapshot.Workspaces
+	if includeStatuses && result.Freshness == publicworktree.Fresh {
+		if err := b.applyInventoryConfig(result.Snapshot.Config); err != nil {
+			return nil, nil, err
+		}
+		launchEntries := make([]*discovery.GlobalWorktreeEntry, 0, len(result.Snapshot.LaunchEntries))
+		for _, entry := range result.Snapshot.LaunchEntries {
+			launchEntries = append(launchEntries, dashboardInventoryEntry(entry))
+		}
+		b.registerLaunchProject(launchEntries)
+		b.registerLaunchWorkspace(launchEntries)
+		renderWorkspaces = append([]models.Workspace(nil), b.cfg.Workspaces...)
+	}
+	var statusByPath map[string]*models.WorktreeStatus
+	if includeStatuses {
+		statusByPath, err = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	liveSessions := make(map[string]bool, len(sessions))
+	for _, session := range sessions {
+		liveSessions[session] = true
+	}
+	rows := make([]dashboard.Row, 0, len(entries))
+	for _, entry := range entries {
+		status := statusByPath[entry.Path]
+		if status == nil {
+			status = unknownStatusForEntry(entry)
+		}
+		rows = append(rows, buildTUIRow(entry, status, liveSessions))
+	}
+	rows = append(rows, workspaceRows(renderWorkspaces, sessions)...)
+	return rows, nil, nil
+}
+
+func (b *tuiBackend) applyInventoryConfig(effective *models.Config) error {
+	if effective == nil {
+		return service.NewError(
+			service.TransportFailure,
+			"kwt daemon returned fresh inventory without effective configuration",
+			true,
+			nil,
+			nil,
+		)
+	}
+	if b.cfg == nil {
+		b.cfg = effective
+	} else {
+		*b.cfg = *effective
+	}
+	b.protectedNames = credentials.ProtectedNames(b.cfg)
+	b.tmux = tmux.NewTmuxCommandWithStripNames("", b.protectedNames)
+	b.listSessions = b.tmux.ListSessions
+	b.ensureAndAttach = tmux.NewWorkspaceRunner(
+		b.tmux,
+		b.protectedNames,
+	).EnsureAndAttach
+	return nil
+}
+
+func dashboardInventoryEntry(entry publicworktree.Entry) *discovery.GlobalWorktreeEntry {
+	var info *url.RepositoryInfo
+	if entry.Repository.FullPath != "" {
+		info = &url.RepositoryInfo{
+			Host: entry.Repository.Host, Owner: entry.Repository.Owner,
+			Repository: entry.Repository.Name, FullPath: entry.Repository.FullPath,
+		}
+	}
+	return &discovery.GlobalWorktreeEntry{
+		RepositoryURL: entry.Repository.URL, RepositoryInfo: info,
+		Path: entry.Path, Branch: entry.Branch, CommitHash: entry.CommitHash,
+		IsMain: entry.IsMain, CreatedAt: entry.CreatedAt, Generation: entry.Generation,
+	}
 }
 
 // MergeFleet overlays hub state onto locally discovered rows. It publishes
@@ -313,7 +424,7 @@ func localFleetObservation(currentHost string, localRow dashboard.Row, now time.
 	return observation, true
 }
 
-func (b *tuiBackend) discoverRegisteredProjectWorktrees() (
+func (b *tuiBackend) loadRegisteredProjectInventory() (
 	[]*discovery.GlobalWorktreeEntry,
 	error,
 ) {
@@ -375,8 +486,12 @@ func (b *tuiBackend) workspaceRows(sessions []string) []dashboard.Row {
 	if b.cfg == nil || len(b.cfg.Workspaces) == 0 {
 		return nil
 	}
-	rows := make([]dashboard.Row, 0, len(b.cfg.Workspaces))
-	for _, record := range directoryWorkspaceRecords(b.cfg.Workspaces, sessions) {
+	return workspaceRows(b.cfg.Workspaces, sessions)
+}
+
+func workspaceRows(workspaces []models.Workspace, sessions []string) []dashboard.Row {
+	rows := make([]dashboard.Row, 0, len(workspaces))
+	for _, record := range directoryWorkspaceRecords(workspaces, sessions) {
 		rows = append(rows, dashboard.Row{
 			Workspace: &dashboard.WorkspaceInfo{
 				Name: record.Name,
