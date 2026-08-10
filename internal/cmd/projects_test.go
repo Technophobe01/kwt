@@ -457,6 +457,88 @@ func TestRunProjectsAddJSONWritesStableInvalidRepositoryError(t *testing.T) {
 	assert.Contains(t, stderr.String(), "invalid_repository")
 }
 
+func TestRunProjectsRemoveJSONUnregistersByPath(t *testing.T) {
+	originalUnregister := unregisterProject
+	t.Cleanup(func() { unregisterProject = originalUnregister })
+	removed := models.Project{
+		Repository: "github.com/acme/widget",
+		Name:       "widget",
+		Path:       "/code/widget",
+	}
+	var requestedPath string
+	unregisterProject = func(path string) (models.Project, bool, error) {
+		requestedPath = path
+		return removed, true, nil
+	}
+	projectsRemoveJSON = true
+	t.Cleanup(func() { projectsRemoveJSON = false })
+	stdout := &bytes.Buffer{}
+	projectsRemoveCmd.SetOut(stdout)
+
+	require.NoError(t, runProjectsRemove(
+		projectsRemoveCmd,
+		[]string{"/code/widget"},
+	))
+
+	var response projectMutationResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "/code/widget", requestedPath)
+	assert.Equal(t, "unregistered", response.Status)
+	assert.Equal(t, removed, response.Project)
+}
+
+func TestRunProjectsRemoveJSONNeverEmitsRegistryCredentials(t *testing.T) {
+	const token = "ghp_secret123"
+	originalUnregister := unregisterProject
+	t.Cleanup(func() { unregisterProject = originalUnregister })
+	unregisterProject = func(string) (models.Project, bool, error) {
+		return models.Project{
+			Repository: "https://wesm:" + token + "@github.com/acme/widget.git",
+			Name:       "widget",
+			Path:       "/code/widget",
+		}, true, nil
+	}
+	projectsRemoveJSON = true
+	t.Cleanup(func() { projectsRemoveJSON = false })
+	stdout := &bytes.Buffer{}
+	projectsRemoveCmd.SetOut(stdout)
+
+	require.NoError(t, runProjectsRemove(
+		projectsRemoveCmd,
+		[]string{"/code/widget"},
+	))
+
+	var response projectMutationResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "github.com/acme/widget", response.Project.Repository)
+	assert.NotContains(t, stdout.String(), token)
+}
+
+func TestRunProjectsRemoveJSONReportsMissingProject(t *testing.T) {
+	originalUnregister := unregisterProject
+	t.Cleanup(func() { unregisterProject = originalUnregister })
+	unregisterProject = func(string) (models.Project, bool, error) {
+		return models.Project{}, false, nil
+	}
+	projectsRemoveJSON = true
+	t.Cleanup(func() { projectsRemoveJSON = false })
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	projectsRemoveCmd.SetOut(stdout)
+	projectsRemoveCmd.SetErr(stderr)
+
+	err := runProjectsRemove(projectsRemoveCmd, []string{"/missing/widget"})
+
+	var exitErr interface{ ExitCode() int }
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 2, exitErr.ExitCode())
+	var response projectCommandErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "project_not_found", response.Error.Code)
+	assert.False(t, response.Error.Retryable)
+	assert.Contains(t, stderr.String(), "project_not_found")
+}
+
 func TestProjectsAddArgumentValidationUsesStructuredErrors(t *testing.T) {
 	projectsAddJSON = true
 	t.Cleanup(func() { projectsAddJSON = false })
