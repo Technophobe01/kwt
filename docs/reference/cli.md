@@ -62,12 +62,20 @@ kwt daemon stop
 kwt serve
 ```
 
-`kwt projects`, `kwt list`, and TUI inventory auto-start or reuse a compatible
-local daemon. CLI inventory requires a current refresh and fails if one cannot
-complete; it never prints cached data. The TUI may paint from the daemon's
-last-known-good cache while requesting one current snapshot. Worktree
-mutations, Git status collection, tmux attachment, and SSH remain on their
-existing paths until their complete service migrations.
+`kwt projects`, `kwt list`, `kwt remove`, and TUI inventory/removal auto-start
+or reuse a compatible local daemon. CLI inventory requires a current refresh
+and fails if one cannot complete; it never prints cached data. The TUI may
+paint from the daemon's last-known-good cache while requesting one current
+snapshot. Other worktree mutations, Git status collection, tmux attachment,
+and SSH remain on their existing paths until their complete service
+migrations.
+
+Daemon ownership must not buffer human-facing operation progress. Removal
+continues to print each selected worktree's result as soon as that target
+finishes. Before longer mutations such as add, pull-request import, doctor,
+prune, or SSH lifecycle move behind the daemon, their ordered status events
+must stream to CLI stderr as they occur; machine-readable stdout and established
+exit codes remain unchanged.
 
 When `kwt add -b` creates a branch, it fetches `origin` and starts from its
 default branch. If that remote base is unavailable, it falls back to local
@@ -168,6 +176,18 @@ identity in the worktree's Git administrative directory and compares it while
 holding the repository's worktree-mutation lock, so automation cannot delete a
 replacement checkout created at the same path. Ordinary directory changes do
 not alter the generation.
+
+Removal is executed by the same-machine daemon through kwt's public Go service.
+The daemon reopens the named repository and revalidates the exact path,
+generation, main-worktree status, and lock state while holding the repository's
+cross-process mutation lock. It also performs generation-safe registry cleanup.
+The CLI and TUI retain selection, output, fleet publication, and tmux-session
+cleanup; stale inventory alone never authorizes deletion.
+If a removal response is lost, the client requests a fresh bounded repository
+inventory. A missing original generation is reported as an irreversible partial
+result so fleet publication, TUI refresh, and session cleanup still run. If the
+postcondition cannot be observed, the client reports an indeterminate transport
+failure and requests fleet/UI refresh without claiming removal or killing tmux.
 
 ## `kwt doctor`
 

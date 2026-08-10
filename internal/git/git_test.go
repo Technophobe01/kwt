@@ -1013,6 +1013,133 @@ func TestRemoveWorktree(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktreeTransactionDeletesObservedBranch(t *testing.T) {
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "transaction-remove")
+	worktreePath := filepath.Join(t.TempDir(), "transaction-remove")
+	repo.CreateWorktree(t, worktreePath, "transaction-remove")
+	g := New(repo.Path)
+	generation, err := g.WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+
+	result, err := g.RemoveWorktreeTransaction(
+		worktreePath,
+		generation,
+		false,
+		true,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, worktreePath, result.Path)
+	assert.Equal(t, "transaction-remove", result.Branch)
+	assert.True(t, result.WorktreeRemoved)
+	assert.True(t, result.BranchDeleted)
+	assert.NoDirExists(t, worktreePath)
+	_, err = g.RunCommand("show-ref", "--verify", "refs/heads/transaction-remove")
+	require.Error(t, err)
+}
+
+func TestRemoveWorktreeTransactionUsesBaselineCompatibleInspection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX git compatibility wrapper")
+	}
+
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "baseline-remove")
+	worktreePath := filepath.Join(t.TempDir(), "baseline-remove")
+	repo.CreateWorktree(t, worktreePath, "baseline-remove")
+	g := New(repo.Path)
+	generation, err := g.WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	wrapperDir := t.TempDir()
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := `#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "list" ]; then
+	for arg in "$@"; do
+		if [ "$arg" = "--expire" ]; then
+			printf '%s\n' 'error: unknown option expire' >&2
+			exit 129
+		fi
+	done
+fi
+exec "$REAL_GIT" "$@"
+`
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0755))
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := g.RemoveWorktreeTransaction(
+		worktreePath,
+		generation,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, result.WorktreeRemoved)
+	assert.NoDirExists(t, worktreePath)
+}
+
+func TestRemoveWorktreeTransactionAfterClaimHoldsMutationLock(t *testing.T) {
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "transaction-claim")
+	worktreePath := filepath.Join(t.TempDir(), "transaction-claim")
+	repo.CreateWorktree(t, worktreePath, "transaction-claim")
+	g := New(repo.Path)
+	generation, err := g.WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+	competing := make(chan error, 1)
+
+	result, claimed, err := g.RemoveWorktreeTransactionAfterClaim(
+		worktreePath,
+		generation,
+		false,
+		false,
+		false,
+		func(remove func() error) (bool, error) {
+			go func() {
+				competing <- g.RemoveWorktree(worktreePath, false, generation)
+			}()
+			assertRemovalWaitsForLock(t, competing)
+			err := remove()
+			return err == nil, err
+		},
+	)
+
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	assert.True(t, result.WorktreeRemoved)
+	assert.NoDirExists(t, worktreePath)
+	require.Error(t, receiveRemovalResult(t, competing))
+}
+
+func TestRemoveWorktreeTransactionRejectsChangedGeneration(t *testing.T) {
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "transaction-replaced")
+	worktreePath := filepath.Join(t.TempDir(), "transaction-replaced")
+	repo.CreateWorktree(t, worktreePath, "transaction-replaced")
+
+	result, err := New(repo.Path).RemoveWorktreeTransaction(
+		worktreePath,
+		"0123456789abcdef0123456789abcdef",
+		false,
+		false,
+		false,
+	)
+
+	require.Error(t, err)
+	assert.False(t, result.WorktreeRemoved)
+	var conditionErr *ConditionError
+	require.ErrorAs(t, err, &conditionErr)
+	assert.Equal(t, ReasonGenerationChanged, conditionErr.Reason)
+	assert.DirExists(t, worktreePath)
+}
+
 func TestListWorktreesKeepsGenerationStableWhenDirectoryChanges(t *testing.T) {
 	repo := NewTestRepository(t)
 	g := New(repo.Path)
@@ -2188,6 +2315,57 @@ exec "$REAL_GIT" "$@"
 		"inspect the path and remove it only if it contains leftovers from the removed worktree",
 	)
 	assert.FileExists(t, filepath.Join(worktreePath, "replacement"))
+}
+
+func TestConditionalRemoveWorktreeVerifiesDeregistrationAfterCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell wrapper")
+	}
+
+	repo := NewTestRepository(t)
+	repo.CreateBranch(t, "canceled-after-removal")
+	worktreePath := filepath.Join(t.TempDir(), "remove-wt")
+	repo.CreateWorktree(t, worktreePath, "canceled-after-removal")
+	generation, err := New(repo.Path).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	wrapperDir := t.TempDir()
+	completedPath := filepath.Join(wrapperDir, "removal-completed")
+	wrapperPath := filepath.Join(wrapperDir, "git")
+	wrapper := `#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then
+	"$REAL_GIT" "$@" || exit $?
+	: > "$REMOVAL_COMPLETED"
+	while true; do sleep 1; done
+fi
+exec "$REAL_GIT" "$@"
+`
+	require.NoError(t, os.WriteFile(wrapperPath, []byte(wrapper), 0755))
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("REMOVAL_COMPLETED", completedPath)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- NewWithContext(ctx, worktreePath).RemoveWorktree(
+			worktreePath,
+			false,
+			generation,
+		)
+	}()
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(completedPath)
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+
+	err = receiveRemovalResult(t, result)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.True(t, WorktreeWasRemoved(err))
+	assert.NoDirExists(t, worktreePath)
 }
 
 func TestPruneWorktrees(t *testing.T) {

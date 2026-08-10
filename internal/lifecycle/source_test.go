@@ -1,4 +1,4 @@
-package worktree
+package lifecycle
 
 import (
 	"context"

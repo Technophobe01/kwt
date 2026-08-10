@@ -1,6 +1,6 @@
 //go:build !windows
 
-package worktree
+package lifecycle
 
 import "os"
 
