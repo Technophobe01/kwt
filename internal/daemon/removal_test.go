@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -52,33 +53,117 @@ func TestRemovalClientRoundTripsResult(t *testing.T) {
 }
 
 func TestRemovalClientPreservesPartialResultOnError(t *testing.T) {
-	remover := &fakeRemover{
-		result: kwt.RemovalResult{
-			Path: "/worktrees/topic", Branch: "topic", WorktreeRemoved: true,
-		},
-		err: service.NewError(
-			service.Internal,
-			"worktree removed but branch deletion failed",
-			false,
-			map[string]any{
-				"path": "/worktrees/topic", "branch": "topic",
-				"worktree_removed": true, "branch_deleted": false,
-				"registry_unregistered": true,
-			},
-			nil,
-		),
+	for _, code := range []service.Code{
+		service.Internal,
+		service.Conflict,
+		service.Busy,
+		service.ConnectionChanged,
+	} {
+		t.Run(string(code), func(t *testing.T) {
+			remover := &fakeRemover{
+				result: kwt.RemovalResult{
+					Path: "/worktrees/topic", Branch: "topic", WorktreeRemoved: true,
+				},
+				err: service.NewError(
+					code,
+					"worktree removed but cleanup failed",
+					code == service.Busy,
+					map[string]any{
+						"path": "/worktrees/topic", "branch": "topic",
+						"worktree_removed": true, "branch_deleted": false,
+						"registry_unregistered": true,
+					},
+					nil,
+				),
+			}
+			client, closeServer := removalTestClient(t, remover)
+			defer closeServer()
+
+			result, err := client.RemoveWorktree(context.Background(), kwt.RemovalRequest{})
+
+			require.Error(t, err)
+			assert.True(t, service.IsCode(err, code))
+			assert.True(t, git.WorktreeWasRemoved(err))
+			assert.Equal(t, "/worktrees/topic", result.Path)
+			assert.True(t, result.WorktreeRemoved)
+			assert.True(t, result.RegistryUnregistered)
+			assert.Equal(t, "topic", result.Branch)
+		})
 	}
+}
+
+func TestRemovalClientPreservesKnownRemovalFailure(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		message string
+		result  kwt.RemovalResult
+	}{
+		{
+			name: "failed before removal", message: "worktree has uncommitted changes",
+			result: kwt.RemovalResult{Path: "/worktrees/topic", Branch: "topic"},
+		},
+		{
+			name: "partial completion", message: "worktree removed but failed to delete branch",
+			result: kwt.RemovalResult{
+				Path: "/worktrees/topic", Branch: "topic", WorktreeRemoved: true,
+				RegistryUnregistered: true,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remover := &fakeRemover{result: test.result, err: service.NewError(
+				service.RemovalFailed,
+				test.message,
+				false,
+				map[string]any{
+					"path": test.result.Path, "branch": test.result.Branch,
+					"worktree_removed":      test.result.WorktreeRemoved,
+					"branch_deleted":        test.result.BranchDeleted,
+					"registry_unregistered": test.result.RegistryUnregistered,
+				},
+				errors.New("private removal cause"),
+			)}
+			client, closeServer := removalTestClient(t, remover)
+			defer closeServer()
+
+			result, err := client.RemoveWorktree(context.Background(), kwt.RemovalRequest{})
+
+			require.Error(t, err)
+			typed := service.AsError(err)
+			assert.Equal(t, service.RemovalFailed, typed.Code)
+			assert.Equal(t, test.message, typed.Message)
+			assert.Equal(t, test.result, result)
+			assert.Equal(t, test.result.WorktreeRemoved, git.WorktreeWasRemoved(err))
+		})
+	}
+}
+
+func TestRemovalClientHidesUnexpectedInternalCause(t *testing.T) {
+	const secret = "removal-password"
+	cause := errors.New("fetch ssh://user:" + secret + "@example.invalid/repository")
+	remover := &fakeRemover{err: service.NewError(
+		service.Internal,
+		cause.Error(),
+		false,
+		map[string]any{
+			"path": "/worktrees/topic", "branch": "topic",
+			"worktree_removed": true, "branch_deleted": false,
+			"registry_unregistered": true,
+		},
+		cause,
+	)}
 	client, closeServer := removalTestClient(t, remover)
 	defer closeServer()
 
 	result, err := client.RemoveWorktree(context.Background(), kwt.RemovalRequest{})
 
 	require.Error(t, err)
-	assert.True(t, service.IsCode(err, service.Internal))
-	assert.True(t, git.WorktreeWasRemoved(err))
+	typed := service.AsError(err)
+	assert.Equal(t, service.Internal, typed.Code)
+	assert.Equal(t, "internal failure", typed.Message)
+	assert.NotContains(t, typed.Message, secret)
 	assert.True(t, result.WorktreeRemoved)
 	assert.True(t, result.RegistryUnregistered)
-	assert.Equal(t, "topic", result.Branch)
 }
 
 func TestRemovalClientReconcilesLostSuccessfulResponse(t *testing.T) {
@@ -112,7 +197,7 @@ func TestRemovalClientReconcilesLostSuccessfulResponse(t *testing.T) {
 	assert.True(t, reconciled.Load())
 	assert.True(t, result.WorktreeRemoved)
 	assert.True(t, git.WorktreeWasRemoved(err))
-	assert.True(t, service.IsCode(err, service.TransportFailure))
+	assert.True(t, service.IsCode(err, service.DaemonTransportFailed))
 }
 
 func TestRemovalClientMarksUnreconciledResponseLossForRefresh(t *testing.T) {
@@ -137,7 +222,7 @@ func TestRemovalClientMarksUnreconciledResponseLossForRefresh(t *testing.T) {
 	assert.False(t, result.WorktreeRemoved)
 	assert.False(t, git.WorktreeWasRemoved(err))
 	assert.True(t, RequiresRefresh(err))
-	assert.True(t, service.IsCode(err, service.TransportFailure))
+	assert.True(t, service.IsCode(err, service.DaemonTransportFailed))
 }
 
 func removalTestClient(t *testing.T, remover kwt.Remover) (*Client, func()) {

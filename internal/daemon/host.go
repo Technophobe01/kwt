@@ -222,6 +222,10 @@ func runHost(
 		}
 		return status.Status(opts.Now()), nil
 	}
+	diagnosticSecrets := processDiagnosticSecrets(
+		token,
+		configuredFleetTokenEnvironment(opts.Home),
+	)
 	handler := NewServer(ServerOptions{
 		Token:        token,
 		ExpectedHost: ep.Address,
@@ -233,6 +237,18 @@ func runHost(
 		Inventory:    inventory,
 		Remover:      remover,
 		Gate:         gate,
+		ReportError: func(
+			route string,
+			failure *service.Error,
+			expansion kwt.ExpansionContext,
+		) {
+			secrets := append([]string(nil), diagnosticSecrets...)
+			secrets = append(
+				secrets,
+				invocationDiagnosticSecrets(opts.Home, expansion)...,
+			)
+			logServiceFailure(logger, route, failure, secrets)
+		},
 	})
 	httpServer := newHTTPServer(handler)
 	serverDone := make(chan error, 1)

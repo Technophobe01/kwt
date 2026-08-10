@@ -3,17 +3,38 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 
 	"go.kenn.io/kit/safefileio"
+	kwt "go.kenn.io/kwt"
+	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/service"
 )
 
 const (
-	backgroundLogName = "daemon.log"
-	backgroundLogSize = int64(10 << 20)
-	backgroundBackups = 3
+	backgroundLogName      = "daemon.log"
+	backgroundLogSize      = int64(10 << 20)
+	backgroundBackups      = 3
+	maximumDiagnosticBytes = 1024
+)
+
+var (
+	sensitiveAssignmentPattern = regexp.MustCompile(
+		`(?i)\b([a-z_][a-z0-9_]*(?:token|secret|password|passwd|credential|api_key)[a-z0-9_]*)=("[^"]*"|'[^']*'|[^\s]+)`,
+	)
+	authorizationHeaderPattern = regexp.MustCompile(
+		`(?i)(\b(?:proxy-)?authorization\s*:\s*)[^\r\n]*`,
+	)
+	credentialURLPattern = regexp.MustCompile(
+		`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`,
+	)
 )
 
 type rotatingLog struct {
@@ -23,6 +44,140 @@ type rotatingLog struct {
 	size    int64
 	maxSize int64
 	backups int
+}
+
+func logServiceFailure(
+	logger *slog.Logger,
+	route string,
+	failure *service.Error,
+	sensitiveValues []string,
+) {
+	if logger == nil || failure == nil || failure.Err == nil {
+		return
+	}
+	logger.Warn(
+		"daemon request failed",
+		"route", route,
+		"code", failure.Code,
+		"error", privateDiagnostic(failure.Err, sensitiveValues),
+	)
+}
+
+func privateDiagnostic(err error, sensitiveValues []string) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	message = sensitiveAssignmentPattern.ReplaceAllString(message, "$1=[redacted]")
+	message = authorizationHeaderPattern.ReplaceAllString(message, "$1[redacted]")
+	message = credentialURLPattern.ReplaceAllString(message, "$1[redacted]@")
+	message = redactSensitiveValues(message, sensitiveValues)
+	if len(message) > maximumDiagnosticBytes {
+		message = message[:maximumDiagnosticBytes]
+	}
+	return message
+}
+
+func redactSensitiveValues(message string, sensitiveValues []string) string {
+	unique := make(map[string]struct{}, len(sensitiveValues))
+	for _, value := range sensitiveValues {
+		if value != "" {
+			unique[value] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(unique))
+	for value := range unique {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(left, right int) bool {
+		if len(values[left]) == len(values[right]) {
+			return values[left] < values[right]
+		}
+		return len(values[left]) > len(values[right])
+	})
+	replacements := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		replacements = append(replacements, value, "[redacted]")
+	}
+	if len(replacements) == 0 {
+		return message
+	}
+	return strings.NewReplacer(replacements...).Replace(message)
+}
+
+func processDiagnosticSecrets(bearer string, fleetTokenEnvironment string) []string {
+	values := make([]string, 0, 4)
+	if bearer != "" {
+		values = append(values, bearer)
+	}
+	if name := strings.TrimSpace(fleetTokenEnvironment); name != "" {
+		if value, ok := os.LookupEnv(name); ok && value != "" {
+			values = append(values, value)
+		}
+	}
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" || !sensitiveEnvironmentName(name) {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
+func invocationDiagnosticSecrets(home string, expansion kwt.ExpansionContext) []string {
+	values := make([]string, 0, 4)
+	for name, value := range expansion.Environment {
+		if value != "" && sensitiveEnvironmentName(name) {
+			values = append(values, value)
+		}
+	}
+	fleetTokenEnvironment := configuredFleetTokenEnvironment(home)
+	if fleetTokenEnvironment == "" {
+		return values
+	}
+	if value := environmentValue(
+		expansion.Environment,
+		fleetTokenEnvironment,
+	); value != "" {
+		values = append(values, value)
+	}
+	return values
+}
+
+func configuredFleetTokenEnvironment(home string) string {
+	snapshot, err := config.LoadGlobalSnapshotAtWithExpansion(
+		home,
+		func(path string) (string, error) { return path, nil },
+	)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(snapshot.Config.Fleet.TokenEnv)
+}
+
+func environmentValue(environment map[string]string, name string) string {
+	if runtime.GOOS != "windows" {
+		return environment[name]
+	}
+	for candidate, value := range environment {
+		if strings.EqualFold(candidate, name) {
+			return value
+		}
+	}
+	return ""
+}
+
+func sensitiveEnvironmentName(name string) bool {
+	name = strings.ToUpper(name)
+	for _, marker := range []string{
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY",
+	} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func openBackgroundLog(home string) (*rotatingLog, error) {

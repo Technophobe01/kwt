@@ -79,6 +79,30 @@ snapshot. Other worktree mutations, Git status collection, tmux attachment,
 and SSH remain on their existing paths until their complete service
 migrations.
 
+Successful `kwt list --json` and `kwt projects --json` output remains a bare
+top-level array. A daemon or inventory failure instead writes this shared
+shape to stdout:
+
+```json
+{
+  "error": {
+    "code": "daemon_draining",
+    "message": "the kwt daemon is draining",
+    "retryable": true,
+    "details": { "drain_deadline": "2026-08-10T01:02:03Z" }
+  }
+}
+```
+
+`code`, `retryable`, and documented detail types are the machine contract;
+`message` is explanatory prose and may change. A corresponding single human
+line remains on stderr. `list` daemon/inventory failures exit `1`.
+`projects` preserves its existing command contract: argument and not-found
+failures exit `2`, operational failures exit `1`, and existing mutation codes
+such as `registration_changed` retain the same envelope. Kwt does not
+normalize unrelated commands' exit behavior. Exit `255` remains unused so an
+SSH caller can distinguish a remote-shell transport failure.
+
 Daemon ownership must not buffer human-facing operation progress. Removal
 continues to print each selected worktree's result as soon as that target
 finishes. Before longer mutations such as add, pull-request import, doctor,
@@ -192,6 +216,9 @@ generation, main-worktree status, and lock state while holding the repository's
 cross-process mutation lock. It also performs generation-safe registry cleanup.
 The CLI and TUI retain selection, output, fleet publication, and tmux-session
 cleanup; stale inventory alone never authorizes deletion.
+Known Git removal failures use the stable `removal_failed` code and preserve
+their credential-sanitized message and partial-result fields across the daemon
+boundary. Unexpected failures use `internal` and withhold their cause.
 If a removal response is lost, the client requests a fresh bounded repository
 inventory. A missing original generation is reported as an irreversible partial
 result so fleet publication, TUI refresh, and session cleanup still run. If the

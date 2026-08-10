@@ -40,9 +40,44 @@ func TestSourceClassifiesInventoryFailuresWithActionableMessage(t *testing.T) {
 
 	var typed *service.Error
 	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, service.InventoryFailed, typed.Code)
+	assert.False(t, typed.Retryable)
 	assert.NotEqual(t, "internal failure", typed.Message)
 	assert.Contains(t, typed.Message, "config")
 	assert.LessOrEqual(t, len(typed.Message), 512)
+}
+
+func TestClassifyInventoryErrorPreservesTimeoutAndCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+		code  service.Code
+	}{
+		{name: "deadline", cause: context.DeadlineExceeded, code: service.InventoryTimeout},
+		{name: "cancellation", cause: context.Canceled, code: service.InventoryFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := classifyInventoryError(test.cause)
+			var typed *service.Error
+			require.ErrorAs(t, err, &typed)
+			assert.Equal(t, test.code, typed.Code)
+			assert.True(t, typed.Retryable)
+			assert.ErrorIs(t, err, test.cause)
+		})
+	}
+}
+
+func TestClassifyInventoryErrorHidesUnexpectedCredentialBearingCause(t *testing.T) {
+	const secret = "inventory-password"
+	cause := errors.New("fetch https://user:" + secret + "@example.invalid/repository")
+
+	err := classifyInventoryError(cause)
+
+	typed := service.AsError(err)
+	assert.Equal(t, service.Internal, typed.Code)
+	assert.Equal(t, "internal failure", typed.Message)
+	assert.NotContains(t, typed.Message, secret)
+	assert.ErrorIs(t, err, cause)
 }
 
 func TestBoundedDiagnosticRemovesControlCharacters(t *testing.T) {

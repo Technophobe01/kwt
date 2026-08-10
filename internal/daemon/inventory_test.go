@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -51,6 +52,7 @@ func TestInventoryClientPreservesActionableSourceFailure(t *testing.T) {
 	})
 
 	typed := service.AsError(err)
+	assert.Equal(t, service.InventoryFailed, typed.Code)
 	assert.NotEqual(t, "internal failure", typed.Message)
 	assert.Contains(t, typed.Message, "config")
 }
@@ -87,6 +89,43 @@ func TestInventoryClientRoundTripsResult(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, kwt.Fresh, result.Freshness)
 	require.Len(t, inventory.requests, 1)
+}
+
+func TestInventoryServerReportsPrivateCauseWithoutReturningIt(t *testing.T) {
+	const secret = "inventory-password"
+	cause := errors.New("fetch https://user:" + secret + "@example.invalid/repository")
+	inventory := &fakeInventory{err: cause}
+	provider := &testStatusProvider{status: Status{State: StateReady}}
+	var reportedRoute string
+	var reported *service.Error
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = NewServer(ServerOptions{
+		Token: "secret", ExpectedHost: server.Listener.Addr().String(), Status: provider,
+		Shutdown:  func(context.Context, ShutdownRequest) (Status, error) { return provider.status, nil },
+		Inventory: inventory, Gate: NewGate(time.Now()),
+		ReportError: func(route string, failure *service.Error, _ kwt.ExpansionContext) {
+			reportedRoute, reported = route, failure
+		},
+	})
+	server.Start()
+	defer server.Close()
+	endpoint, err := kitdaemon.ParseEndpoint(
+		server.URL[len("http://"):],
+		kitdaemon.ParseEndpointOptions{TCPPolicy: kitdaemon.RequireLoopback},
+	)
+	require.NoError(t, err)
+	client := newClient(endpoint, "secret", server.Client())
+
+	_, err = client.Inventory(context.Background(), kwt.Request{View: kwt.ViewProjects})
+
+	typed := service.AsError(err)
+	assert.Equal(t, service.Internal, typed.Code)
+	assert.Equal(t, "internal failure", typed.Message)
+	assert.NotContains(t, typed.Error(), cause.Error())
+	assert.NotContains(t, typed.Error(), secret)
+	assert.Equal(t, "/api/v1/inventory", reportedRoute)
+	require.NotNil(t, reported)
+	assert.ErrorIs(t, reported, cause)
 }
 
 func TestInventoryClientPreservesTrustDetails(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"time"
 
@@ -154,7 +155,7 @@ func (c *Client) RemoveWorktree(
 		result = removalResultFromError(err)
 		if result.WorktreeRemoved {
 			err = &worktreeRemovedError{err: err}
-		} else if service.IsCode(err, service.TransportFailure) {
+		} else if service.IsCode(err, service.DaemonTransportFailed) {
 			removed, reconcileErr := c.reconcileRemoval(request)
 			if reconcileErr != nil {
 				err = &refreshRequiredError{err: errors.Join(
@@ -298,7 +299,7 @@ func (c *Client) doWith(
 	resp, err := client.Do(req)
 	if err != nil {
 		return service.NewError(
-			service.TransportFailure,
+			service.DaemonTransportFailed,
 			"kwt daemon request failed",
 			true,
 			nil,
@@ -313,7 +314,7 @@ func (c *Client) doWith(
 			message = err.Error()
 		}
 		return service.NewError(
-			service.TransportFailure,
+			service.DaemonTransportFailed,
 			message,
 			true,
 			nil,
@@ -328,7 +329,7 @@ func (c *Client) doWith(
 	}
 	if err := json.Unmarshal(encoded, output); err != nil {
 		return service.NewError(
-			service.TransportFailure,
+			service.DaemonTransportFailed,
 			"decode kwt daemon response",
 			true,
 			nil,
@@ -358,74 +359,71 @@ func decodeProblem(status int, body io.Reader) error {
 	var problem Problem
 	if err := json.NewDecoder(body).Decode(&problem); err != nil {
 		return service.NewError(
-			service.TransportFailure,
+			service.DaemonTransportFailed,
 			fmt.Sprintf("kwt daemon returned HTTP %d", status),
 			true,
 			nil,
 			err,
 		)
 	}
-	code, ok := problemCode(status, problem.Code)
+	code, ok := problemCode(problem.Code)
 	if !ok {
 		return service.NewError(
-			service.TransportFailure,
+			service.DaemonTransportFailed,
 			fmt.Sprintf("kwt daemon returned HTTP %d", status),
 			true,
 			nil,
 			nil,
 		)
 	}
+	message := problem.Message
+	if message == "" {
+		message = problem.Detail
+	}
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	if code == service.Internal {
+		message = "internal failure"
+	}
 	details := problem.Details
-	if problem.DrainDeadline != nil {
+	if _, validDeadline := drainDeadlineDetail(details); problem.DrainDeadline != nil && !validDeadline {
+		details = maps.Clone(details)
 		if details == nil {
 			details = make(map[string]any)
 		}
 		details["drain_deadline"] = *problem.DrainDeadline
 	}
-	message := problem.Detail
-	if message == "" {
-		message = http.StatusText(status)
-	}
-	return service.NewError(code, message, problem.Retryable, details, nil)
+	return service.NewDescriptorError(service.Descriptor{
+		Code: code, Message: message, Retryable: problem.Retryable,
+		Details: details,
+	}, nil)
 }
 
-func problemCode(status int, code string) (service.Code, bool) {
+func problemCode(code service.Code) (service.Code, bool) {
 	switch code {
-	case "daemon_draining":
-		return service.Busy, true
-	case string(service.InvalidRequest):
-		return service.InvalidRequest, true
-	case string(service.PermissionDenied):
-		return service.PermissionDenied, true
-	case string(service.NotFound):
-		return service.NotFound, true
-	case string(service.Conflict):
-		return service.Conflict, true
-	case string(service.Busy):
-		return service.Busy, true
-	case string(service.InteractionRequired):
-		return service.InteractionRequired, true
-	case string(service.ConnectionChanged):
-		return service.ConnectionChanged, true
-	case string(service.Unsupported):
-		return service.Unsupported, true
-	case string(service.TransportFailure):
-		return service.TransportFailure, true
-	case string(service.Internal):
-		return service.Internal, true
-	}
-	switch status {
-	case http.StatusBadRequest:
-		return service.InvalidRequest, true
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return service.PermissionDenied, true
-	case http.StatusNotFound:
-		return service.NotFound, true
-	case http.StatusConflict:
-		return service.Conflict, true
-	case http.StatusServiceUnavailable:
-		return service.Busy, true
+	case service.InvalidRequest,
+		service.PermissionDenied,
+		service.NotFound,
+		service.Conflict,
+		service.Busy,
+		service.InteractionRequired,
+		service.ConnectionChanged,
+		service.Unsupported,
+		service.TransportFailure,
+		service.DaemonStartFailed,
+		service.DaemonUnresponsive,
+		service.DaemonIncompatible,
+		service.DaemonDowngradeRefused,
+		service.DaemonBuildOrderUnknown,
+		service.DaemonDraining,
+		service.DaemonTransportFailed,
+		service.InventoryTimeout,
+		service.InventoryFailed,
+		service.RemovalFailed,
+		service.Internal:
+		return code, true
 	default:
-		return service.TransportFailure, false
+		return "", false
 	}
 }
