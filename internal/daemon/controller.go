@@ -32,7 +32,7 @@ type ControllerOptions struct {
 	AllowEphemeral   bool
 	Inspect          func(context.Context) (Observation, error)
 	Launch           func(context.Context) error
-	RequestShutdown  func(context.Context, Observation, string) error
+	RequestShutdown  func(context.Context, Observation, string) (Status, error)
 	PollInterval     time.Duration
 	StartTimeout     time.Duration
 	CleanupAllowance time.Duration
@@ -101,9 +101,11 @@ func (c *Controller) Stop(ctx context.Context) error {
 	case RuntimeAbsent:
 		return nil
 	case RuntimeReady, RuntimeStarting, RuntimeFailed:
-		if err := c.options.RequestShutdown(ctx, observation, "stop"); err != nil {
+		status, err := c.options.RequestShutdown(ctx, observation, "stop")
+		if err != nil {
 			return err
 		}
+		c.reportShutdown(status)
 	case RuntimeDraining:
 		c.reportDrain(observation)
 	case RuntimeIncompatible:
@@ -129,15 +131,23 @@ func (c *Controller) Restart(ctx context.Context) (Observation, error) {
 	case RuntimeAbsent:
 		return c.startLocked(ctx)
 	case RuntimeReady, RuntimeStarting, RuntimeFailed:
-		if olderVersion(c.options.Build.Version, observation.Status.Version) {
+		switch c.buildOrder(observation) {
+		case BuildOlder:
 			return Observation{}, daemonDowngradeError()
+		case BuildUnknown:
+			return Observation{}, daemonBuildOrderUnknownError()
 		}
-		if err := c.options.RequestShutdown(ctx, observation, "restart"); err != nil {
+		status, err := c.options.RequestShutdown(ctx, observation, "restart")
+		if err != nil {
 			return Observation{}, err
 		}
+		c.reportShutdown(status)
 	case RuntimeDraining:
-		if olderVersion(c.options.Build.Version, observation.Status.Version) {
+		switch c.buildOrder(observation) {
+		case BuildOlder:
 			return Observation{}, daemonDowngradeError()
+		case BuildUnknown:
+			return Observation{}, daemonBuildOrderUnknownError()
 		}
 		c.reportDrain(observation)
 	case RuntimeIncompatible:
@@ -161,15 +171,18 @@ func (c *Controller) startLocked(ctx context.Context) (Observation, error) {
 		return c.launchAndWait(ctx)
 	case RuntimeReady:
 		if decideReplacement(
-			c.options.Build.Version,
-			observation.Status.Version,
+			c.options.Build,
+			buildFromObservation(observation),
+			revisionTimeAdvertised(observation),
 			c.options.Config.AutoRestart,
 		) == reuseDaemon {
 			return observation, nil
 		}
-		if err := c.options.RequestShutdown(ctx, observation, "replacement"); err != nil {
+		status, err := c.options.RequestShutdown(ctx, observation, "replacement")
+		if err != nil {
 			return Observation{}, err
 		}
+		c.reportShutdown(status)
 		if err := c.waitForAbsent(ctx); err != nil {
 			return Observation{}, err
 		}
@@ -179,8 +192,11 @@ func (c *Controller) startLocked(ctx context.Context) (Observation, error) {
 	case RuntimeFailed:
 		return Observation{}, c.failedError(observation)
 	case RuntimeDraining:
-		if olderVersion(c.options.Build.Version, observation.Status.Version) {
+		switch c.buildOrder(observation) {
+		case BuildOlder:
 			return Observation{}, daemonDowngradeError()
+		case BuildUnknown:
+			return Observation{}, daemonBuildOrderUnknownError()
 		}
 		c.reportDrain(observation)
 		if err := c.waitForAbsent(ctx); err != nil {
@@ -294,6 +310,12 @@ func (c *Controller) reportDrain(observation Observation) {
 	)
 }
 
+func (c *Controller) reportShutdown(status Status) {
+	if status.State == StateDraining || status.DrainDeadline != nil {
+		c.reportDrain(Observation{State: RuntimeDraining, Status: status})
+	}
+}
+
 func (c *Controller) incompatibleError(observation Observation) error {
 	return service.NewError(
 		service.Unsupported,
@@ -330,8 +352,18 @@ func (c *Controller) failedError(observation Observation) error {
 
 func daemonDowngradeError() error {
 	return service.NewError(
-		service.Unsupported,
+		service.DaemonDowngradeRefused,
 		"an older kwt cannot replace a newer daemon",
+		false,
+		nil,
+		nil,
+	)
+}
+
+func daemonBuildOrderUnknownError() error {
+	return service.NewError(
+		service.DaemonBuildOrderUnknown,
+		"kwt cannot prove whether it is newer than the running daemon",
 		false,
 		nil,
 		nil,
@@ -361,9 +393,9 @@ func requestShutdown(
 	ctx context.Context,
 	observation Observation,
 	reason string,
-) error {
+) (Status, error) {
 	if observation.Client == nil {
-		return service.NewError(
+		return Status{}, service.NewError(
 			service.Conflict,
 			"the running kwt daemon was not proof-verified",
 			false,
@@ -371,8 +403,8 @@ func requestShutdown(
 			nil,
 		)
 	}
-	_, err := observation.Client.Shutdown(ctx, reason)
-	return err
+	response, err := observation.Client.Shutdown(ctx, reason)
+	return response.Status, err
 }
 
 func comparableVersion(value string) (string, bool) {
@@ -388,25 +420,40 @@ func comparableVersion(value string) (string, bool) {
 	return value, true
 }
 
-func decideReplacement(client, running, policy string) replacementDecision {
+func decideReplacement(
+	client Build,
+	running Build,
+	runningAdvertisedTime bool,
+	policy string,
+) replacementDecision {
 	if policy != "newer" {
 		return reuseDaemon
 	}
-	clientVersion, clientOK := comparableVersion(client)
-	runningVersion, runningOK := comparableVersion(running)
-	if !clientOK || !runningOK {
-		return reuseDaemon
-	}
-	if semver.Compare(clientVersion, runningVersion) > 0 {
+	if CompareBuilds(client, running, runningAdvertisedTime) == BuildNewer {
 		return replaceDaemon
 	}
 	return reuseDaemon
 }
 
-func olderVersion(client, running string) bool {
-	clientVersion, clientOK := comparableVersion(client)
-	runningVersion, runningOK := comparableVersion(running)
-	return clientOK && runningOK && semver.Compare(clientVersion, runningVersion) < 0
+func buildFromObservation(observation Observation) Build {
+	return Build{
+		Version:      observation.Status.Version,
+		Revision:     observation.Status.Revision,
+		RevisionTime: observation.Status.RevisionTime,
+	}
+}
+
+func revisionTimeAdvertised(observation Observation) bool {
+	_, present := observation.Record.Metadata[metadataRevisionTime]
+	return present
+}
+
+func (c *Controller) buildOrder(observation Observation) BuildOrder {
+	return CompareBuilds(
+		c.options.Build,
+		buildFromObservation(observation),
+		revisionTimeAdvertised(observation),
+	)
 }
 
 func environmentWithCanonicalHome(environment []string, home string) []string {
