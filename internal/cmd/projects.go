@@ -21,13 +21,14 @@ import (
 )
 
 var (
-	projectsJSON           bool
-	projectsAddJSON        bool
-	projectsRemoveJSON     bool
-	loadProjectsConfig     = config.Load
-	registerProject        = config.RegisterProject
-	unregisterProject      = config.UnregisterProject
-	queryProjectsInventory = queryCLIInventory
+	projectsJSON               bool
+	projectsAddJSON            bool
+	projectsRemoveJSON         bool
+	loadProjectsConfig         = config.Load
+	registerProject            = registerProjectWithLifecycle
+	queryProjectsInventory     = queryCLIInventory
+	removeProjectThroughDaemon = removeProjectViaDaemon
+	projectsExpectedRepository string
 )
 
 var projectsCmd = &cobra.Command{
@@ -71,7 +72,7 @@ var projectsRemoveCmd = &cobra.Command{
 	Use:   "remove <path>",
 	Short: "Unregister a project without deleting its repository",
 	Args:  projectsExactArgs(1),
-	RunE:  runProjectsRemove,
+	RunE:  withGracefulSignals(runProjectsRemove),
 }
 
 func init() {
@@ -79,6 +80,12 @@ func init() {
 	projectsCmd.Flags().BoolVar(&projectsJSON, "json", false, "Output in JSON format")
 	projectsAddCmd.Flags().BoolVar(&projectsAddJSON, "json", false, "Output a machine-readable result")
 	projectsRemoveCmd.Flags().BoolVar(&projectsRemoveJSON, "json", false, "Output a machine-readable result")
+	projectsRemoveCmd.Flags().StringVar(
+		&projectsExpectedRepository,
+		"expected-repository",
+		"",
+		"Require the exact credential-free repository identity",
+	)
 	projectsCmd.AddCommand(projectsAddCmd, projectsRemoveCmd)
 	projectsCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return writeProjectCommandError(cmd, "invalid_repository", err.Error(), 2)
@@ -184,7 +191,7 @@ func runProjectsAdd(cmd *cobra.Command, args []string) error {
 		break
 	}
 	project.LastTouched = time.Now().UTC().Format(time.RFC3339)
-	if err := registerProject(project); err != nil {
+	if err := registerProject(cmd.Context(), project); err != nil {
 		return writeProjectCommandError(
 			cmd,
 			"registration_failed",
@@ -211,34 +218,28 @@ func runProjectsAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runProjectsRemove(cmd *cobra.Command, args []string) error {
-	project, changed, err := unregisterProject(args[0])
+	if projectsExpectedRepository == "" {
+		return writeProjectServiceError(cmd, service.NewError(
+			service.InvalidRequest,
+			"expected repository identity is required",
+			false, nil, nil,
+		))
+	}
+	expansion, err := kwt.CaptureExpansionContext()
 	if err != nil {
-		return writeProjectCommandError(
-			cmd,
-			"unregistration_failed",
-			fmt.Sprintf("failed to unregister project: %v", err),
-			1,
-		)
+		return writeProjectServiceError(cmd, service.NewError(
+			service.UnregistrationFailed,
+			"failed to capture project removal context",
+			false, nil, err,
+		))
 	}
-	if !changed && project.Path == "" {
-		return writeProjectCommandError(
-			cmd,
-			"project_not_found",
-			fmt.Sprintf("no project is registered at %s", args[0]),
-			2,
-		)
+	result, err := removeProjectThroughDaemon(cmd.Context(), kwt.ProjectRemovalRequest{
+		Path: args[0], ExpectedRepository: projectsExpectedRepository, Expansion: expansion,
+	})
+	if err != nil {
+		return writeProjectServiceError(cmd, service.AsError(err))
 	}
-	if !changed {
-		return writeProjectCommandErrorWithRetry(
-			cmd,
-			"registration_changed",
-			"the project registration changed before it could be removed",
-			1,
-			true,
-		)
-	}
-	project.Repository = publishableProjectRepository(project)
-
+	project := result.Project
 	if projectsRemoveJSON {
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetIndent("", "  ")
@@ -254,6 +255,20 @@ func runProjectsRemove(cmd *cobra.Command, args []string) error {
 		project.Path,
 	)
 	return err
+}
+
+func writeProjectServiceError(cmd *cobra.Command, typed *service.Error) error {
+	exitCode := 1
+	if typed.Code == service.InvalidRequest || typed.Code == service.ProjectNotFound {
+		exitCode = 2
+	}
+	return writeCommandFailure(
+		cmd,
+		typed.Descriptor,
+		exitCode,
+		projectCommandJSONRequested(),
+		"projects",
+	)
 }
 
 func resolveProjectForRegistration(path string) (models.Project, error) {

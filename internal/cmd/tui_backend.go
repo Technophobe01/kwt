@@ -20,6 +20,7 @@ import (
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/status"
 	"go.kenn.io/kwt/internal/tmux"
@@ -48,7 +49,7 @@ type tuiBackend struct {
 	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions              func() ([]string, error)
 	ensureAndAttach           func(context.Context, string, string, models.Layout, bool) error
-	registerProject           func(models.Project) error
+	registerProject           func(context.Context, models.Project) error
 	registerWorkspace         func(models.Workspace) (models.Workspace, error)
 	unregisterWorkspace       func(name string) error
 	readFleetState            func(context.Context, *models.Config) (fleet.FleetState, error)
@@ -57,6 +58,7 @@ type tuiBackend struct {
 	now                       func() time.Time
 	queryInventory            func(context.Context, kwt.Request, bool, io.Writer) (kwt.Result, error)
 	removeWorktree            func(context.Context, kwt.RemovalRequest) (kwt.RemovalResult, error)
+	runProjectOperation       func(context.Context, string, bool, []string, func() error) error
 	stderr                    io.Writer
 }
 
@@ -87,12 +89,13 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 			tmuxCmd,
 			protectedNames,
 		).EnsureAndAttach,
-		registerProject:         config.RegisterProject,
+		registerProject:         registerProjectWithLifecycle,
 		registerWorkspace:       config.RegisterWorkspace,
 		unregisterWorkspace:     config.UnregisterWorkspace,
 		readFleetState:          readTUIFleetState,
 		acknowledgeRemoteSource: acknowledgeRemoteSourcePath,
 		removeWorktree:          removeDaemonWorktree,
+		runProjectOperation:     runTUIProjectOperation,
 		now:                     time.Now,
 	}
 	backend.loadTargetConfig = func(repoRoot string, interactive bool) (*models.Config, error) {
@@ -169,7 +172,7 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	}
 
 	entries = mergeTUIEntries(entries, registeredEntries)
-	b.registerLaunchProject(launchEntries)
+	b.registerLaunchProject(ctx, launchEntries)
 	b.registerLaunchWorkspace(launchEntries)
 	entries = mergeTUIEntries(entries, launchEntries)
 
@@ -232,7 +235,7 @@ func (b *tuiBackend) listDaemon(ctx context.Context, includeStatuses bool) ([]da
 		for _, entry := range result.Snapshot.LaunchEntries {
 			launchEntries = append(launchEntries, dashboardInventoryEntry(entry))
 		}
-		b.registerLaunchProject(launchEntries)
+		b.registerLaunchProject(ctx, launchEntries)
 		b.registerLaunchWorkspace(launchEntries)
 		renderWorkspaces = append([]models.Workspace(nil), b.cfg.Workspaces...)
 	}
@@ -464,7 +467,10 @@ func (b *tuiBackend) loadRegisteredProjectInventory() (
 // registerLaunchProject persists the launch repository at most once per TUI
 // run. Both stages discover it, but rewriting config during each load would
 // put bookkeeping back on the startup and refresh paths.
-func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEntry) {
+func (b *tuiBackend) registerLaunchProject(
+	ctx context.Context,
+	entries []*discovery.GlobalWorktreeEntry,
+) {
 	if b.launchProjectRegistered || b.registerProject == nil {
 		return
 	}
@@ -478,7 +484,7 @@ func (b *tuiBackend) registerLaunchProject(entries []*discovery.GlobalWorktreeEn
 			project = reusable
 		}
 	}
-	if err := b.registerProject(project); err != nil {
+	if err := b.registerProject(ctx, project); err != nil {
 		return
 	}
 	b.upsertProject(project)
@@ -1044,19 +1050,65 @@ func (b *tuiBackend) CreateWorktree(
 		return "", err
 	}
 	var path string
-	switch source {
-	case "":
-		path, err = manager.Add(branch, "", true)
-	case branch:
-		path, err = manager.Add(branch, "", false)
-	default:
-		path, err = manager.AddTracking(branch, source, "")
-	}
+	err = b.runProjectOperation(ctx, row.Entry.Path, false, nil, func() error {
+		var mutationErr error
+		switch source {
+		case "":
+			path, mutationErr = manager.Add(branch, "", true)
+		case branch:
+			path, mutationErr = manager.Add(branch, "", false)
+		default:
+			path, mutationErr = manager.AddTracking(branch, source, "")
+		}
+		return mutationErr
+	})
 	if err != nil {
 		return "", err
 	}
 	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
+}
+
+func observeTUIProjectGuard(
+	ctx context.Context,
+	repositoryPath string,
+	required bool,
+	expectedIdentities []string,
+) (*guardedProjectOperation, error) {
+	mainPath, err := git.New(repositoryPath).GetMainRepositoryPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve selected repository root: %w", err)
+	}
+	home, err := config.CanonicalHome()
+	if err != nil {
+		return nil, err
+	}
+	expansion, err := kwt.CaptureExpansionContext()
+	if err != nil {
+		return nil, err
+	}
+	if required {
+		return observeRequiredGuardedProjectOperation(
+			ctx, home, mainPath, expansion, expectedIdentities...,
+		)
+	}
+	return observeGuardedProjectOperation(ctx, home, mainPath, expansion)
+}
+
+func runTUIProjectOperation(
+	ctx context.Context,
+	repositoryPath string,
+	required bool,
+	expectedIdentities []string,
+	mutation func() error,
+) error {
+	guard, err := observeTUIProjectGuard(
+		ctx, repositoryPath, required, expectedIdentities,
+	)
+	if err != nil {
+		return err
+	}
+	return guard.run(ctx, mutation)
 }
 
 func (b *tuiBackend) ListBranches(
@@ -1122,6 +1174,30 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 	if !ok {
 		return "", fmt.Errorf("no local project configured for %s", row.Fleet.ProjectIdentity)
 	}
+	var path string
+	err := b.runProjectOperation(
+		ctx,
+		project.Path,
+		true,
+		[]string{row.Fleet.ProjectIdentity, project.Repository},
+		func() error {
+			var mutationErr error
+			path, mutationErr = b.materializeWorktree(ctx, row, project)
+			return mutationErr
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	publishTUIFleetBestEffort(ctx, b.cfg)
+	return path, nil
+}
+
+func (b *tuiBackend) materializeWorktree(
+	ctx context.Context,
+	row dashboard.Row,
+	project models.Project,
+) (string, error) {
 	repo := git.New(project.Path)
 	branchExisted := localBranchExists(ctx, repo, row.Fleet.Branch)
 	cfg, err := b.loadTargetConfig(project.Path, false)
@@ -1177,7 +1253,6 @@ func (b *tuiBackend) MaterializeWorktree(ctx context.Context, row dashboard.Row)
 		}
 		return "", err
 	}
-	publishTUIFleetBestEffort(ctx, b.cfg)
 	return path, nil
 }
 
@@ -1359,12 +1434,10 @@ func (b *tuiBackend) projectForFleetInfo(info *dashboard.FleetInfo) (models.Proj
 // fold. A plain EqualFold would let a case-sensitive server's two repositories
 // match each other, and this decides which checkout a mutation runs against.
 func equalRepositoryIdentity(left string, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
 	if left == "" || right == "" {
 		return false
 	}
-	return url.FoldRepositoryIdentity(left) == url.FoldRepositoryIdentity(right)
+	return lifecycle.EqualProjectIdentity(left, right)
 }
 
 func sameRepositoryIdentity(left string, right string) bool {

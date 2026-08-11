@@ -1515,6 +1515,12 @@ func TestRepositoryInfoWithProjects(t *testing.T) {
 	}
 }
 
+func TestRepositoryInfoFromExactLocalPathPreservesTrailingWhitespace(t *testing.T) {
+	info, err := RepositoryInfoFromExactLocalPath("/repo ")
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(info.FullPath, "/repo "), info.FullPath)
+}
+
 func TestManagerAddGeneratesPathForLocalOnlyRepository(t *testing.T) {
 	baseDir := t.TempDir()
 	repoPath, err := filepath.EvalSymlinks(t.TempDir())

@@ -72,6 +72,20 @@ func TestNewCmdStripsConfiguredSensitiveEnvironmentName(t *testing.T) {
 	}
 }
 
+func TestProtectedSessionProbeCommandStripsConfiguredCredential(t *testing.T) {
+	t.Setenv("GHOSTHUB_AUTH", "secret")
+
+	command := newProtectedSessionProbeCommand(
+		"kwt-pr-0123456789abcdef", []string{"GHOSTHUB_AUTH"},
+	).newCmd(context.Background(), []string{"list-sessions"})
+
+	for _, entry := range command.Env {
+		if hasEnvName(entry, "GHOSTHUB_AUTH") {
+			t.Fatalf("protected-session probe leaked configured credential: %v", command.Env)
+		}
+	}
+}
+
 func TestSocketCommandPrefixesEveryInvocationWithSocketName(t *testing.T) {
 	tc := NewTmuxCommandForSocketWithStripNames(
 		"tmux",
@@ -268,6 +282,50 @@ func TestProtectedAttachStripsParentTmuxIdentity(t *testing.T) {
 	}
 	if !foundUnrelated {
 		t.Error("protected attach dropped UNRELATED_VAR")
+	}
+}
+
+func TestNamedSocketCommandsIgnoreAmbientTmuxTempDirectory(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", "/tmp/caller-specific-tmux")
+
+	tc := NewTmuxCommandForSocketWithStripNames(
+		"tmux",
+		"kwt-pr-0123456789abcdef",
+		nil,
+	)
+	commands := []*exec.Cmd{
+		tc.newCmd(context.Background(), []string{"has-session", "-t", "workspace"}),
+		tc.newAttachCmd(context.Background(), []string{"attach-session", "-t", "workspace"}),
+	}
+	for _, command := range commands {
+		for _, entry := range command.Env {
+			if hasEnvName(entry, "TMUX_TMPDIR") {
+				t.Fatalf("named socket command inherited TMUX_TMPDIR")
+			}
+		}
+	}
+}
+
+func TestLegacyNamedSocketCommandUsesExplicitTmuxTempDirectory(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", "/tmp/unrelated")
+	tempDir := "/tmp/legacy-tmux"
+
+	tc := NewTmuxCommandForSocketInTempDirWithStripNames(
+		"tmux", "kwt-pr-0123456789abcdef", tempDir, nil,
+	)
+	command := tc.newCmd(context.Background(), []string{"list-sessions"})
+
+	found := false
+	for _, entry := range command.Env {
+		if entry == "TMUX_TMPDIR="+tempDir {
+			found = true
+		}
+		if entry == "TMUX_TMPDIR=/tmp/unrelated" {
+			t.Fatalf("legacy socket command inherited ambient TMUX_TMPDIR: %v", command.Env)
+		}
+	}
+	if !found {
+		t.Fatalf("legacy socket command omitted explicit TMUX_TMPDIR: %v", command.Env)
 	}
 }
 

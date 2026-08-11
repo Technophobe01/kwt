@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/git"
@@ -832,12 +833,25 @@ func registeredProjectIdentity(
 // entry point to the same canonical local fallback RepositoryInfoFromGit uses,
 // for callers that hold a directory path rather than a git surface.
 func RepositoryInfoFromLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
-	repoRoot = strings.TrimSpace(repoRoot)
+	return repositoryInfoFromLocalPath(repoRoot, true)
+}
+
+// RepositoryInfoFromExactLocalPath derives a local identity without changing
+// the caller's path spelling. Project registry paths may legitimately end in
+// whitespace, so identity-bound registry operations use this variant.
+func RepositoryInfoFromExactLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
+	return repositoryInfoFromLocalPath(repoRoot, false)
+}
+
+func repositoryInfoFromLocalPath(repoRoot string, trim bool) (*url.RepositoryInfo, error) {
+	if trim {
+		repoRoot = strings.TrimSpace(repoRoot)
+	}
 	if repoRoot == "" {
 		return nil, fmt.Errorf("empty repository path")
 	}
 	cleanPath := repoRoot
-	if absPath, err := filepath.Abs(cleanPath); err == nil {
+	if absPath, err := absolutePathPreservingTrailingWhitespace(cleanPath); err == nil {
 		cleanPath = absPath
 	} else {
 		return nil, err
@@ -853,6 +867,18 @@ func RepositoryInfoFromLocalPath(repoRoot string) (*url.RepositoryInfo, error) {
 		Repository: name,
 		FullPath:   localRepositoryFullPath(cleanPath),
 	}, nil
+}
+
+func absolutePathPreservingTrailingWhitespace(path string) (string, error) {
+	suffix := path[len(strings.TrimRightFunc(path, unicode.IsSpace)):]
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if suffix != "" && !strings.HasSuffix(absPath, suffix) {
+		absPath += suffix
+	}
+	return absPath, nil
 }
 
 func localRepositoryFullPath(cleanPath string) string {

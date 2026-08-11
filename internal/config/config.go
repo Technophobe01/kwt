@@ -841,13 +841,32 @@ func CompareAndSwapProject(
 	expected ProjectRegistration,
 	replacement *models.Project,
 ) (bool, error) {
+	return compareAndSwapProjectAt(getConfigDir(), expected, replacement, true)
+}
+
+// CompareAndSwapProjectAt performs the raw-entry project CAS in an explicit
+// kwt home. Daemon operations must not depend on process-global KWT_HOME.
+func CompareAndSwapProjectAt(
+	home string,
+	expected ProjectRegistration,
+	replacement *models.Project,
+) (bool, error) {
+	return compareAndSwapProjectAt(home, expected, replacement, false)
+}
+
+func compareAndSwapProjectAt(
+	home string,
+	expected ProjectRegistration,
+	replacement *models.Project,
+	updateProcessConfig bool,
+) (bool, error) {
 	var copiedReplacement *models.Project
 	if replacement != nil {
 		copied := *replacement
 		copiedReplacement = &copied
 	}
 	var projects []map[string]any
-	configPath := filepath.Join(getConfigDir(), configName+"."+configType)
+	configPath := filepath.Join(home, configName+"."+configType)
 	changed, err := (globalConfigStore{path: configPath}).mutate(
 		func(globalViper *viper.Viper) (bool, error) {
 			var err error
@@ -902,47 +921,10 @@ func CompareAndSwapProject(
 	if err != nil {
 		return false, err
 	}
-	if changed {
+	if changed && updateProcessConfig {
 		viper.Set("projects", projects)
 	}
 	return changed, nil
-}
-
-// UnregisterProject removes the one global project registration matching path.
-// It never removes repository or worktree data. A false result with a non-empty
-// project means the registration changed after it was read and was preserved.
-func UnregisterProject(path string) (models.Project, bool, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return models.Project{}, false, fmt.Errorf("project path required")
-	}
-	normalized, err := normalizeProjectPath(path)
-	if err != nil {
-		return models.Project{}, false, err
-	}
-	snapshot, err := LoadGlobalSnapshot()
-	if err != nil {
-		return models.Project{}, false, err
-	}
-	var match *ProjectRegistration
-	for index := range snapshot.Projects {
-		registration := &snapshot.Projects[index]
-		if !sameProjectPath(registration.Effective.Path, normalized) {
-			continue
-		}
-		if match != nil {
-			return models.Project{}, false, fmt.Errorf(
-				"multiple project registrations match %s",
-				normalized,
-			)
-		}
-		match = registration
-	}
-	if match == nil {
-		return models.Project{}, false, nil
-	}
-	changed, err := CompareAndSwapProject(*match, nil)
-	return match.Persisted, changed, err
 }
 
 func rawProjectEntries(source *viper.Viper) ([]map[string]any, error) {

@@ -10,9 +10,11 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	kwt "go.kenn.io/kwt"
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/credentials"
 	gitadapter "go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/tmux"
@@ -20,6 +22,7 @@ import (
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
+	"go.kenn.io/kwt/service"
 )
 
 type prService interface {
@@ -40,8 +43,8 @@ var (
 	validatePRProjectRoot            = defaultValidatePRProjectRoot
 	inspectPRProjectClone            = defaultInspectPRProjectClone
 	validatePRWorkspaceSessionConfig = defaultValidatePRWorkspaceSessionConfig
-	startPRWorkspaceSession          = defaultStartPRWorkspaceSession
-	attachPRWorkspaceSession         = defaultAttachPRWorkspaceSession
+	ensurePRWorkspaceSession         = defaultStartPRWorkspaceSession
+	attachExistingPRWorkspaceSession = defaultAttachExistingPRWorkspaceSession
 	readPRWorkspaceGeneration        = func(path string) (string, error) {
 		return gitadapter.New(path).ReadWorktreeGeneration(path)
 	}
@@ -162,20 +165,40 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			))
 		}
 	}
-	result, err := service.Import(cmd.Context(), project, fmt.Sprintf("%d", number))
+	home, err := config.CanonicalHome()
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	result.Workspace.TmuxSocketName = tmux.ProtectedWorkspaceSocketName(
-		result.Workspace.SessionName,
-		result.Workspace.Path,
+	expansion, err := kwt.CaptureExpansionContext()
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	guard, err := observeRequiredGuardedProjectOperation(
+		cmd.Context(), home, project.Path, expansion,
+		registeredIdentity, project.Identity,
 	)
-	result.PullRequest.Workspace = &result.Workspace
-	if prStartSession {
-		socketName, startErr := startPRWorkspaceSession(
-			cmd.Context(),
-			result.Workspace,
-			cfg,
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	var result pullrequest.ImportResult
+	err = guard.run(cmd.Context(), func() error {
+		var importErr error
+		result, importErr = service.Import(
+			cmd.Context(), project, fmt.Sprintf("%d", number),
+		)
+		if importErr != nil {
+			return importErr
+		}
+		result.Workspace.TmuxSocketName = tmux.ProtectedWorkspaceSocketName(
+			result.Workspace.SessionName,
+			result.Workspace.Path,
+		)
+		result.PullRequest.Workspace = &result.Workspace
+		if !prStartSession {
+			return nil
+		}
+		socketName, startErr := ensurePRWorkspaceSession(
+			cmd.Context(), result.Workspace, cfg,
 		)
 		if startErr != nil {
 			message := "failed to start imported workspace session"
@@ -189,10 +212,15 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 				false,
 				startErr,
 			)
-			return writePRJSON(cmd, result)
+			return nil
 		}
 		result.Workspace.TmuxSocketName = socketName
+		return nil
+	})
+	if err != nil {
+		return writePRError(cmd, err)
 	}
+	result.PullRequest.Workspace = &result.Workspace
 	return writePRJSON(cmd, result)
 }
 
@@ -216,11 +244,51 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 			err,
 		))
 	}
-	if err := attachPRWorkspaceSession(
-		cmd.Context(),
-		record.Workspace,
-		cfg,
-	); err != nil {
+	home, err := config.CanonicalHome()
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	expansion, err := kwt.CaptureExpansionContext()
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	guard, err := observeRequiredGuardedProjectOperation(
+		cmd.Context(), home, record.Project.Path, expansion,
+		pullrequest.ProvenanceRepositoryIdentities(record)...,
+	)
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	var socketName string
+	err = guard.run(cmd.Context(), func() error {
+		current, currentErr := importedWorkspaceProvenance(
+			cmd.Context(), args[0],
+		)
+		if currentErr != nil {
+			return currentErr
+		}
+		if !provenanceMatchesProjectClaim(current, guard.claim) {
+			return service.NewError(
+				service.RegistrationChanged,
+				"the imported workspace changed projects before attachment",
+				true, nil, nil,
+			)
+		}
+		record = current
+		socketName, currentErr = ensurePRWorkspaceSession(
+			cmd.Context(), record.Workspace, cfg,
+		)
+		return currentErr
+	})
+	if service.IsCode(err, service.RegistrationChanged) {
+		return writePRError(cmd, err)
+	}
+	if err == nil {
+		err = attachExistingPRWorkspaceSession(
+			cmd.Context(), record.Workspace, cfg, socketName,
+		)
+	}
+	if err != nil {
 		message := "failed to attach imported workspace session"
 		var safetyError *tmux.SessionSafetyError
 		if errors.As(err, &safetyError) {
@@ -234,6 +302,19 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 		))
 	}
 	return nil
+}
+
+func provenanceMatchesProjectClaim(
+	record pullrequest.Provenance,
+	claim *lifecycle.ProjectClaim,
+) bool {
+	if claim == nil || utils.PathKey(record.Project.Path) !=
+		utils.PathKey(claim.Registration.Effective.Path) {
+		return false
+	}
+	return projectClaimHasExpectedIdentity(
+		claim, pullrequest.ProvenanceRepositoryIdentities(record),
+	)
 }
 
 func importedWorkspaceProvenance(
@@ -614,11 +695,16 @@ func defaultStartPRWorkspaceSession(
 		workspace.SessionName,
 		workspace.Path,
 	)
-	tmuxCommand := tmux.NewTmuxCommandForSocketWithStripNames(
-		"",
+	tmuxCommand, _, err := tmux.ResolveProtectedSessionCommand(
+		ctx,
 		socketName,
+		workspace.SessionName,
 		stripNames,
+		os.Getenv("TMUX_TMPDIR"),
 	)
+	if err != nil {
+		return "", err
+	}
 	err = tmux.NewProtectedWorkspaceRunner(
 		tmuxCommand,
 		stripNames,
@@ -657,10 +743,11 @@ func preparePRWorkspaceSessionLayout(
 	return tmux.BlankLayout(), nil
 }
 
-func defaultAttachPRWorkspaceSession(
+func defaultAttachExistingPRWorkspaceSession(
 	ctx context.Context,
 	workspace pullrequest.Workspace,
 	cfg *models.Config,
+	socketName string,
 ) error {
 	if cfg == nil {
 		return fmt.Errorf("kwt configuration is unavailable")
@@ -669,28 +756,19 @@ func defaultAttachPRWorkspaceSession(
 		strings.TrimSpace(workspace.SessionName) == "" {
 		return fmt.Errorf("imported workspace has no tmux identity")
 	}
-	layout, err := preparePRWorkspaceSessionLayout(cfg)
+	stripNames := credentials.ProtectedNames(cfg)
+	tmuxCommand, _, err := tmux.ResolveProtectedSessionCommand(
+		ctx,
+		socketName,
+		workspace.SessionName,
+		stripNames,
+		os.Getenv("TMUX_TMPDIR"),
+	)
 	if err != nil {
 		return err
 	}
-	stripNames := credentials.ProtectedNames(cfg)
-	socketName := tmux.ProtectedWorkspaceSocketName(
-		workspace.SessionName,
-		workspace.Path,
-	)
-	tmuxCommand := tmux.NewTmuxCommandForSocketWithStripNames(
-		"",
-		socketName,
-		stripNames,
-	)
-	return tmux.NewProtectedWorkspaceRunner(
-		tmuxCommand,
-		stripNames,
-	).EnsureAndAttachProtected(
-		ctx,
-		workspace.SessionName,
-		workspace.Path,
-		layout,
+	return tmuxCommand.AttachSessionWithoutEnvironment(
+		ctx, workspace.SessionName,
 	)
 }
 
@@ -957,6 +1035,12 @@ func (e *prCommandError) Unwrap() error { return e.err }
 func (e *prCommandError) ExitCode() int { return prExitCode(e.err.Code) }
 
 func writePRError(cmd *cobra.Command, err error) error {
+	var serviceErr *service.Error
+	if errors.As(err, &serviceErr) {
+		return writeCommandFailure(
+			cmd, serviceErr.Descriptor, 1, true, "pr",
+		)
+	}
 	typed := pullrequest.AsError(err, pullrequest.CodeWorkspaceCreation, "pull-request operation failed")
 	cmd.Root().SilenceUsage = true
 	cmd.Root().SilenceErrors = true

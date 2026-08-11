@@ -38,6 +38,7 @@ type SessionManagerInterface interface {
 type TmuxCommand struct {
 	command         string
 	socketName      string
+	socketTempDir   string
 	extraStripNames map[string]bool
 	attachProcess   attachProcessFunc
 }
@@ -80,6 +81,22 @@ func NewTmuxCommandForSocketWithStripNames(
 		extraStripNames: extra,
 		attachProcess:   replaceAttachProcess,
 	}
+}
+
+// NewTmuxCommandForSocketInTempDirWithStripNames targets a named socket in an
+// explicit legacy TMUX_TMPDIR. The supplied directory replaces, rather than
+// inherits, the caller's ambient value.
+func NewTmuxCommandForSocketInTempDirWithStripNames(
+	command string,
+	socketName string,
+	tempDir string,
+	names []string,
+) *TmuxCommand {
+	tmuxCommand := NewTmuxCommandForSocketWithStripNames(
+		command, socketName, names,
+	)
+	tmuxCommand.socketTempDir = tempDir
+	return tmuxCommand
 }
 
 func (t *TmuxCommand) NewSession(name, workDir string) error {
@@ -311,14 +328,25 @@ func (t *TmuxCommand) RunCommandContext(ctx context.Context, args ...string) err
 // returns its stdout — used to capture the pane ID printed by
 // new-session/split-window with -P -F '#{pane_id}'.
 func (t *TmuxCommand) RunCommandOutputContext(ctx context.Context, args ...string) (string, error) {
+	stdout, stderr, err := t.runCommandOutputContextWithStderr(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("tmux command failed: %w, stderr: %s", err, stderr)
+	}
+	return stdout, nil
+}
+
+func (t *TmuxCommand) runCommandOutputContextWithStderr(
+	ctx context.Context,
+	args ...string,
+) (string, string, error) {
 	cmd := t.newCmd(ctx, args)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("tmux command failed: %w, stderr: %s", err, stderr.String())
+		return stdout.String(), stderr.String(), err
 	}
-	return stdout.String(), nil
+	return stdout.String(), stderr.String(), nil
 }
 
 // GlobalEnvironment returns the tmux server's global environment table, one
@@ -384,7 +412,7 @@ func (t *TmuxCommand) globalOption(option string) (string, error) {
 // predate context plumbing pass context.Background().
 func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
-	cmd.Env = t.stripExtraNames(SanitizedEnviron(os.Environ()))
+	cmd.Env = t.socketEnvironment(SanitizedEnviron(os.Environ()))
 	return cmd
 }
 
@@ -397,7 +425,7 @@ func (t *TmuxCommand) newCmd(ctx context.Context, args []string) *exec.Cmd {
 // client still carried them.
 func (t *TmuxCommand) newAttachCmd(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, t.command, t.socketArgs(args)...)
-	cmd.Env = t.stripExtraNames(AttachSanitizedEnviron(os.Environ()))
+	cmd.Env = t.socketEnvironment(AttachSanitizedEnviron(os.Environ()))
 	return cmd
 }
 
@@ -411,10 +439,21 @@ func (t *TmuxCommand) socketArgs(args []string) []string {
 }
 
 func (t *TmuxCommand) stripExtraNames(env []string) []string {
-	if len(t.extraStripNames) == 0 {
+	if len(t.extraStripNames) == 0 && t.socketName == "" {
 		return env
 	}
 	return filteredEnviron(env, func(name string) bool {
+		if t.socketName != "" && strings.EqualFold(name, "TMUX_TMPDIR") {
+			return true
+		}
 		return t.extraStripNames[strings.ToLower(name)]
 	})
+}
+
+func (t *TmuxCommand) socketEnvironment(env []string) []string {
+	env = t.stripExtraNames(env)
+	if t.socketName != "" && t.socketTempDir != "" {
+		env = append(env, "TMUX_TMPDIR="+t.socketTempDir)
+	}
+	return env
 }

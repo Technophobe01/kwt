@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,16 +15,21 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v90/github"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	kwt "go.kenn.io/kwt"
+	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/credentials"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/tmux"
 	urlutil "go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
+	"go.kenn.io/kwt/service"
 )
 
 type fakePRService struct {
@@ -50,6 +56,16 @@ func (f *fakePRService) Import(_ context.Context, project pullrequest.Project, s
 
 func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	t.Helper()
+	if os.Getenv("KWT_HOME") == "" {
+		t.Setenv("KWT_HOME", t.TempDir())
+	}
+	home, err := config.CanonicalHome()
+	require.NoError(t, err)
+	if _, statErr := os.Stat(filepath.Join(home, "config.toml")); os.IsNotExist(statErr) {
+		for _, project := range cfg.Projects {
+			require.NoError(t, config.RegisterProject(project))
+		}
+	}
 	oldLoad := loadPRConfig
 	oldTargetLoad := loadPRTargetConfig
 	oldNew := newPRService
@@ -59,8 +75,8 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	oldState := prState
 	oldStartSession := prStartSession
 	oldValidateSessionConfig := validatePRWorkspaceSessionConfig
-	oldStartWorkspaceSession := startPRWorkspaceSession
-	oldAttachWorkspaceSession := attachPRWorkspaceSession
+	oldStartWorkspaceSession := ensurePRWorkspaceSession
+	oldAttachWorkspaceSession := attachExistingPRWorkspaceSession
 	oldInspectProjectClone := inspectPRProjectClone
 	oldReadWorkspaceGeneration := readPRWorkspaceGeneration
 	t.Cleanup(func() {
@@ -73,8 +89,8 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 		prState = oldState
 		prStartSession = oldStartSession
 		validatePRWorkspaceSessionConfig = oldValidateSessionConfig
-		startPRWorkspaceSession = oldStartWorkspaceSession
-		attachPRWorkspaceSession = oldAttachWorkspaceSession
+		ensurePRWorkspaceSession = oldStartWorkspaceSession
+		attachExistingPRWorkspaceSession = oldAttachWorkspaceSession
 		inspectPRProjectClone = oldInspectProjectClone
 		readPRWorkspaceGeneration = oldReadWorkspaceGeneration
 	})
@@ -99,6 +115,15 @@ func withPRCommandDeps(t *testing.T, cfg *models.Config, service prService) {
 	prStartSession = false
 	validatePRWorkspaceSessionConfig = func(*models.Config) error {
 		return nil
+	}
+	ensurePRWorkspaceSession = func(
+		_ context.Context,
+		workspace pullrequest.Workspace,
+		_ *models.Config,
+	) (string, error) {
+		return tmux.ProtectedWorkspaceSocketName(
+			workspace.SessionName, workspace.Path,
+		), nil
 	}
 }
 
@@ -506,7 +531,7 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 	withPRCommandDeps(t, cfg, service)
 	prStartSession = true
 	var started bool
-	startPRWorkspaceSession = func(
+	ensurePRWorkspaceSession = func(
 		_ context.Context,
 		got pullrequest.Workspace,
 		gotConfig *models.Config,
@@ -543,6 +568,42 @@ func TestRunPRImportStartsCanonicalWorkspaceSessionOnRequest(t *testing.T) {
 		"kwt-pr-0123456789abcdef",
 		importedWorkspace.TmuxSocketName,
 	)
+}
+
+func TestRegisteredPRImportLosesToProjectRemoval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", home)
+	projectPath := filepath.Join(t.TempDir(), "widget")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, "config.toml"),
+		[]byte("[[projects]]\nrepository = 'github.com/acme/widget'\nname = 'widget'\npath = '"+projectPath+"'\n"),
+		0o600,
+	))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: "github.com/acme/widget", Name: "widget", Path: projectPath,
+	}}}
+	serviceImpl := &fakePRService{}
+	withPRCommandDeps(t, cfg, serviceImpl)
+	oldBeforeAcquire := beforeProjectGuardAcquire
+	t.Cleanup(func() { beforeProjectGuardAcquire = oldBeforeAcquire })
+	beforeProjectGuardAcquire = func() {
+		snapshot, snapshotErr := config.LoadGlobalSnapshotAt(home)
+		require.NoError(t, snapshotErr)
+		changed, removeErr := config.CompareAndSwapProjectAt(
+			home, snapshot.Projects[0], nil,
+		)
+		require.NoError(t, removeErr)
+		require.True(t, changed)
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRImport(cmd, []string{"17"})
+
+	assert.True(t, service.IsCode(err, service.RegistrationChanged))
+	assert.Empty(t, serviceImpl.gotSelector)
+	var envelope jsonErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, service.RegistrationChanged, envelope.Error.Code)
 }
 
 func tryRequireWorkspace(
@@ -602,10 +663,11 @@ func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
 		return project, []pullrequest.Workspace{workspace}, nil
 	}
 	var attached bool
-	attachPRWorkspaceSession = func(
+	attachExistingPRWorkspaceSession = func(
 		_ context.Context,
 		got pullrequest.Workspace,
 		gotConfig *models.Config,
+		_ string,
 	) error {
 		attached = true
 		assert.Equal(t, workspace, got)
@@ -618,6 +680,335 @@ func TestRunPRAttachUsesPersistedWorkspaceIdentity(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, attached)
+}
+
+func TestRunPRAttachRejectsRemovedRegistrationBeforeEnsuringSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), nil, 0o600))
+	workspace := pullrequest.Workspace{
+		Path:        "/worktrees/pr-removed",
+		Branch:      "pr-removed",
+		Repository:  "github.com/acme/widget",
+		SessionName: "kwt-workspace-pr-removed",
+	}
+	project := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Path:     "/repos/widget",
+	}
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-removed"] = pullrequest.Provenance{
+				Project: project, Workspace: workspace,
+			}
+			return nil
+		},
+	))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: project.Identity, Name: "widget", Path: project.Path,
+	}}}
+	withPRCommandDeps(t, cfg, &fakePRService{})
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Provenance,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return project, []pullrequest.Workspace{workspace}, nil
+	}
+	ensured := false
+	ensurePRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) (string, error) {
+		ensured = true
+		return "kwt-pr-protected", nil
+	}
+	attachExistingPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+		string,
+	) error {
+		return nil
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRAttach(cmd, []string{workspace.Path})
+
+	assert.True(t, service.IsCode(err, service.RegistrationChanged))
+	assert.False(t, ensured)
+	var envelope jsonErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, service.RegistrationChanged, envelope.Error.Code)
+}
+
+func TestRunPRAttachRejectsProvenanceReplacementWhileWaitingForProjectFence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", home)
+	projectA := pullrequest.Project{
+		Identity: "github.com/acme/widget-a",
+		Name:     "widget-a",
+		Path:     filepath.Join(t.TempDir(), "widget-a"),
+	}
+	projectB := pullrequest.Project{
+		Identity: "github.com/acme/widget-b",
+		Name:     "widget-b",
+		Path:     filepath.Join(t.TempDir(), "widget-b"),
+	}
+	workspace := pullrequest.Workspace{
+		Path:        filepath.Join(t.TempDir(), "reused"),
+		Branch:      "pr-41",
+		Repository:  projectA.Identity,
+		SessionName: "kwt-workspace-pr-41",
+	}
+	recordA := pullrequest.Provenance{Project: projectA, Workspace: workspace}
+	recordB := recordA
+	recordB.Project = projectB
+	recordB.Workspace.Repository = projectB.Identity
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["reused"] = recordA
+			return nil
+		},
+	))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: projectA.Identity, Name: projectA.Name, Path: projectA.Path,
+	}}}
+	withPRCommandDeps(t, cfg, &fakePRService{})
+	inspectPRProjectClone = func(
+		_ context.Context,
+		got pullrequest.Provenance,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return got.Project, []pullrequest.Workspace{got.Workspace}, nil
+	}
+	oldBeforeAcquire := beforeProjectGuardAcquire
+	t.Cleanup(func() { beforeProjectGuardAcquire = oldBeforeAcquire })
+	beforeProjectGuardAcquire = func() {
+		require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+			context.Background(),
+			func(records map[string]pullrequest.Provenance) error {
+				records["reused"] = recordB
+				return nil
+			},
+		))
+	}
+	ensured := false
+	ensurePRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) (string, error) {
+		ensured = true
+		return "kwt-pr-protected", nil
+	}
+	attachExistingPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+		string,
+	) error {
+		return nil
+	}
+	cmd, stdout, _ := prTestCommand()
+
+	err := runPRAttach(cmd, []string{workspace.Path})
+
+	assert.True(t, service.IsCode(err, service.RegistrationChanged))
+	assert.False(t, ensured)
+	var envelope jsonErrorEnvelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	assert.Equal(t, service.RegistrationChanged, envelope.Error.Code)
+}
+
+func TestProtectedAttachReleasesFenceBeforeBlockingClient(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", home)
+	projectPath := filepath.Join(t.TempDir(), "widget")
+	workspacePath := filepath.Join(t.TempDir(), "pr-34")
+	project := pullrequest.Project{
+		Identity: "github.com/acme/widget",
+		Name:     "widget",
+		Path:     projectPath,
+	}
+	workspace := pullrequest.Workspace{
+		Path:        workspacePath,
+		Branch:      "pr-34",
+		Repository:  project.Identity,
+		SessionName: "kwt-workspace-pr-34",
+	}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, "config.toml"),
+		[]byte("[[projects]]\nrepository = 'github.com/acme/widget'\nname = 'widget'\npath = '"+projectPath+"'\n"),
+		0o600,
+	))
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-34"] = pullrequest.Provenance{
+				Project: project, Workspace: workspace,
+			}
+			return nil
+		},
+	))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: project.Identity, Name: project.Name, Path: project.Path,
+	}}}
+	withPRCommandDeps(t, cfg, &fakePRService{})
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Provenance,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return project, []pullrequest.Workspace{workspace}, nil
+	}
+	ensurePRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) (string, error) {
+		return "kwt-pr-protected", nil
+	}
+	attachStarted := make(chan struct{})
+	releaseAttach := make(chan struct{})
+	attachExistingPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+		string,
+	) error {
+		close(attachStarted)
+		<-releaseAttach
+		return nil
+	}
+	cmd, _, _ := prTestCommand()
+	done := make(chan error, 1)
+	go func() { done <- runPRAttach(cmd, []string{workspacePath}) }()
+	<-attachStarted
+	expansion, err := kwt.CaptureExpansionContext()
+	require.NoError(t, err)
+	claim, err := lifecycle.ObserveProjectClaim(
+		context.Background(), home, projectPath, expansion,
+	)
+	require.NoError(t, err)
+	releaseFence, err := lifecycle.AcquireProjectClaim(
+		context.Background(), home, claim,
+	)
+	require.NoError(t, err)
+	require.NoError(t, releaseFence())
+	close(releaseAttach)
+
+	require.NoError(t, <-done)
+}
+
+func TestProtectedAttachEstablishesSessionBeforeRemovalProbes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux is unavailable on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("KWT_HOME", home)
+	projectPath := filepath.Join(t.TempDir(), "widget")
+	workspacePath := filepath.Join(t.TempDir(), "pr-guarded")
+	project := pullrequest.Project{
+		Identity: "github.com/acme/widget", Name: "widget", Path: projectPath,
+	}
+	workspace := pullrequest.Workspace{
+		Path: workspacePath, Branch: "pr-guarded",
+		Repository: project.Identity, SessionName: "kwt-workspace-pr-guarded",
+		Generation: "0123456789abcdef0123456789abcdef",
+	}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, "config.toml"),
+		[]byte("[[projects]]\nrepository = 'github.com/acme/widget'\nname = 'widget'\npath = '"+projectPath+"'\n"),
+		0o600,
+	))
+	require.NoError(t, pullrequest.NewFileStore(prStorePath()).Update(
+		context.Background(),
+		func(records map[string]pullrequest.Provenance) error {
+			records["pr-guarded"] = pullrequest.Provenance{
+				Repository: project.Identity,
+				Project:    project, Workspace: workspace,
+			}
+			return nil
+		},
+	))
+	cfg := &models.Config{Projects: []models.Project{{
+		Repository: project.Identity, Name: project.Name, Path: project.Path,
+	}}}
+	withPRCommandDeps(t, cfg, &fakePRService{})
+	stubPRWorkspaceGeneration(t, workspace.Path, workspace.Generation)
+	inspectPRProjectClone = func(
+		context.Context,
+		pullrequest.Provenance,
+	) (pullrequest.Project, []pullrequest.Workspace, error) {
+		return project, []pullrequest.Workspace{workspace}, nil
+	}
+	socketName := tmux.ProtectedWorkspaceSocketName(
+		workspace.SessionName, workspace.Path,
+	)
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
+	})
+	established := make(chan struct{})
+	finishEnsure := make(chan struct{})
+	ensurePRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+	) (string, error) {
+		command := exec.Command(
+			"tmux", "-L", socketName, "new-session", "-d",
+			"-s", workspace.SessionName, "sleep", "60",
+		)
+		if output, runErr := command.CombinedOutput(); runErr != nil {
+			return "", fmt.Errorf("start tmux: %w: %s", runErr, output)
+		}
+		close(established)
+		<-finishEnsure
+		return socketName, nil
+	}
+	attachExistingPRWorkspaceSession = func(
+		context.Context,
+		pullrequest.Workspace,
+		*models.Config,
+		string,
+	) error {
+		return nil
+	}
+	cmd, _, _ := prTestCommand()
+	attachDone := make(chan error, 1)
+	go func() { attachDone <- runPRAttach(cmd, []string{workspace.Path}) }()
+	<-established
+	expansion, err := kwt.CaptureExpansionContext()
+	require.NoError(t, err)
+	remover := kwt.NewProjectRemovalService(
+		kwt.ProjectRemovalServiceOptions{Home: home},
+	)
+	removeDone := make(chan error, 1)
+	go func() {
+		_, removeErr := remover.RemoveProject(
+			context.Background(),
+			kwt.ProjectRemovalRequest{
+				Path: projectPath, ExpectedRepository: project.Identity,
+				Expansion: expansion,
+			},
+		)
+		removeDone <- removeErr
+	}()
+	select {
+	case err := <-removeDone:
+		t.Fatalf("removal completed while session establishment held the claim: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finishEnsure)
+	require.NoError(t, <-attachDone)
+
+	err = <-removeDone
+
+	assert.True(t, service.IsCode(err, service.ProtectedSessionLive))
 }
 
 func TestRunPRAttachUsesTransferredProvenanceAliasHistory(t *testing.T) {
@@ -661,6 +1052,7 @@ func TestRunPRAttachUsesTransferredProvenanceAliasHistory(t *testing.T) {
 		},
 	))
 	cfg := testPRConfig()
+	cfg.Projects[0].Repository = registeredIdentity
 	withPRCommandDeps(t, cfg, &fakePRService{})
 	inspectPRProjectClone = func(
 		_ context.Context,
@@ -682,10 +1074,11 @@ func TestRunPRAttachUsesTransferredProvenanceAliasHistory(t *testing.T) {
 			}}, nil
 	}
 	attached := false
-	attachPRWorkspaceSession = func(
+	attachExistingPRWorkspaceSession = func(
 		_ context.Context,
 		got pullrequest.Workspace,
 		gotConfig *models.Config,
+		_ string,
 	) error {
 		attached = true
 		assert.Equal(t, record.Workspace, got)
@@ -731,10 +1124,11 @@ func TestRunPRAttachRejectsStaleProvenanceAgainstLiveInventory(t *testing.T) {
 		return project, []pullrequest.Workspace{live}, nil
 	}
 	attached := false
-	attachPRWorkspaceSession = func(
+	attachExistingPRWorkspaceSession = func(
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,
+		string,
 	) error {
 		attached = true
 		return nil
@@ -778,10 +1172,11 @@ func TestRunPRAttachIgnoresStaleGenerationBeforeCounting(t *testing.T) {
 		return project, []pullrequest.Workspace{live}, nil
 	}
 	attached := false
-	attachPRWorkspaceSession = func(
+	attachExistingPRWorkspaceSession = func(
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,
+		string,
 	) error {
 		attached = true
 		return nil
@@ -1320,7 +1715,7 @@ func TestRunPRImportReportsDurableImportWithSessionFailure(t *testing.T) {
 	}}
 	withPRCommandDeps(t, testPRConfig(), service)
 	prStartSession = true
-	startPRWorkspaceSession = func(
+	ensurePRWorkspaceSession = func(
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,
@@ -1354,7 +1749,7 @@ func TestRunPRImportReportsSessionSafetyFailure(t *testing.T) {
 	}}
 	withPRCommandDeps(t, testPRConfig(), service)
 	prStartSession = true
-	startPRWorkspaceSession = func(
+	ensurePRWorkspaceSession = func(
 		context.Context,
 		pullrequest.Workspace,
 		*models.Config,

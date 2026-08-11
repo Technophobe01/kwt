@@ -13,7 +13,9 @@ import (
 
 	kitdaemon "go.kenn.io/kit/daemon"
 	kwt "go.kenn.io/kwt"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/utils"
+	"go.kenn.io/kwt/pkg/models"
 	"go.kenn.io/kwt/service"
 )
 
@@ -120,8 +122,12 @@ func (c *Client) Inventory(ctx context.Context, request kwt.Request) (kwt.Result
 		return kwt.Result{}, err
 	}
 	request.Expansion = expansion
+	return c.inventory(ctx, request)
+}
+
+func (c *Client) inventory(ctx context.Context, request kwt.Request) (kwt.Result, error) {
 	var result kwt.Result
-	err = c.doWith(
+	err := c.doWith(
 		ctx,
 		c.inventoryHTTP,
 		inventoryResponseLimit,
@@ -172,6 +178,76 @@ func (c *Client) RemoveWorktree(
 		}
 	}
 	return result, err
+}
+
+func (c *Client) RemoveProject(
+	ctx context.Context,
+	request kwt.ProjectRemovalRequest,
+) (kwt.ProjectRemovalResult, error) {
+	var result kwt.ProjectRemovalResult
+	err := c.doWith(
+		ctx,
+		c.mutationHTTP,
+		controlResponseLimit,
+		http.MethodPost,
+		"/api/v1/projects/remove",
+		request,
+		&result,
+	)
+	if service.IsCode(err, service.DaemonTransportFailed) {
+		reconciled, completed, reconcileErr := c.reconcileProjectRemoval(request)
+		switch {
+		case reconcileErr != nil && service.IsCode(reconcileErr, service.RegistrationChanged):
+			return kwt.ProjectRemovalResult{}, reconcileErr
+		case reconcileErr != nil:
+			err = &refreshRequiredError{err: errors.Join(
+				err,
+				fmt.Errorf("reconcile project removal: %w", reconcileErr),
+			)}
+		case completed:
+			return reconciled, nil
+		}
+	}
+	return result, err
+}
+
+func (c *Client) reconcileProjectRemoval(
+	request kwt.ProjectRemovalRequest,
+) (kwt.ProjectRemovalResult, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), removalReconcileTimeout)
+	defer cancel()
+	result, err := c.inventory(ctx, kwt.Request{
+		View:            kwt.ViewProjects,
+		RequireCurrent:  true,
+		UntrustedConfig: kwt.IgnoreUntrustedConfig,
+		Expansion:       request.Expansion,
+	})
+	if err != nil {
+		return kwt.ProjectRemovalResult{}, false, err
+	}
+	matches := make([]models.Project, 0, 1)
+	for _, project := range result.Snapshot.Projects {
+		if project.Path == request.Path {
+			matches = append(matches, project)
+		}
+	}
+	if len(matches) == 0 {
+		return kwt.ProjectRemovalResult{Project: models.Project{
+			Path: request.Path, Repository: request.ExpectedRepository,
+		}}, true, nil
+	}
+	if len(matches) != 1 || !lifecycle.EqualProjectIdentity(
+		matches[0].Repository, request.ExpectedRepository,
+	) {
+		return kwt.ProjectRemovalResult{}, false, service.NewError(
+			service.RegistrationChanged,
+			"the project registration changed while removal was being reconciled",
+			true,
+			nil,
+			nil,
+		)
+	}
+	return kwt.ProjectRemovalResult{}, false, nil
 }
 
 func (c *Client) reconcileRemoval(request kwt.RemovalRequest) (bool, error) {
@@ -421,6 +497,11 @@ func problemCode(code service.Code) (service.Code, bool) {
 		service.InventoryTimeout,
 		service.InventoryFailed,
 		service.RemovalFailed,
+		service.ProjectNotFound,
+		service.RegistrationChanged,
+		service.UnregistrationFailed,
+		service.ProtectedSessionLive,
+		service.ProtectedEndpointInventoryIncomplete,
 		service.Internal:
 		return code, true
 	default:

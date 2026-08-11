@@ -367,7 +367,7 @@ func TestRunProjectsNeverEmitsRegistryCredentials(t *testing.T) {
 	}
 }
 
-func TestRunProjectsOmitsInaccessibleRegistryEntries(t *testing.T) {
+func TestRunProjectsRetainsRegistrationsWithUnavailableCheckouts(t *testing.T) {
 	livePath := newTUITestRepo(t)
 	missingPath := filepath.Join(t.TempDir(), "missing")
 	nestedPath := filepath.Join(livePath, "nested")
@@ -383,9 +383,11 @@ func TestRunProjectsOmitsInaccessibleRegistryEntries(t *testing.T) {
 
 	var got []models.Project
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	require.Len(t, got, 1)
-	assert.Equal(t, "live", got[0].Name)
-	assert.Equal(t, livePath, got[0].Path)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"live", "missing", "nested"}, []string{
+		got[0].Name, got[1].Name, got[2].Name,
+	})
+	assert.Equal(t, missingPath, got[1].Path)
 }
 
 func TestRunProjectsJSONEmptyIsArray(t *testing.T) {
@@ -403,13 +405,8 @@ func TestRunProjectsJSONEmptyIsArray(t *testing.T) {
 	}
 }
 
-func TestRunProjectsJSONFullyFilteredIsArray(t *testing.T) {
+func TestRunProjectsJSONPathlessRegistrationIsFilteredArray(t *testing.T) {
 	withProjectsConfig(t, []models.Project{
-		{
-			Repository: "github.com/example/missing",
-			Name:       "missing",
-			Path:       filepath.Join(t.TempDir(), "missing"),
-		},
 		{Repository: "local/pathless", Name: "pathless"},
 	})
 
@@ -422,6 +419,7 @@ func TestRunProjectsJSONFullyFilteredIsArray(t *testing.T) {
 }
 
 func TestRunProjectsAddJSONRegistersCanonicalProject(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
 	repoPath := newTUITestRepo(t)
 	canonicalRepoPath, err := filepath.EvalSymlinks(repoPath)
 	require.NoError(t, err)
@@ -432,7 +430,7 @@ func TestRunProjectsAddJSONRegistersCanonicalProject(t *testing.T) {
 	originalRegister := registerProject
 	t.Cleanup(func() { registerProject = originalRegister })
 	var registered models.Project
-	registerProject = func(project models.Project) error {
+	registerProject = func(_ context.Context, project models.Project) error {
 		registered = project
 		return nil
 	}
@@ -485,19 +483,21 @@ func TestRunProjectsAddJSONWritesStableInvalidRepositoryError(t *testing.T) {
 	assert.Contains(t, stderr.String(), "invalid_repository")
 }
 
-func TestRunProjectsRemoveJSONUnregistersByPath(t *testing.T) {
-	originalUnregister := unregisterProject
-	t.Cleanup(func() { unregisterProject = originalUnregister })
+func TestRunProjectsRemoveJSONUnregistersByExactIdentity(t *testing.T) {
+	originalRemove := removeProjectThroughDaemon
+	t.Cleanup(func() { removeProjectThroughDaemon = originalRemove })
 	removed := models.Project{
 		Repository: "github.com/acme/widget",
 		Name:       "widget",
 		Path:       "/code/widget",
 	}
-	var requestedPath string
-	unregisterProject = func(path string) (models.Project, bool, error) {
-		requestedPath = path
-		return removed, true, nil
+	var requested kwt.ProjectRemovalRequest
+	removeProjectThroughDaemon = func(_ context.Context, request kwt.ProjectRemovalRequest) (kwt.ProjectRemovalResult, error) {
+		requested = request
+		return kwt.ProjectRemovalResult{Project: removed}, nil
 	}
+	projectsExpectedRepository = "github.com/acme/widget"
+	t.Cleanup(func() { projectsExpectedRepository = "" })
 	projectsRemoveJSON = true
 	t.Cleanup(func() { projectsRemoveJSON = false })
 	stdout := &bytes.Buffer{}
@@ -505,27 +505,31 @@ func TestRunProjectsRemoveJSONUnregistersByPath(t *testing.T) {
 
 	require.NoError(t, runProjectsRemove(
 		projectsRemoveCmd,
-		[]string{"/code/widget"},
+		[]string{"/code/widget "},
 	))
 
 	var response projectMutationResult
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
-	assert.Equal(t, "/code/widget", requestedPath)
+	assert.Equal(t, "/code/widget ", requested.Path)
+	assert.Equal(t, "github.com/acme/widget", requested.ExpectedRepository)
+	assert.NotEmpty(t, requested.Expansion.HomeDirectory)
 	assert.Equal(t, "unregistered", response.Status)
 	assert.Equal(t, removed, response.Project)
 }
 
 func TestRunProjectsRemoveJSONNeverEmitsRegistryCredentials(t *testing.T) {
 	const token = "ghp_secret123"
-	originalUnregister := unregisterProject
-	t.Cleanup(func() { unregisterProject = originalUnregister })
-	unregisterProject = func(string) (models.Project, bool, error) {
-		return models.Project{
-			Repository: "https://wesm:" + token + "@github.com/acme/widget.git",
+	originalRemove := removeProjectThroughDaemon
+	t.Cleanup(func() { removeProjectThroughDaemon = originalRemove })
+	removeProjectThroughDaemon = func(context.Context, kwt.ProjectRemovalRequest) (kwt.ProjectRemovalResult, error) {
+		return kwt.ProjectRemovalResult{Project: models.Project{
+			Repository: "github.com/acme/widget",
 			Name:       "widget",
 			Path:       "/code/widget",
-		}, true, nil
+		}}, nil
 	}
+	projectsExpectedRepository = "github.com/acme/widget"
+	t.Cleanup(func() { projectsExpectedRepository = "" })
 	projectsRemoveJSON = true
 	t.Cleanup(func() { projectsRemoveJSON = false })
 	stdout := &bytes.Buffer{}
@@ -543,11 +547,15 @@ func TestRunProjectsRemoveJSONNeverEmitsRegistryCredentials(t *testing.T) {
 }
 
 func TestRunProjectsRemoveJSONReportsMissingProject(t *testing.T) {
-	originalUnregister := unregisterProject
-	t.Cleanup(func() { unregisterProject = originalUnregister })
-	unregisterProject = func(string) (models.Project, bool, error) {
-		return models.Project{}, false, nil
+	originalRemove := removeProjectThroughDaemon
+	t.Cleanup(func() { removeProjectThroughDaemon = originalRemove })
+	removeProjectThroughDaemon = func(context.Context, kwt.ProjectRemovalRequest) (kwt.ProjectRemovalResult, error) {
+		return kwt.ProjectRemovalResult{}, service.NewError(
+			service.ProjectNotFound, "no project is registered at the exact path", false, nil, nil,
+		)
 	}
+	projectsExpectedRepository = "github.com/acme/widget"
+	t.Cleanup(func() { projectsExpectedRepository = "" })
 	projectsRemoveJSON = true
 	t.Cleanup(func() { projectsRemoveJSON = false })
 	stdout := &bytes.Buffer{}

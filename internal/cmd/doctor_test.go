@@ -5,16 +5,135 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	kwt "go.kenn.io/kwt"
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/maintenance"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestDoctorProjectRemovalUsesGuardedLifecycleService(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("KWT_HOME", home)
+	expected := config.ProjectRegistration{Persisted: models.Project{
+		Path: "/repo ", Repository: "github.com/acme/widget",
+	}}
+	oldResolver := resolveDoctorProjectIdentity
+	oldRemover := removeDoctorProjectRegistration
+	t.Cleanup(func() {
+		resolveDoctorProjectIdentity = oldResolver
+		removeDoctorProjectRegistration = oldRemover
+	})
+	resolveDoctorProjectIdentity = func(context.Context, config.ProjectRegistration) (string, error) {
+		return "github.com/acme/widget", nil
+	}
+	var request kwt.ProjectRemovalRequest
+	removeDoctorProjectRegistration = func(
+		_ context.Context,
+		gotHome string,
+		got kwt.ProjectRemovalRequest,
+		gotExpected config.ProjectRegistration,
+	) (bool, error) {
+		assert.Equal(t, home, gotHome)
+		assert.True(t, gotExpected.SamePersistedEntry(expected))
+		request = got
+		return true, nil
+	}
+
+	changed, err := (doctorProjectMutator{}).RemoveProject(context.Background(), expected)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, "/repo ", request.Path)
+	assert.Equal(t, "github.com/acme/widget", request.ExpectedRepository)
+}
+
+func TestDoctorProjectRemovalPreservesChangedRegistration(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("KWT_HOME", home)
+	configPath := filepath.Join(home, "config.toml")
+	path := filepath.Join(t.TempDir(), "widget")
+	require.NoError(t, os.WriteFile(configPath, []byte(
+		"[[projects]]\nrepository = 'github.com/acme/widget'\nname = 'before'\npath = '"+path+"'\n",
+	), 0o600))
+	snapshot, err := config.LoadGlobalSnapshotAt(home)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Projects, 1)
+	expected := snapshot.Projects[0]
+	require.NoError(t, os.WriteFile(configPath, []byte(
+		"[[projects]]\nrepository = 'github.com/acme/widget'\nname = 'after'\npath = '"+path+"'\n",
+	), 0o600))
+
+	changed, err := (doctorProjectMutator{}).RemoveProject(
+		context.Background(), expected,
+	)
+
+	require.NoError(t, err)
+	assert.False(t, changed)
+	current, err := config.LoadGlobalSnapshotAt(home)
+	require.NoError(t, err)
+	require.Len(t, current.Projects, 1)
+	assert.Equal(t, "after", current.Projects[0].Persisted.Name)
+}
+
+func TestDoctorProjectRelocationUsesLifecycleTransition(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("KWT_HOME", home)
+	expected := config.ProjectRegistration{Persisted: models.Project{
+		Path: "/old/widget", Repository: "github.com/acme/widget",
+	}}
+	replacement := models.Project{
+		Path: "/new/widget", Repository: "github.com/acme/widget",
+	}
+	oldTransition := transitionDoctorProjectRegistration
+	oldCAS := compareAndSwapDoctorProject
+	t.Cleanup(func() {
+		transitionDoctorProjectRegistration = oldTransition
+		compareAndSwapDoctorProject = oldCAS
+	})
+	var mutation func() error
+	transitionDoctorProjectRegistration = func(
+		_ context.Context,
+		gotHome string,
+		_ kwt.ExpansionContext,
+		got models.Project,
+		gotMutation func() error,
+	) error {
+		assert.Equal(t, home, gotHome)
+		assert.Equal(t, replacement, got)
+		mutation = gotMutation
+		return gotMutation()
+	}
+	compareAndSwapDoctorProject = func(
+		gotHome string,
+		got config.ProjectRegistration,
+		gotReplacement *models.Project,
+	) (bool, error) {
+		assert.Equal(t, home, gotHome)
+		assert.Equal(t, expected, got)
+		require.NotNil(t, gotReplacement)
+		assert.Equal(t, replacement, *gotReplacement)
+		return true, nil
+	}
+
+	changed, err := (doctorProjectMutator{}).RelocateProject(
+		context.Background(), expected, replacement,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	require.NotNil(t, mutation)
+}
 
 func TestDoctorReadOnlyReportsFixInstruction(t *testing.T) {
 	resetDoctorCommandDeps(t)

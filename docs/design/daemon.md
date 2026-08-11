@@ -2,8 +2,9 @@
 
 Kwt runs at most one writable local service daemon for each canonical kwt
 home. The daemon is a host for kwt domain services; it is not the multi-machine
-sync hub. It owns worktree inventory reads; worktree mutations, status
-collection, tmux attachment, and SSH lifecycle move in later slices.
+sync hub. It owns worktree inventory reads and guarded project unregistration;
+other worktree mutations, status collection, tmux attachment, and SSH lifecycle
+move in later slices.
 
 The process binds an automatically selected IPv4 loopback port and publishes
 an owner-only runtime record under `<kwt-home>/runtime`. Clients verify the
@@ -44,11 +45,13 @@ immediately, then continues reporting observed drain state while it waits.
 Active work and leases may finish until `daemon.replacement_grace`; the default
 is five minutes.
 
-The API exposes authenticated status, graceful shutdown, worktree inventory,
-and repository-config approval under `/api/v1`, proof-capable liveness at
-`/api/ping`, and credential-free OpenAPI at `/openapi.json`. Inventory clients
-require the `worktree.inventory.v1` capability. An operation never has
-simultaneous direct and HTTP execution paths.
+The API schema is `1.5.0`. It exposes authenticated status, graceful shutdown,
+worktree inventory, guarded project unregistration, and repository-config
+approval under `/api/v1`, proof-capable liveness at `/api/ping`, and
+credential-free OpenAPI at `/openapi.json`. Inventory clients require the
+`worktree.inventory.v1` capability; guarded unregistration requires
+`project.removal.v1`. An operation never has simultaneous direct and HTTP
+execution paths.
 
 Service failures cross the in-process, HTTP, and machine-readable CLI
 boundaries as one descriptor with `code`, human-facing `message`, `retryable`,
@@ -64,21 +67,26 @@ deadline.
 
 The daemon and inventory paths currently emit these stable codes:
 
-| Code                         | Meaning                                                           |
-| ---------------------------- | ----------------------------------------------------------------- |
-| `invalid_request`            | The request is structurally invalid.                              |
-| `daemon_start_failed`        | The daemon could not launch or become ready.                      |
-| `daemon_unresponsive`        | A verified owner exists but cannot safely be reused or replaced.  |
-| `daemon_incompatible`        | The owner lacks the required API major or capability.             |
-| `daemon_downgrade_refused`   | An older client attempted replacement.                            |
-| `daemon_build_order_unknown` | Replacement order cannot be proved.                               |
-| `daemon_draining`            | The owner is draining; retry according to its deadline.           |
-| `daemon_transport_failed`    | The verified daemon exchange failed or was not understood.        |
-| `inventory_timeout`          | A current inventory refresh exceeded its bound.                   |
-| `inventory_failed`           | Inventory discovery failed for another known source cause.        |
-| `removal_failed`             | A known worktree removal failure retained safe actionable detail. |
-| `interaction_required`       | Repository configuration needs digest-bound approval.             |
-| `internal`                   | An unexpected failure was withheld from the public response.      |
+| Code                                      | Meaning                                                           |
+| ----------------------------------------- | ----------------------------------------------------------------- |
+| `invalid_request`                         | The request is structurally invalid.                              |
+| `daemon_start_failed`                     | The daemon could not launch or become ready.                      |
+| `daemon_unresponsive`                     | A verified owner exists but cannot safely be reused or replaced.  |
+| `daemon_incompatible`                     | The owner lacks the required API major or capability.             |
+| `daemon_downgrade_refused`                | An older client attempted replacement.                            |
+| `daemon_build_order_unknown`              | Replacement order cannot be proved.                               |
+| `daemon_draining`                         | The owner is draining; retry according to its deadline.           |
+| `daemon_transport_failed`                 | The verified daemon exchange failed or was not understood.        |
+| `inventory_timeout`                       | A current inventory refresh exceeded its bound.                   |
+| `inventory_failed`                        | Inventory discovery failed for another known source cause.        |
+| `removal_failed`                          | A known worktree removal failure retained safe actionable detail. |
+| `project_not_found`                       | No exact persisted project path matched the request.              |
+| `registration_changed`                    | Project identity or registry state changed; retry from inventory. |
+| `unregistration_failed`                   | Project metadata could not be removed safely.                     |
+| `protected_session_live`                  | A live protected tmux endpoint still belongs to the project.      |
+| `protected_endpoint_inventory_incomplete` | Durable endpoint authority could not be verified.                 |
+| `interaction_required`                    | Repository configuration needs digest-bound approval.             |
+| `internal`                                | An unexpected failure was withheld from the public response.      |
 
 `operation_id_conflict`, `operation_capacity_exhausted`,
 `operation_journal_unavailable`, and `operation_outcome_unknown` are reserved
@@ -110,6 +118,21 @@ produces a digest-bound interaction requirement. Approval reopens and hashes
 the file before persisting trust; rejection and noninteractive ignore are
 request-local. Noninteractive commands preserve the historical global-only
 fallback and warning.
+
+Project unregistration takes an exact persisted path and the credential-free
+repository identity from current project inventory. A home-scoped transition
+lock hands the exact raw registration from registry writers to its
+identity-keyed project fence: the registration and identity are revalidated
+after that fence is acquired, before the transition lock is released.
+Registration changes acquire both old and new identity fences in deterministic
+order. Worktree creation may remain unregistered, but pull-request import and
+protected attach require a current registration. Under the identity fence,
+removal reads durable pull-request provenance, follows repository-transfer
+alias history across clone-path drift, derives each protected socket, performs
+a fail-closed three-state tmux probe, and finally compare-and-swaps the raw
+registration. Live sessions block removal; indeterminate probes, disconnected
+same-path provenance, or incomplete authority reject it. The transaction
+mutates only project metadata and never sends a tmux kill command.
 
 For remote use, including Ghosthub, the remote shell invokes the remote `kwt`
 CLI and that CLI talks only to its same-machine loopback daemon. The daemon is

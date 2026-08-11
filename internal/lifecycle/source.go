@@ -64,10 +64,10 @@ func (s *currentSource) Load(ctx context.Context, request Request) (result Resul
 
 	switch request.View {
 	case ViewProjects:
-		result.Snapshot.Projects, err = CanonicalProjects(ctx, snapshot.Config.Projects, protectedNames...)
+		result.Snapshot.Projects, err = publishedProjectRegistrations(ctx, snapshot.Projects, protectedNames...)
 		return result, inventorySourceFailure("inspect registered projects", err)
 	case ViewGlobal:
-		result.Snapshot.Projects, err = CanonicalProjects(ctx, snapshot.Config.Projects, protectedNames...)
+		result.Snapshot.Projects, err = publishedProjectRegistrations(ctx, snapshot.Projects, protectedNames...)
 		if err != nil {
 			return Result{}, inventorySourceFailure("inspect registered projects", err)
 		}
@@ -81,7 +81,7 @@ func (s *currentSource) Load(ctx context.Context, request Request) (result Resul
 			return Result{}, inventorySourceFailure("load repository inventory", err)
 		}
 	case ViewDashboard:
-		result.Snapshot.Projects, err = CanonicalProjects(ctx, snapshot.Config.Projects, protectedNames...)
+		result.Snapshot.Projects, err = publishedProjectRegistrations(ctx, snapshot.Projects, protectedNames...)
 		if err != nil {
 			return Result{}, inventorySourceFailure("inspect registered projects", err)
 		}
@@ -426,8 +426,8 @@ func modelEntry(worktree models.Worktree, repositoryURL string, info *repository
 	return entry
 }
 
-// CanonicalProjects returns accessible registrations with their resolved
-// repository identities. It never mutates the supplied registry slice.
+// CanonicalProjects returns registrations with stable credential-free
+// identities using the same resolver as project publication and removal.
 func CanonicalProjects(
 	ctx context.Context,
 	projects []models.Project,
@@ -441,24 +441,42 @@ func CanonicalProjects(
 		if strings.TrimSpace(project.Path) == "" {
 			continue
 		}
-		g := internalworktree.NewCachedIdentityGit(
-			git.NewForInventory(ctx, project.Path, protectedNames),
-		)
-		mainPath, err := g.GetMainRepositoryPath()
-		if err != nil || utils.PathKey(mainPath) != utils.PathKey(project.Path) {
+		registration := config.ProjectRegistration{Persisted: project, Effective: project}
+		identity, identityErr := resolveProjectIdentity(ctx, registration, protectedNames...)
+		if identityErr != nil {
 			continue
 		}
-		info, err := internalworktree.RepositoryInfoWithProjects(g, []models.Project{project})
-		if err != nil {
-			continue
-		}
-		project.Repository = info.FullPath
+		project.Repository = identity
 		result = append(result, project)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func publishedProjectRegistrations(
+	ctx context.Context,
+	registrations []config.ProjectRegistration,
+	protectedNames ...string,
+) ([]models.Project, error) {
+	result := make([]models.Project, 0, len(registrations))
+	for _, registration := range registrations {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if registration.Persisted.Path == "" || registration.Effective.Path == "" {
+			continue
+		}
+		identity, err := resolveProjectIdentity(ctx, registration, protectedNames...)
+		if err != nil {
+			continue
+		}
+		project := registration.Persisted
+		project.Repository = identity
+		result = append(result, project)
+	}
+	return result, ctx.Err()
 }
 
 func mergeEntries(existing, incoming []Entry) []Entry {
