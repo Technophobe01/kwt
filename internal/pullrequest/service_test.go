@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	managedworktree "go.kenn.io/kit/git/managed"
+	"go.kenn.io/kwt/internal/template"
+	"go.kenn.io/kwt/internal/tmux"
+	urlutil "go.kenn.io/kwt/internal/url"
 )
 
 func testProject() Project {
@@ -634,6 +637,68 @@ func TestImportIsIdempotent(t *testing.T) {
 	assert.Equal(t, ImportExisting, second.Status)
 	assert.Equal(t, first.Workspace, second.Workspace)
 	assert.Equal(t, 1, backend.createCalls)
+}
+
+func TestImportPreservesLegacyProtectedWorkspaceEndpoint(t *testing.T) {
+	pr := testPR(41, false)
+	branch := importBranchName(pr)
+	livePath := "/worktrees/widget/" + branch
+	recordedPath := "/worktrees/widget/alias/../" + branch
+	info, ok := urlutil.CanonicalRepositoryInfo(testProject().Identity)
+	require.True(t, ok)
+	legacyName := "kwt-workspace-github-com-acme-widget-" + branch + "-" +
+		template.ShortHash(recordedPath)
+	legacySocket := tmux.ProtectedWorkspaceSocketName(legacyName, recordedPath)
+	live := Workspace{
+		ID:          "github.com/acme/widget:" + branch,
+		Repository:  testProject().Identity,
+		Branch:      branch,
+		Path:        livePath,
+		Generation:  "0123456789abcdef0123456789abcdef",
+		State:       "ready",
+		SessionName: tmux.WorkspaceSessionName(info, branch, livePath),
+	}
+	backend := newFakeBackend()
+	backend.workspaces = []Workspace{live}
+	store := newMemoryStore()
+	recorded := live
+	recorded.Path = recordedPath
+	recorded.SessionName = legacyName
+	recorded.TmuxSocketName = legacySocket
+	store.records[pr.ID] = Provenance{
+		PullRequestID: pr.ID,
+		Provider:      pr.Provider,
+		Repository:    pr.Repository.Identity,
+		Number:        pr.Number,
+		URL:           pr.URL,
+		HeadSHA:       pr.HeadSHA,
+		SourceRepo:    pr.Source.Repository.Identity,
+		SourceBranch:  pr.Source.Name,
+		Project:       testProject(),
+		Workspace:     recorded,
+	}
+	service := newTestService(
+		&fakeProvider{prs: []PullRequest{pr}}, backend, store,
+	)
+
+	listed, err := service.List(context.Background(), testProject(), "open")
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.NotNil(t, listed[0].Workspace)
+	assert.Equal(t, recordedPath, listed[0].Workspace.Path)
+	assert.Equal(t, legacyName, listed[0].Workspace.SessionName)
+	assert.Equal(t, legacySocket, listed[0].Workspace.TmuxSocketName)
+
+	result, err := service.Import(context.Background(), testProject(), pr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ImportExisting, result.Status)
+	assert.Equal(t, recordedPath, result.Workspace.Path)
+	assert.Equal(t, legacyName, result.Workspace.SessionName)
+	assert.Equal(t, legacySocket, result.Workspace.TmuxSocketName)
+	assert.Equal(t, recordedPath, store.records[pr.ID].Workspace.Path)
+	assert.Equal(t, legacyName, store.records[pr.ID].Workspace.SessionName)
+	assert.Equal(t, legacySocket, store.records[pr.ID].Workspace.TmuxSocketName)
+	assert.Zero(t, backend.createCalls)
 }
 
 func TestImportDoesNotReturnExistingWorkspaceWhenBranchDiffers(t *testing.T) {
