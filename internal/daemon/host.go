@@ -23,6 +23,7 @@ const (
 	httpReadTimeout       = 2 * time.Second
 	httpIdleTimeout       = 30 * time.Second
 	httpMaxHeaderBytes    = 16 << 10
+	forcedDrainCleanup    = 5 * time.Second
 )
 
 type ServeOptions struct {
@@ -37,6 +38,7 @@ type ServeOptions struct {
 	Inventory         kwt.Inventory
 	Remover           kwt.Remover
 	ProjectRemover    kwt.ProjectRemover
+	SSHResolver       SSHResolver
 }
 
 type hostStatus struct {
@@ -162,9 +164,18 @@ func runHost(
 
 	startedAt := opts.Now()
 	gate := NewGate(startedAt)
+	operationContext, cancelOperations := newHostOperationContext(ctx)
+	defer cancelOperations()
+	operations := NewOperationHub(operationContext, OperationHubOptions{
+		Now: opts.Now,
+		Reserve: func() (func(), error) {
+			return gate.Reserve(ReservationWork, opts.Now())
+		},
+	})
 	inventory := opts.Inventory
 	remover := opts.Remover
 	projectRemover := opts.ProjectRemover
+	sshResolver := opts.SSHResolver
 	var cacheDiagnostic *kwt.Diagnostic
 	if inventory == nil {
 		cache, diagnostic, cacheErr := kwt.NewFileCache(opts.Home)
@@ -194,6 +205,9 @@ func runHost(
 			Home: opts.Home,
 		})
 	}
+	if sshResolver == nil {
+		sshResolver = kwt.NewSSHService(kwt.SSHServiceOptions{Home: opts.Home, Now: opts.Now})
+	}
 	status := &hostStatus{
 		base: Status{
 			Service:       ServiceName,
@@ -209,7 +223,9 @@ func runHost(
 			Capabilities: []string{
 				CapabilityShutdown,
 				CapabilityStatus,
+				CapabilityOperationStream,
 				CapabilityProjectRemoval,
+				CapabilitySSHResolve,
 				CapabilityInventory,
 				CapabilityRemoval,
 			},
@@ -224,6 +240,7 @@ func runHost(
 	shutdown := func(_ context.Context, request ShutdownRequest) (Status, error) {
 		deadline := opts.Now().Add(opts.Config.ReplacementGrace)
 		gate.BeginDrain(deadline)
+		operations.BeginDrain(deadline)
 		select {
 		case shutdownRequested <- request.Reason:
 		default:
@@ -245,6 +262,8 @@ func runHost(
 		Inventory:      inventory,
 		Remover:        remover,
 		ProjectRemover: projectRemover,
+		Operations:     operations,
+		SSHResolver:    sshResolver,
 		Gate:           gate,
 		ReportError: func(
 			route string,
@@ -312,13 +331,31 @@ func runHost(
 	}
 
 	drain := gate.BeginDrain(opts.Now().Add(opts.Config.ReplacementGrace))
+	operations.BeginDrain(drain.DrainDeadline)
 	logLifecycle(logger, "draining", status.Status(opts.Now()), runErr)
 	drainResult := gate.WaitForDrain(context.Background(), opts.Now())
+	if drainResult != DrainReleased {
+		operations.CancelActiveForDrain()
+		cancelOperations()
+	}
 	shutdownErr := shutdownHTTPServer(httpServer, drain.DrainDeadline, drainResult)
+	var cleanupErr error
+	if drainResult != DrainReleased {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), forcedDrainCleanup)
+		if !gate.WaitForRelease(cleanupCtx) {
+			cleanupErr = errors.New("daemon cleanup deadline expired")
+		}
+		cancelCleanup()
+	}
 	_ = listener.Close()
 	removeErr := removeOwnedRuntime(runtimePath, store, record.PID)
-	logLifecycle(logger, "stopped", status.Status(opts.Now()), errors.Join(runErr, shutdownErr, removeErr))
-	return errors.Join(runErr, shutdownErr, removeErr)
+	stopErr := errors.Join(runErr, shutdownErr, cleanupErr, removeErr)
+	logLifecycle(logger, "stopped", status.Status(opts.Now()), stopErr)
+	return stopErr
+}
+
+func newHostOperationContext(hostContext context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.WithoutCancel(hostContext))
 }
 
 func newHTTPServer(handler http.Handler) *http.Server {

@@ -9,10 +9,14 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	kitdaemon "go.kenn.io/kit/daemon"
 	kwt "go.kenn.io/kwt"
+	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/utils"
 	"go.kenn.io/kwt/pkg/models"
@@ -25,6 +29,9 @@ type Client struct {
 	controlHTTP   *http.Client
 	inventoryHTTP *http.Client
 	mutationHTTP  *http.Client
+	sshHTTP       *http.Client
+	streamHTTP    *http.Client
+	operationHTTP *http.Client
 }
 
 type worktreeRemovedError struct {
@@ -70,12 +77,17 @@ func RequiresRefresh(err error) bool {
 var ErrResponseTooLarge = errors.New("kwt daemon response is too large")
 
 const (
-	controlRequestTimeout           = 2 * time.Second
-	inventoryResponseHeadroom       = 5 * time.Second
-	inventoryRequestTimeout         = kwt.DefaultRefreshTimeout + inventoryResponseHeadroom
-	removalReconcileTimeout         = 5 * time.Second
-	controlResponseLimit      int64 = 1 << 20
-	inventoryResponseLimit          = 64 << 20
+	controlRequestTimeout              = 2 * time.Second
+	inventoryResponseHeadroom          = 5 * time.Second
+	inventoryRequestTimeout            = kwt.DefaultRefreshTimeout + inventoryResponseHeadroom
+	sshResolveRequestTimeout           = 30 * time.Second
+	operationStreamHeaderTimeout       = 2 * time.Second
+	operationResponseTimeout           = 2 * time.Second
+	removalReconcileTimeout            = 5 * time.Second
+	controlResponseLimit         int64 = 1 << 20
+	inventoryResponseLimit             = 64 << 20
+	sshSnapshotLimit                   = 8 << 20
+	sshResponseLimit                   = sshSnapshotLimit + (64 << 10)
 )
 
 func NewVerifiedClient(
@@ -113,6 +125,17 @@ func NewVerifiedClient(
 			ResponseHeaderTimeout: inventoryRequestTimeout,
 		}),
 		mutationHTTP: ep.HTTPClient(kitdaemon.HTTPClientOptions{}),
+		sshHTTP: ep.HTTPClient(kitdaemon.HTTPClientOptions{
+			Timeout:               sshResolveRequestTimeout,
+			ResponseHeaderTimeout: sshResolveRequestTimeout,
+		}),
+		streamHTTP: ep.HTTPClient(kitdaemon.HTTPClientOptions{
+			ResponseHeaderTimeout: operationStreamHeaderTimeout,
+		}),
+		operationHTTP: ep.HTTPClient(kitdaemon.HTTPClientOptions{
+			Timeout:               operationResponseTimeout,
+			ResponseHeaderTimeout: operationResponseTimeout,
+		}),
 	}, nil
 }
 
@@ -141,6 +164,40 @@ func (c *Client) inventory(ctx context.Context, request kwt.Request) (kwt.Result
 
 func (c *Client) ApproveConfig(ctx context.Context, approval kwt.ConfigApproval) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/config/trust", approval, nil)
+}
+
+func (c *Client) ResolveSSH(
+	ctx context.Context,
+	request kwt.SSHResolveRequest,
+) (kwt.SSHRouteSnapshot, error) {
+	snapshot, err := config.LoadGlobalSnapshot()
+	if err != nil {
+		return kwt.SSHRouteSnapshot{}, err
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return kwt.SSHRouteSnapshot{}, err
+	}
+	workingDirectory, err = filepath.Abs(workingDirectory)
+	if err != nil {
+		return kwt.SSHRouteSnapshot{}, err
+	}
+	request.WorkingDirectory = workingDirectory
+	request.Environment = credentials.StripEnvironment(
+		os.Environ(),
+		credentials.ProtectedNames(snapshot.Config),
+	)
+	var result kwt.SSHRouteSnapshot
+	err = c.doWith(
+		ctx,
+		c.sshHTTP,
+		sshResponseLimit,
+		http.MethodPost,
+		"/api/v1/ssh/resolve",
+		request,
+		&result,
+	)
+	return result, err
 }
 
 func (c *Client) RemoveWorktree(
@@ -308,7 +365,7 @@ func detailBoolValue(details map[string]any, key string) bool {
 func newClient(ep kitdaemon.Endpoint, token string, client *http.Client) *Client {
 	return &Client{
 		endpoint: ep, token: token, controlHTTP: client, inventoryHTTP: client,
-		mutationHTTP: client,
+		mutationHTTP: client, sshHTTP: client, streamHTTP: client, operationHTTP: client,
 	}
 }
 
@@ -511,6 +568,14 @@ func problemCode(code service.Code) (service.Code, bool) {
 		service.UnregistrationFailed,
 		service.ProtectedSessionLive,
 		service.ProtectedEndpointInventoryIncomplete,
+		service.OperationIDConflict,
+		service.OperationCapacityExhausted,
+		service.OperationJournalUnavailable,
+		service.OperationOutcomeUnknown,
+		service.SSHInvalidTarget,
+		service.SSHResolutionFailed,
+		service.SSHRouteUnreviewable,
+		service.SSHConfigurationChanged,
 		service.Internal:
 		return code, true
 	default:

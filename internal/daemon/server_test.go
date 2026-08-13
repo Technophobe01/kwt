@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,31 @@ import (
 )
 
 type testStatusProvider struct{ status Status }
+
+type stalledOperationResponseWriter struct {
+	header      http.Header
+	deadlineSet chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func (w *stalledOperationResponseWriter) Header() http.Header { return w.header }
+func (w *stalledOperationResponseWriter) WriteHeader(int)     {}
+func (w *stalledOperationResponseWriter) Flush()              {}
+func (w *stalledOperationResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		w.once.Do(func() { close(w.deadlineSet) })
+	}
+	return nil
+}
+func (w *stalledOperationResponseWriter) Write(value []byte) (int, error) {
+	select {
+	case <-w.deadlineSet:
+		return 0, context.DeadlineExceeded
+	case <-w.release:
+		return len(value), nil
+	}
+}
 
 func (p *testStatusProvider) Status(time.Time) Status { return p.status }
 
@@ -203,4 +229,290 @@ func TestProblemRoundTripsServiceDescriptor(t *testing.T) {
 	assert.Equal(t, descriptor.Retryable, typed.Retryable)
 	assert.Equal(t, descriptor.Details, typed.Details)
 	assert.NotContains(t, string(encoded), "private cause")
+}
+
+func TestProblemMakesUnknownOutcomeNonRetryable(t *testing.T) {
+	problem := problemFromError(service.NewError(
+		service.OperationOutcomeUnknown,
+		"operation outcome is unknown",
+		true,
+		nil,
+		nil,
+	))
+	encoded, err := json.Marshal(problem)
+	require.NoError(t, err)
+
+	decoded := service.AsError(decodeProblem(problem.Status, bytes.NewReader(encoded)))
+	assert.Equal(t, service.OperationOutcomeUnknown, decoded.Code)
+	assert.False(t, decoded.Retryable)
+}
+
+func TestOperationEventRouteReplaysThenStreamsLiveEvents(t *testing.T) {
+	hub := NewOperationHub(context.Background(), OperationHubOptions{})
+	replayed := make(chan struct{})
+	release := make(chan struct{})
+	operation, _, err := hub.Start(OperationStart{
+		ID: "operation-1", RequestDigest: "request-1",
+		Run: func(_ context.Context, operation *Operation) (json.RawMessage, error) {
+			if err := operation.Progress("replayed"); err != nil {
+				return nil, err
+			}
+			close(replayed)
+			<-release
+			if err := operation.Progress("live"); err != nil {
+				return nil, err
+			}
+			return json.RawMessage(`{"status":"ready"}`), nil
+		},
+	})
+	require.NoError(t, err)
+	<-replayed
+
+	server := newOperationHTTPTestServer(t, hub)
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodGet,
+		server.URL+"/api/v1/operations/"+operation.ID()+"/events?after_sequence=0",
+		nil,
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, response.Body.Close()) }()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	assert.Equal(t, "application/x-ndjson", response.Header.Get("Content-Type"))
+
+	decoder := json.NewDecoder(response.Body)
+	var event service.OperationEvent
+	require.NoError(t, decoder.Decode(&event))
+	assert.Equal(t, "replayed", event.Message)
+	close(release)
+	require.NoError(t, decoder.Decode(&event))
+	assert.Equal(t, "live", event.Message)
+	require.NoError(t, decoder.Decode(&event))
+	assert.Equal(t, service.OperationEventComplete, event.Kind)
+}
+
+func TestOperationResponseRouteBindsCurrentPrompt(t *testing.T) {
+	hub := NewOperationHub(context.Background(), OperationHubOptions{})
+	operation, _, err := hub.Start(OperationStart{
+		ID: "operation-1", RequestDigest: "request-1",
+		Run: func(ctx context.Context, operation *Operation) (json.RawMessage, error) {
+			value, err := operation.Prompt(ctx, service.OperationPrompt{
+				Kind: "password", Message: "Password:", Sensitive: true,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(map[string]string{"value": value})
+		},
+	})
+	require.NoError(t, err)
+	subscription, err := hub.Subscribe(operation.ID(), 0)
+	require.NoError(t, err)
+	defer subscription.Close()
+	prompt := receiveOperationEvent(t, subscription.Events())
+	require.NotNil(t, prompt.Prompt)
+
+	server := newOperationHTTPTestServer(t, hub)
+	defer server.Close()
+	body, err := json.Marshal(service.OperationResponse{
+		PromptID: prompt.Prompt.ID,
+		Value:    "fleet secret",
+	})
+	require.NoError(t, err)
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/operations/"+operation.ID()+"/responses",
+		bytes.NewReader(body),
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, http.StatusNoContent, response.StatusCode)
+
+	completion := receiveOperationEvent(t, subscription.Events())
+	require.Equal(t, service.OperationEventComplete, completion.Kind)
+	assert.JSONEq(t, `{"value":"fleet secret"}`, string(completion.Result))
+}
+
+func TestOperationEventWriteDeadlineStopsStalledSubscriber(t *testing.T) {
+	releaseWorker := make(chan struct{})
+	replayReady := make(chan struct{})
+	hub := NewOperationHub(context.Background(), OperationHubOptions{
+		MaxSubscribersPerOperation: 1,
+		MaxSubscribers:             1,
+	})
+	operation, _, err := hub.Start(OperationStart{
+		RequestDigest: "request-1",
+		Run: func(_ context.Context, operation *Operation) (json.RawMessage, error) {
+			if err := operation.Progress("replay"); err != nil {
+				return nil, err
+			}
+			close(replayReady)
+			<-releaseWorker
+			return json.RawMessage(`{}`), nil
+		},
+	})
+	require.NoError(t, err)
+	<-replayReady
+
+	writer := &stalledOperationResponseWriter{
+		header:      make(http.Header),
+		deadlineSet: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"http://kwt.invalid/api/v1/operations/"+operation.ID()+"/events",
+		nil,
+	).WithContext(requestContext)
+	done := make(chan struct{})
+	go func() {
+		serveOperationEvents(writer, request, hub, ServerOptions{}, operation.ID())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancelRequest()
+		close(writer.release)
+		close(releaseWorker)
+		t.Fatal("stalled operation response survived its write deadline")
+	}
+	cancelRequest()
+	close(writer.release)
+	replacement, err := hub.Subscribe(operation.ID(), 0)
+	require.NoError(t, err)
+	replacement.Close()
+	close(releaseWorker)
+}
+
+func TestOperationCancelRouteCancelsWorker(t *testing.T) {
+	hub := NewOperationHub(context.Background(), OperationHubOptions{})
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	operation, _, err := hub.Start(OperationStart{
+		ID: "operation-1", RequestDigest: "request-1",
+		Run: func(ctx context.Context, _ *Operation) (json.RawMessage, error) {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		},
+	})
+	require.NoError(t, err)
+	<-started
+
+	server := newOperationHTTPTestServer(t, hub)
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodDelete,
+		server.URL+"/api/v1/operations/"+operation.ID(),
+		nil,
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, http.StatusNoContent, response.StatusCode)
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("operation worker was not canceled")
+	}
+}
+
+func TestOperationRoutesRequireAuthenticationAndStableNotFoundProblem(t *testing.T) {
+	hub := NewOperationHub(context.Background(), OperationHubOptions{})
+	server := newOperationHTTPTestServer(t, hub)
+	defer server.Close()
+
+	request, err := http.NewRequest(
+		http.MethodGet,
+		server.URL+"/api/v1/operations/missing/events",
+		nil,
+	)
+	require.NoError(t, err)
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, http.StatusUnauthorized, response.StatusCode)
+
+	request, err = http.NewRequest(
+		http.MethodGet,
+		server.URL+"/api/v1/operations/missing/events",
+		nil,
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err = server.Client().Do(request)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, response.Body.Close()) }()
+	assert.Equal(t, http.StatusNotFound, response.StatusCode)
+	var problem Problem
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&problem))
+	assert.Equal(t, service.NotFound, problem.Code)
+}
+
+func TestDrainingServerKeepsExistingOperationControlReachable(t *testing.T) {
+	hub := NewOperationHub(context.Background(), OperationHubOptions{})
+	operation, _, err := hub.Start(OperationStart{
+		ID: "operation-1", RequestDigest: "request-1",
+		Run: func(_ context.Context, operation *Operation) (json.RawMessage, error) {
+			return json.RawMessage(`{}`), operation.Progress("finishing")
+		},
+	})
+	require.NoError(t, err)
+	deadline := time.Now().Add(time.Minute)
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = NewServer(ServerOptions{
+		Token:        "secret",
+		ExpectedHost: server.Listener.Addr().String(),
+		Status: &testStatusProvider{status: Status{
+			Service: ServiceName, State: StateDraining, DrainDeadline: &deadline,
+		}},
+		Operations: hub,
+	})
+	server.Start()
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodGet,
+		server.URL+"/api/v1/operations/"+operation.ID()+"/events",
+		nil,
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer secret")
+	response, err := server.Client().Do(request)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, response.Body.Close()) }()
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+}
+
+func newOperationHTTPTestServer(
+	t *testing.T,
+	hub *OperationHub,
+) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = NewServer(ServerOptions{
+		Token:        "secret",
+		ExpectedHost: server.Listener.Addr().String(),
+		Status: &testStatusProvider{status: Status{
+			Service: ServiceName, State: StateReady,
+		}},
+		Shutdown: func(context.Context, ShutdownRequest) (Status, error) {
+			return Status{Service: ServiceName, State: StateReady}, nil
+		},
+		Operations: hub,
+	})
+	server.Start()
+	return server
 }

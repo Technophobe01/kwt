@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,6 +190,8 @@ func TestNewRuntimeRecordAdvertisesFirstDomainContracts(t *testing.T) {
 	capabilities := strings.Split(record.Metadata[metadataCapabilities], ",")
 	assert.Contains(t, capabilities, "worktree.inventory.v1")
 	assert.Contains(t, capabilities, "project.removal.v1")
+	assert.Contains(t, capabilities, CapabilityOperationStream)
+	assert.True(t, slices.IsSorted(capabilities))
 }
 
 func TestParseRuntimeMetadataRevisionTimeCompatibility(t *testing.T) {

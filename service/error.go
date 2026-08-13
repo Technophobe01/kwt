@@ -31,12 +31,17 @@ const (
 	UnregistrationFailed                 Code = "unregistration_failed"
 	ProtectedSessionLive                 Code = "protected_session_live"
 	ProtectedEndpointInventoryIncomplete Code = "protected_endpoint_inventory_incomplete"
-	// Reserved for API major 2 operation streaming; slice 2 does not emit
-	// these codes.
-	OperationIDConflict         Code = "operation_id_conflict"
-	OperationCapacityExhausted  Code = "operation_capacity_exhausted"
+	OperationIDConflict                  Code = "operation_id_conflict"
+	OperationCapacityExhausted           Code = "operation_capacity_exhausted"
+	// OperationJournalUnavailable remains reserved until kwt adds a durable
+	// operation journal. The initial stream is reconnectable only to the same
+	// daemon process.
 	OperationJournalUnavailable Code = "operation_journal_unavailable"
 	OperationOutcomeUnknown     Code = "operation_outcome_unknown"
+	SSHInvalidTarget            Code = "ssh_invalid_target"
+	SSHResolutionFailed         Code = "ssh_resolution_failed"
+	SSHRouteUnreviewable        Code = "ssh_route_unreviewable"
+	SSHConfigurationChanged     Code = "ssh_configuration_changed"
 	Internal                    Code = "internal"
 )
 

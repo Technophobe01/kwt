@@ -5,7 +5,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -20,6 +22,10 @@ type StatusProvider interface {
 
 type ShutdownFunc func(context.Context, ShutdownRequest) (Status, error)
 
+type SSHResolver interface {
+	Resolve(context.Context, kwt.SSHResolveRequest) (kwt.SSHRouteSnapshot, error)
+}
+
 type ServerOptions struct {
 	Token          string
 	ExpectedHost   string
@@ -32,6 +38,8 @@ type ServerOptions struct {
 	Inventory      kwt.Inventory
 	Remover        kwt.Remover
 	ProjectRemover kwt.ProjectRemover
+	Operations     *OperationHub
+	SSHResolver    SSHResolver
 	Gate           *Gate
 	ReportError    func(string, *service.Error, kwt.ExpansionContext)
 }
@@ -52,6 +60,8 @@ type removalInput struct{ Body kwt.RemovalRequest }
 type removalOutput struct{ Body kwt.RemovalResult }
 type projectRemovalInput struct{ Body kwt.ProjectRemovalRequest }
 type projectRemovalOutput struct{ Body kwt.ProjectRemovalResult }
+type sshResolveInput struct{ Body kwt.SSHResolveRequest }
+type sshResolveOutput struct{ Body kwt.SSHRouteSnapshot }
 
 const defaultMaxBodyBytes = 1 << 20
 
@@ -63,6 +73,7 @@ func NewServer(opts ServerOptions) http.Handler {
 		opts.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	mux := http.NewServeMux()
+	registerOperationRoutes(mux, opts.Operations, opts)
 	config := huma.DefaultConfig("kwt daemon API", APISchemaVersion)
 	config.OpenAPIPath = "/openapi"
 	config.DocsPath = ""
@@ -159,6 +170,39 @@ func NewServer(opts ServerOptions) http.Handler {
 			},
 		)
 	}
+	if opts.SSHResolver != nil {
+		huma.Register(
+			api,
+			huma.Operation{
+				Method: http.MethodPost, Path: "/api/v1/ssh/resolve",
+				OperationID: "ssh-resolve",
+			},
+			func(ctx context.Context, input *sshResolveInput) (*sshResolveOutput, error) {
+				if input.Body.Environment == nil || !filepath.IsAbs(input.Body.WorkingDirectory) {
+					return nil, reportProblem(opts, "/api/v1/ssh/resolve", service.NewError(
+						service.InvalidRequest,
+						"SSH resolution requires an invocation environment and working directory",
+						false,
+						nil,
+						nil,
+					))
+				}
+				release, err := reserveInventoryWork(opts)
+				if err != nil {
+					return nil, reportProblem(opts, "/api/v1/ssh/resolve", err)
+				}
+				defer release()
+				result, err := opts.SSHResolver.Resolve(ctx, input.Body)
+				if err != nil {
+					return nil, reportProblem(opts, "/api/v1/ssh/resolve", err)
+				}
+				if err := validateSSHSnapshotSize(result); err != nil {
+					return nil, reportProblem(opts, "/api/v1/ssh/resolve", err)
+				}
+				return &sshResolveOutput{Body: result}, nil
+			},
+		)
+	}
 	huma.Register(
 		api,
 		huma.Operation{
@@ -178,6 +222,23 @@ func NewServer(opts ServerOptions) http.Handler {
 		mux.Handle("/api/ping", opts.Ping)
 	}
 	return secureLocalHandler(mux, opts)
+}
+
+func validateSSHSnapshotSize(snapshot kwt.SSHRouteSnapshot) error {
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return service.NewError(service.Internal, "internal failure", false, nil, err)
+	}
+	if int64(len(encoded)) > sshSnapshotLimit {
+		return service.NewError(
+			service.SSHResolutionFailed,
+			"SSH route snapshot exceeds the supported size limit",
+			false,
+			nil,
+			nil,
+		)
+	}
+	return nil
 }
 
 func reserveInventoryWork(opts ServerOptions) (func(), error) {
@@ -229,11 +290,12 @@ func secureLocalHandler(next http.Handler, opts ServerOptions) http.Handler {
 		now := opts.Now()
 		status := opts.Status.Status(now)
 		shutdownPath := r.URL.Path == "/api/v1/daemon/shutdown"
+		operationPath := strings.HasPrefix(r.URL.Path, operationRoutePrefix)
 		if opts.Touch != nil && (!shutdownPath || status.State != StateDraining) {
 			opts.Touch(now)
 		}
 		if status.State == StateDraining &&
-			r.URL.Path != "/api/v1/status" && !shutdownPath {
+			r.URL.Path != "/api/v1/status" && !shutdownPath && !operationPath {
 			if status.DrainDeadline != nil {
 				retryAfter := status.DrainDeadline.Sub(now)
 				seconds := int64(retryAfter / time.Second)
@@ -306,20 +368,21 @@ func (p *Problem) ContentType(value string) string {
 }
 
 func problemFromError(err error) *Problem {
-	typed := service.AsError(err)
+	descriptor := publicErrorDescriptor(err)
 	status := http.StatusInternalServerError
-	switch typed.Code {
-	case service.InvalidRequest:
+	switch descriptor.Code {
+	case service.InvalidRequest, service.SSHInvalidTarget:
 		status = http.StatusBadRequest
 	case service.PermissionDenied:
 		status = http.StatusForbidden
 	case service.NotFound, service.ProjectNotFound:
 		status = http.StatusNotFound
-	case service.Conflict, service.ConnectionChanged,
-		service.RegistrationChanged, service.ProtectedSessionLive:
+	case service.Conflict, service.ConnectionChanged, service.OperationIDConflict,
+		service.RegistrationChanged, service.ProtectedSessionLive,
+		service.SSHRouteUnreviewable, service.SSHConfigurationChanged:
 		status = http.StatusConflict
 	case service.ProtectedEndpointInventoryIncomplete:
-		if typed.Retryable {
+		if descriptor.Retryable {
 			status = http.StatusServiceUnavailable
 		} else {
 			status = http.StatusConflict
@@ -329,8 +392,11 @@ func problemFromError(err error) *Problem {
 	case service.InteractionRequired:
 		status = http.StatusPreconditionRequired
 	case service.Busy, service.DaemonStartFailed, service.DaemonUnresponsive,
-		service.DaemonDraining, service.InventoryTimeout:
+		service.DaemonDraining, service.InventoryTimeout,
+		service.OperationCapacityExhausted, service.SSHResolutionFailed:
 		status = http.StatusServiceUnavailable
+	case service.OperationOutcomeUnknown:
+		status = http.StatusConflict
 	case service.Unsupported:
 		status = http.StatusNotImplemented
 	case service.DaemonIncompatible:
@@ -338,15 +404,24 @@ func problemFromError(err error) *Problem {
 	case service.TransportFailure, service.DaemonTransportFailed:
 		status = http.StatusBadGateway
 	}
+	problem := newProblem(status, descriptor)
+	return &problem
+}
+
+func publicErrorDescriptor(err error) service.Descriptor {
+	typed := service.AsError(err)
 	message := typed.Message
+	retryable := typed.Retryable
 	if typed.Code == service.Internal {
 		message = "internal failure"
 	}
-	problem := newProblem(status, service.Descriptor{
-		Code: typed.Code, Message: message, Retryable: typed.Retryable,
+	if typed.Code == service.OperationOutcomeUnknown {
+		retryable = false
+	}
+	return service.Descriptor{
+		Code: typed.Code, Message: message, Retryable: retryable,
 		Details: allowedProblemDetails(typed.Code, typed.Details),
-	})
-	return &problem
+	}
 }
 
 func reportProblem(opts ServerOptions, route string, err error) *Problem {

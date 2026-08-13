@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,6 +28,26 @@ func TestHTTPServerBoundsUnauthenticatedRequests(t *testing.T) {
 	assert.Positive(t, server.IdleTimeout)
 	assert.Positive(t, server.MaxHeaderBytes)
 	assert.LessOrEqual(t, server.MaxHeaderBytes, 64<<10)
+}
+
+func TestHostOperationContextSurvivesInitialShutdown(t *testing.T) {
+	hostContext, cancelHost := context.WithCancel(context.Background())
+	operationContext, cancelOperations := newHostOperationContext(hostContext)
+	t.Cleanup(cancelOperations)
+
+	cancelHost()
+	select {
+	case <-operationContext.Done():
+		t.Fatal("operation context canceled with host shutdown signal")
+	default:
+	}
+
+	cancelOperations()
+	select {
+	case <-operationContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("operation context was not canceled for forced drain")
+	}
 }
 
 func TestHTTPServerClosesUnauthenticatedStalledBody(t *testing.T) {
@@ -165,6 +186,8 @@ func TestServePublishesReadyRuntimeAndRemovesItOnShutdown(t *testing.T) {
 	assert.Equal(t, RuntimeReady, observation.State)
 	assert.Equal(t, home, observation.Status.Home)
 	assert.Contains(t, observation.Status.Endpoint, "127.0.0.1:")
+	assert.Contains(t, observation.Status.Capabilities, CapabilityOperationStream)
+	assert.True(t, slices.IsSorted(observation.Status.Capabilities))
 
 	_, err := observation.Client.Shutdown(context.Background(), "stop")
 	require.NoError(t, err)

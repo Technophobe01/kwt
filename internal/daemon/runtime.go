@@ -94,7 +94,9 @@ func NewRuntimeRecord(
 		metadataCapabilities: strings.Join([]string{
 			CapabilityShutdown,
 			CapabilityStatus,
+			CapabilityOperationStream,
 			CapabilityProjectRemoval,
+			CapabilitySSHResolve,
 			CapabilityInventory,
 			CapabilityRemoval,
 		}, ","),

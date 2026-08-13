@@ -83,6 +83,48 @@ A remote client reaches inventory by invoking the remote machine's kwt CLI over
 its existing shell boundary; the loopback daemon itself is not remotely
 reachable.
 
+An operation ID is a routing handle, not an authorization credential. Every
+event, response, and cancellation request still requires the owner-only bearer
+credential and the daemon's loopback host checks. Prompt responses are accepted
+only on the authenticated response endpoint and only for the operation's exact
+current prompt ID. They are held only for the active prompt round and are not
+rendered, logged, or persisted. Event and response payloads, replay and live
+subscriber queues, every live subscription including terminal replay, active
+operations, and retained completed operations are bounded so an authenticated
+or same-user local client cannot create unbounded daemon memory growth. The
+live queue reserves critical-event capacity that noncritical progress cannot
+consume. The same operating-system user remains the trust boundary.
+
+The operation stream is reconnectable only while the same verified daemon
+retains it in memory. Neither an operation ID nor a request digest authorizes a
+new daemon to adopt or replay work. Loss of that authority is reported as an
+unknown outcome rather than causing an automatic retry of a mutation.
+
+SSH route resolution validates user, hostname, and port before invoking
+OpenSSH. POSIX resolution quotes the validated argv into the account login
+shell and accepts stdout only between unpredictable, exact nonce markers;
+startup output and marker-like stderr are not configuration. Windows avoids a
+shell boundary and invokes OpenSSH directly. Kwt's built-in credential
+environment variables and the configured fleet-token variable are removed
+before either process boundary. The daemon reloads the fleet-token variable
+name and sanitizes a fresh process environment for every resolution, so a
+compatible daemon cannot retain stale credential policy after configuration
+changes. Cancellation terminates the complete resolver process tree through a
+POSIX process group or a Windows Job Object, so an OpenSSH configuration
+command cannot survive daemon drain while retaining its output handles. Stdout
+and stderr are each capped at 1 MiB; exceeding either cap cancels that same
+owned process tree.
+
+The daemon retains the complete normalized `ssh -G` stream only as private
+route-identity input. Authenticated responses expose semantic targets and the
+reviewed execution projection, never arbitrary directives. Opaque
+ProxyCommand and nested proxy routes are rejected because kwt cannot bind
+independent trust policy to every hop. Projections are target-local; route
+consumers must use the ordered preceding target's prepared master as proxy
+transport rather than executing a downstream projection directly. Stage 1
+resolution does not authorize a host key, authenticate, create a master, or
+make the returned route identity an authorization credential.
+
 Guarded project unregistration requires the exact persisted path, its
 credential-free repository identity, and an opaque fingerprint of the complete
 decoded registry entry the client observed. The daemon derives and compares

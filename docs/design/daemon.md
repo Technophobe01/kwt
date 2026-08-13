@@ -45,13 +45,17 @@ immediately, then continues reporting observed drain state while it waits.
 Active work and leases may finish until `daemon.replacement_grace`; the default
 is five minutes.
 
-The API schema is `1.6.0`. It exposes authenticated status, graceful shutdown,
+The API schema is `1.8.0`. It exposes authenticated status, graceful shutdown,
 worktree inventory, guarded project unregistration, and repository-config
 approval under `/api/v1`, proof-capable liveness at `/api/ping`, and
 credential-free OpenAPI at `/openapi.json`. Inventory clients require the
 `worktree.inventory.v1` capability; guarded unregistration requires
-`project.removal.v1`. An operation never has simultaneous direct and HTTP
-execution paths.
+`project.removal.v1`, and SSH route resolution requires `ssh.resolve.v1`.
+Daemons advertise `operation.stream.v1` when they can
+carry ordered domain-operation events and bound prompt responses. Advertising
+that transport capability does not start a domain operation or move any
+existing command behind the daemon. An operation never has simultaneous direct
+and HTTP execution paths.
 
 Service failures cross the in-process, HTTP, and machine-readable CLI
 boundaries as one descriptor with `code`, human-facing `message`, `retryable`,
@@ -86,12 +90,86 @@ The daemon and inventory paths currently emit these stable codes:
 | `protected_session_live`                  | A live protected tmux endpoint still belongs to the project.      |
 | `protected_endpoint_inventory_incomplete` | Durable endpoint authority could not be verified.                 |
 | `interaction_required`                    | Repository configuration needs digest-bound approval.             |
+| `operation_id_conflict`                   | An operation identifier was reused for a different request.       |
+| `operation_capacity_exhausted`            | Bounded operation capacity was exhausted.                         |
+| `operation_outcome_unknown`               | The operation's terminal outcome can no longer be proved.         |
+| `ssh_invalid_target`                      | Structured SSH target validation failed.                          |
+| `ssh_resolution_failed`                   | Effective OpenSSH configuration could not be observed.            |
+| `ssh_route_unreviewable`                  | A proxy route cannot be bound to independently reviewed hops.     |
+| `ssh_configuration_changed`               | A later lifecycle request observed a different route identity.    |
 | `internal`                                | An unexpected failure was withheld from the public response.      |
 
-`operation_id_conflict`, `operation_capacity_exhausted`,
-`operation_journal_unavailable`, and `operation_outcome_unknown` are reserved
-for the API-major-2 durable-operation protocol. No current endpoint emits
-them.
+`operation_journal_unavailable` remains reserved until kwt has a durable
+operation journal. The current operation stream is deliberately in-memory and
+same-daemon only.
+
+Operation events carry an opaque operation ID and a strictly increasing
+sequence number. A reconnect sends its last accepted sequence and receives
+retained later events before live events. One operation may carry multiple
+prompt rounds; each response is accepted only for the exact current prompt ID,
+including an intentionally empty response. Stale, duplicate, and
+cross-operation responses fail closed. A client acknowledges a prompt sequence
+only after its bound response succeeds, so reconnect replays an unanswered
+prompt.
+
+Each operation retains at most 256 events and 1 MiB of event payload. Public
+failure sanitization happens before admission, and each admitted event is
+retained and replayed from one immutable encoded representation so later
+caller mutation cannot change the stream or its byte accounting. The daemon
+admits at most 128 active operations and retains at most 128 completed
+operations for five minutes. An operation admits at most eight subscribers,
+with at most 128 live subscribers across the daemon. Retained terminal replays
+and streams detached after queue overflow count against both limits until the
+HTTP subscriber closes. Publishing a terminal event does not release an active
+operation slot until its worker cleanup returns. Each response write has a
+five-second deadline. Clients wait at most two seconds for event-stream headers
+and for a prompt-response exchange; after event headers arrive, the stream body
+lifetime follows the caller's operation context. Replay queues reserve a slot
+that progress and warning events cannot consume; prompts and terminal
+completion remain replayable when noncritical delivery saturates. The daemon
+rejects excess work or subscriptions instead of dropping a prompt or terminal
+result. If retained-event capacity terminates an admitted worker, the terminal
+result is `operation_outcome_unknown`, never a safely retryable capacity
+rejection. A new operation has five seconds to gain its first subscriber.
+Afterward, losing the final subscriber starts the same five-second reconnect
+grace before the worker is canceled. A client retries one interrupted stream
+against the same proof-verified daemon. Daemon loss, retention loss, or
+replacement of the runtime owner returns
+`operation_outcome_unknown`; the client never repeats the domain mutation to
+guess its result. Every unknown-outcome descriptor is non-retryable because the
+original mutation may already have completed. If a client cannot render or
+otherwise handle a preterminal event, it requests cancellation on a best-effort
+basis and reports `operation_outcome_unknown`. A terminal result remains
+authoritative even when the client cannot render its terminal event.
+
+Operations reserve daemon work until their workers return, including cleanup
+after a terminal outcome is published. Draining refuses new operations and lets
+admitted work run until the published replacement deadline. At the deadline it
+publishes an unknown terminal outcome, cancels remaining workers and HTTP
+handlers, then waits up to five seconds for their reservations to release.
+
+`POST /api/v1/ssh/resolve` evaluates system OpenSSH configuration through one
+daemon-owned service and returns an immutable route snapshot. On POSIX, the
+service runs nonce-framed `ssh -G` inside the account's configured login shell
+so shell startup banners cannot become configuration. Windows invokes system
+OpenSSH directly. Each request reloads the global fleet-token environment name
+and uses the invoking CLI's fresh environment and working directory rather than
+daemon startup state. The client strips configured credential variables before
+transport, and the daemon repeats that stripping after reloading its
+authoritative configuration. OpenSSH's executable path is bound from this
+invocation context before a login shell can change `PATH`. Requests without
+invocation-context authority fail closed.
+Direct ProxyJump hops are resolved in connection order; opaque ProxyCommand and
+nested proxy routes fail closed. The complete normalized option stream
+contributes to route identity but never crosses the HTTP boundary. Each target
+projection is target-local; a downstream projection requires master-backed
+proxy transport through its preceding prepared target and is never a
+standalone direct-connect command. This resolution route caps stdout and
+stderr at 1 MiB each and cancels the complete resolver process tree when either
+bound is exceeded. The daemon also caps the encoded public route snapshot at
+8 MiB; the client reserves 64 KiB above that bound for response framing, and an
+oversized snapshot fails as `ssh_resolution_failed`. Resolution does not create
+a connection, control socket, trust decision, credential prompt, or lease.
 
 `kwt projects` and `kwt list` auto-start or reuse the daemon and require a
 current inventory result. They fail instead of falling back to cached or direct
