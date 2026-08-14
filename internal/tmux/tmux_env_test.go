@@ -111,6 +111,85 @@ func TestSocketCommandPrefixesEveryInvocationWithSocketName(t *testing.T) {
 	}
 }
 
+func TestDefaultSocketCommandUsesExplicitTempDirectory(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", "/ambient/tmux")
+	t.Setenv("TMUX", "/ambient/tmux/default,123,0")
+	tc := NewTmuxCommandInTempDir("tmux", "/chosen/tmux")
+
+	cmd := tc.newCmd(context.Background(), []string{"list-sessions"})
+
+	if !slices.Contains(cmd.Env, "TMUX_TMPDIR=/chosen/tmux") {
+		t.Fatalf("newCmd environment = %v, want explicit TMUX_TMPDIR", cmd.Env)
+	}
+	for _, entry := range cmd.Env {
+		if entry == "TMUX_TMPDIR=/ambient/tmux" {
+			t.Fatalf("newCmd environment retained ambient TMUX_TMPDIR: %v", cmd.Env)
+		}
+		if hasEnvName(entry, "TMUX") {
+			t.Fatalf("newCmd environment retained ambient TMUX: %v", cmd.Env)
+		}
+	}
+}
+
+func TestUnqualifiedRemovalGuardUsesCanonicalDefaultSocket(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", "/ambient/tmux")
+	t.Setenv("TMUX", "/ambient/tmux/named,123,0")
+	command := newRemovalTmuxCommand("tmux", RemovalSessionCondition{
+		SessionName: "workspace",
+		Absent:      true,
+	})
+
+	cmd := command.newCmd(context.Background(), []string{"list-sessions"})
+	for _, entry := range cmd.Env {
+		if hasEnvName(entry, "TMUX") || hasEnvName(entry, "TMUX_TMPDIR") {
+			t.Fatalf("unqualified removal inherited ambient socket selector: %v", cmd.Env)
+		}
+	}
+}
+
+func TestRemovalCommandsStripRequestProtectedNames(t *testing.T) {
+	t.Setenv("CUSTOM_FLEET_TOKEN", "secret")
+	condition := RemovalSessionCondition{
+		SessionName:    "workspace",
+		Absent:         true,
+		ProtectedNames: []string{"CUSTOM_FLEET_TOKEN"},
+	}
+
+	for _, test := range []struct {
+		name      string
+		condition RemovalSessionCondition
+	}{
+		{name: "default socket", condition: condition},
+		{
+			name: "named socket",
+			condition: func() RemovalSessionCondition {
+				value := condition
+				value.SocketName = "protected"
+				return value
+			}(),
+		},
+		{
+			name: "named socket in explicit directory",
+			condition: func() RemovalSessionCondition {
+				value := condition
+				value.SocketName = "protected"
+				value.SocketDirectory = "/run/user/1000/tmux"
+				return value
+			}(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := newRemovalTmuxCommand("tmux", test.condition)
+			cmd := command.newCmd(context.Background(), []string{"list-sessions"})
+			for _, entry := range cmd.Env {
+				if hasEnvName(entry, "CUSTOM_FLEET_TOKEN") {
+					t.Fatalf("removal command retained configured credential: %v", cmd.Env)
+				}
+			}
+		})
+	}
+}
+
 // TestNewCmdBackgroundContextSanitizes confirms newCmd sanitizes the
 // environment for the context-free call sites (runCommand, runCommandOutput),
 // which pass context.Background(). It uses VSCODE_INJECTION

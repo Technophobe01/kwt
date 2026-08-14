@@ -152,6 +152,7 @@ const (
 	ReasonUpstreamRepositoryChanged ConditionReason = "upstream_repository_changed"
 	ReasonUpstreamBranchChanged     ConditionReason = "upstream_branch_changed"
 	ReasonDirty                     ConditionReason = "dirty_worktree"
+	ReasonInitializedSubmodule      ConditionReason = "initialized_submodule"
 	ReasonLocked                    ConditionReason = "locked_worktree"
 	ReasonMainWorktree              ConditionReason = "main_worktree"
 )
@@ -1158,7 +1159,8 @@ func (g *Git) RemoveWorktreeTransaction(
 		forceWorktree,
 		deleteBranch,
 		forceBranch,
-		func(remove func() error) (bool, error) {
+		false,
+		func(_ func() error, remove func() error) (bool, error) {
 			err := remove()
 			return err == nil || WorktreeWasRemoved(err), err
 		},
@@ -1168,15 +1170,17 @@ func (g *Git) RemoveWorktreeTransaction(
 
 // RemoveWorktreeTransactionAfterClaim revalidates under the repository
 // mutation lock, then lets the caller atomically claim its policy record
-// around the supplied lock-owned removal. Callers must invoke remove
-// synchronously at most once.
+// around a repeatable native-removal preflight and the supplied lock-owned
+// removal. Callers must invoke both closures synchronously and remove at most
+// once.
 func (g *Git) RemoveWorktreeTransactionAfterClaim(
 	path string,
 	expectedGeneration string,
 	forceWorktree bool,
 	deleteBranch bool,
 	forceBranch bool,
-	claim func(remove func() error) (bool, error),
+	preflightNativeRemoval bool,
+	claim func(preflight func() error, remove func() error) (bool, error),
 ) (WorktreeRemovalResult, bool, error) {
 	result := WorktreeRemovalResult{Path: path}
 	if !filepath.IsAbs(path) {
@@ -1213,9 +1217,20 @@ func (g *Git) RemoveWorktreeTransactionAfterClaim(
 		if selected.Locked {
 			return &ConditionError{Reason: ReasonLocked, Path: path}
 		}
+		if preflightNativeRemoval && !forceWorktree {
+			if err := g.validateNativeWorktreeRemovalLocked(path, nil); err != nil {
+				return err
+			}
+		}
 		result.Branch = selected.Branch
 		var claimErr error
-		claimed, claimErr = claim(func() error {
+		preflight := func() error {
+			if !preflightNativeRemoval || forceWorktree {
+				return nil
+			}
+			return g.validateNativeWorktreeRemovalLocked(path, nil)
+		}
+		claimed, claimErr = claim(preflight, func() error {
 			removalErr := g.removeWorktree(path, forceWorktree, true, nil)
 			if removalErr != nil && !WorktreeWasRemoved(removalErr) {
 				return removalErr
@@ -1402,22 +1417,57 @@ func (g *Git) validateWorktreeRemovalLocked(
 		}
 	}
 	if conditions.RequireClean {
-		args := []string{
-			"-C",
+		return g.validateWorktreeCleanLocked(
 			path,
-			"status",
-			"--porcelain",
-			"--untracked-files=normal",
-		}
-		if conditions.IncludeIgnored {
-			args = append(args, "--ignored")
-		}
-		status, err := g.runWithoutCredentials(conditions.ProtectedNames, args...)
-		if err != nil {
-			return fmt.Errorf("inspect worktree status for %s: %w", path, err)
-		}
-		if strings.TrimSpace(status) != "" {
-			return &ConditionError{Reason: ReasonDirty, Path: path}
+			conditions.ProtectedNames,
+			conditions.IncludeIgnored,
+		)
+	}
+	return nil
+}
+
+func (g *Git) validateWorktreeCleanLocked(
+	path string,
+	protectedNames []string,
+	includeIgnored bool,
+) error {
+	args := []string{
+		"-C",
+		path,
+		"status",
+		"--porcelain",
+		"--untracked-files=normal",
+	}
+	if includeIgnored {
+		args = append(args, "--ignored")
+	}
+	status, err := g.runWithoutCredentials(protectedNames, args...)
+	if err != nil {
+		return fmt.Errorf("inspect worktree status for %s: %w", path, err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return &ConditionError{Reason: ReasonDirty, Path: path}
+	}
+	return nil
+}
+
+func (g *Git) validateNativeWorktreeRemovalLocked(
+	path string,
+	protectedNames []string,
+) error {
+	if err := g.validateWorktreeCleanLocked(path, protectedNames, false); err != nil {
+		return err
+	}
+	status, err := g.runWithoutCredentials(
+		protectedNames,
+		"-C", path, "submodule", "status", "--recursive",
+	)
+	if err != nil {
+		return fmt.Errorf("inspect worktree submodules for %s: %w", path, err)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(status, "\n"), "\n") {
+		if line != "" && line[0] != '-' {
+			return &ConditionError{Reason: ReasonInitializedSubmodule, Path: path}
 		}
 	}
 	return nil

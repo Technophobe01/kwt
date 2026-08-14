@@ -116,6 +116,33 @@ func TestMatchesWorkspaceSessionName(t *testing.T) {
 	))
 }
 
+func TestMatchesLegacyWorkspaceSessionPathAfterBranchChange(t *testing.T) {
+	path := "/home/u/worktrees/github.com/wesm/kwt/feature/foo"
+
+	assert.True(t, MatchesLegacyWorkspaceSessionPath(
+		"kwt-wt-kwt-old-branch-9cc4e551",
+		path,
+	))
+	assert.True(t, MatchesLegacyWorkspaceSessionPath(
+		"kwt-workspace-github-com-wesm-kwt-old-branch-9cc4e551",
+		path,
+	))
+	assert.False(t, MatchesLegacyWorkspaceSessionPath(
+		"unrelated-old-branch-9cc4e551",
+		path,
+	))
+	assert.False(t, MatchesLegacyWorkspaceSessionPath(
+		"kwt-wt-kwt-old-branch-9cc4e551",
+		"/another/path",
+	))
+}
+
+func TestWorktreeSessionNamespaceTreatsLegacyDirPrefixAsAmbiguous(t *testing.T) {
+	assert.True(t, IsKWTWorktreeSessionName("kwt-wt-repo-topic-deadbeef"))
+	assert.True(t, IsKWTWorktreeSessionName("kwt-workspace-host-owner-repo-topic-deadbeef"))
+	assert.True(t, IsKWTWorktreeSessionName("kwt-workspace-dir-notes-deadbeef"))
+}
+
 func TestDirWorkspaceSessionName(t *testing.T) {
 	name := DirWorkspaceSessionName("my notes", "/Users/me/notes")
 

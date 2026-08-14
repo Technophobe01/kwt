@@ -21,35 +21,60 @@ func TransitionProjectRegistration(
 	project models.Project,
 	mutation func() error,
 ) error {
+	_, err := transitionProjectRegistration(
+		ctx, home, expansion, project,
+		func() (struct{}, error) { return struct{}{}, mutation() },
+	)
+	return err
+}
+
+func TransitionProjectRegistrationWithIdentity(
+	ctx context.Context,
+	home string,
+	expansion ExpansionContext,
+	project models.Project,
+	mutation func() (InventoryProject, error),
+) (InventoryProject, error) {
+	return transitionProjectRegistration(ctx, home, expansion, project, mutation)
+}
+
+func transitionProjectRegistration[T any](
+	ctx context.Context,
+	home string,
+	expansion ExpansionContext,
+	project models.Project,
+	mutation func() (T, error),
+) (T, error) {
+	var zero T
 	if mutation == nil {
-		return fmt.Errorf("project registration mutation is required")
+		return zero, fmt.Errorf("project registration mutation is required")
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return zero, err
 		}
 		releaseTransition, err := acquireProjectTransitionFence(ctx, home)
 		if err != nil {
-			return err
+			return zero, err
 		}
 		identities, err := projectRegistrationTransitionIdentities(
 			ctx, home, expansion, project,
 		)
 		if err != nil {
 			_ = releaseTransition()
-			return err
+			return zero, err
 		}
 		releases, err := acquireProjectIdentitySet(ctx, home, identities)
 		if err != nil {
 			_ = releaseTransition()
-			return err
+			return zero, err
 		}
 		current, err := projectRegistrationTransitionIdentities(
 			ctx, home, expansion, project,
 		)
 		if err == nil && slices.Equal(identities, current) {
-			mutationErr := mutation()
-			return errors.Join(
+			registered, mutationErr := mutation()
+			return registered, errors.Join(
 				mutationErr,
 				releaseProjectIdentitySet(releases),
 				releaseTransition(),
@@ -60,7 +85,7 @@ func TransitionProjectRegistration(
 			releaseTransition(),
 		)
 		if err != nil || releaseErr != nil {
-			return errors.Join(err, releaseErr)
+			return zero, errors.Join(err, releaseErr)
 		}
 	}
 }
@@ -98,7 +123,11 @@ func projectRegistrationTransitionIdentities(
 	if err != nil {
 		return nil, err
 	}
-	identities := []string{identity}
+	pathIdentity, err := pathLifecycleIdentity(next.Effective.Path)
+	if err != nil {
+		return nil, err
+	}
+	identities := []string{identity, pathIdentity}
 	for _, registration := range snapshot.Projects {
 		if !projectRegistrationUpdateMatches(registration, next) {
 			continue
@@ -114,6 +143,13 @@ func projectRegistrationTransitionIdentities(
 			return nil, identityErr
 		}
 		identities = append(identities, identity)
+		if registration.Effective.Path != "" {
+			pathIdentity, identityErr := pathLifecycleIdentity(registration.Effective.Path)
+			if identityErr != nil {
+				return nil, identityErr
+			}
+			identities = append(identities, pathIdentity)
+		}
 	}
 	slices.Sort(identities)
 	return slices.Compact(identities), nil

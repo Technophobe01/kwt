@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -14,13 +15,28 @@ import (
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/credentials"
 	"go.kenn.io/kwt/internal/utils"
+	internalworktree "go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/service"
 )
 
 type ProjectClaim struct {
 	Registration config.ProjectRegistration
 	Identity     string
+	Identities   []string
 	Expansion    ExpansionContext
+	MainPath     string
+	Registered   bool
+}
+
+func pathLifecycleIdentity(path string) (string, error) {
+	info, err := internalworktree.RepositoryInfoFromExactLocalPath(path)
+	if err != nil {
+		return "", fmt.Errorf("derive project path identity: %w", err)
+	}
+	if info == nil || info.FullPath == "" {
+		return "", fmt.Errorf("derive project path identity: empty identity")
+	}
+	return info.FullPath, nil
 }
 
 func acquireProjectFence(
@@ -102,7 +118,21 @@ func ObserveProjectClaim(
 		match = candidate
 	}
 	if match == nil {
-		return nil, nil
+		identity, identityErr := pathLifecycleIdentity(effectiveMainPath)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		identities, identityErr := stableProjectIdentitySet(identity)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		return &ProjectClaim{
+			Identity:   identity,
+			Identities: identities,
+			Expansion:  expansion,
+			MainPath:   effectiveMainPath,
+			Registered: false,
+		}, nil
 	}
 	identity, err := resolveProjectIdentity(
 		ctx, *match, credentials.ProtectedNames(snapshot.Config)...,
@@ -110,11 +140,35 @@ func ObserveProjectClaim(
 	if err != nil {
 		return nil, service.NewError(service.Internal, "internal failure", false, nil, err)
 	}
+	pathIdentity, err := pathLifecycleIdentity(effectiveMainPath)
+	if err != nil {
+		return nil, err
+	}
+	identities, err := stableProjectIdentitySet(identity, pathIdentity)
+	if err != nil {
+		return nil, err
+	}
 	return &ProjectClaim{
 		Registration: *match,
 		Identity:     identity,
+		Identities:   identities,
 		Expansion:    expansion,
+		MainPath:     effectiveMainPath,
+		Registered:   true,
 	}, nil
+}
+
+func stableProjectIdentitySet(identities ...string) ([]string, error) {
+	stable := make([]string, 0, len(identities))
+	for _, identity := range identities {
+		folded, err := foldProjectIdentity(identity)
+		if err != nil {
+			return nil, err
+		}
+		stable = append(stable, folded)
+	}
+	slices.Sort(stable)
+	return slices.Compact(stable), nil
 }
 
 func AcquireProjectClaim(
@@ -154,7 +208,11 @@ func acquireProjectClaim(
 		_ = releaseTransition()
 		return nil, registrationChanged(matchErr)
 	}
-	release, err := acquireProjectFence(ctx, home, claim.Identity)
+	identities := claim.Identities
+	if len(identities) == 0 {
+		identities = []string{claim.Identity}
+	}
+	releases, err := acquireProjectIdentitySet(ctx, home, identities)
 	if err != nil {
 		_ = releaseTransition()
 		return nil, err
@@ -162,9 +220,9 @@ func acquireProjectClaim(
 	matched, matchErr = projectClaimMatches(ctx, home, claim)
 	transitionErr := releaseTransition()
 	if matchErr == nil && matched && transitionErr == nil {
-		return release, nil
+		return func() error { return releaseProjectIdentitySet(releases) }, nil
 	}
-	_ = release()
+	_ = releaseProjectIdentitySet(releases)
 	return nil, registrationChanged(errors.Join(matchErr, transitionErr))
 }
 
@@ -180,9 +238,35 @@ func projectClaimMatches(
 	if err != nil {
 		return false, err
 	}
+	if !claim.Registered {
+		for _, candidate := range current.Projects {
+			if utils.PathKey(candidate.Effective.Path) == utils.PathKey(claim.MainPath) {
+				return false, nil
+			}
+		}
+		identity, identityErr := pathLifecycleIdentity(claim.MainPath)
+		if identityErr != nil {
+			return false, identityErr
+		}
+		return claim.Identity == identity, nil
+	}
 	for _, candidate := range current.Projects {
 		if !candidate.SamePersistedEntry(claim.Registration) {
 			continue
+		}
+		if utils.PathKey(candidate.Effective.Path) != utils.PathKey(claim.MainPath) {
+			return false, nil
+		}
+		currentPathIdentity, pathErr := pathLifecycleIdentity(candidate.Effective.Path)
+		if pathErr != nil {
+			return false, pathErr
+		}
+		claimedPathIdentity, pathErr := pathLifecycleIdentity(claim.MainPath)
+		if pathErr != nil {
+			return false, pathErr
+		}
+		if !EqualProjectIdentity(currentPathIdentity, claimedPathIdentity) {
+			return false, nil
 		}
 		identity, identityErr := resolveProjectIdentity(
 			ctx, candidate, credentials.ProtectedNames(current.Config)...,

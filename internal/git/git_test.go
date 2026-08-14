@@ -1101,7 +1101,8 @@ func TestRemoveWorktreeTransactionAfterClaimHoldsMutationLock(t *testing.T) {
 		false,
 		false,
 		false,
-		func(remove func() error) (bool, error) {
+		false,
+		func(_ func() error, remove func() error) (bool, error) {
 			go func() {
 				competing <- g.RemoveWorktree(worktreePath, false, generation)
 			}()

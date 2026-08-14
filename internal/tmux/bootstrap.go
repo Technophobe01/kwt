@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strings"
+
+	"go.kenn.io/kwt/internal/utils"
 )
 
 // FirstPanePlaceholderArgv is the inert command the first pane runs between
@@ -309,18 +313,47 @@ func BuildSessionBootstrapCommand(session string, stripNames []string) []string 
 }
 
 const workspacePathOption = "@kwt-workspace-path"
+const workspaceIdentityOption = "@kwt-workspace-id"
+const workspaceGenerationOption = "@kwt-workspace-generation"
 
-// buildProtectedSessionBootstrapCommand records the workspace identity in the
-// same pre-shell bootstrap transaction as the session environment policy.
-func buildProtectedSessionBootstrapCommand(
-	session, worktreeDir string,
+func workspacePathIdentity(worktreeDir string) string {
+	digest := sha256.Sum256([]byte(utils.PathKey(worktreeDir)))
+	return hex.EncodeToString(digest[:])
+}
+
+// buildWorkspaceSessionBootstrapCommand records the worktree path and durable
+// generation alongside the terminal environment policy. The path handles
+// branch renames; the generation continues to identify the checkout after a
+// git worktree move.
+func buildWorkspaceSessionBootstrapCommand(
+	session, worktreeDir, generation string,
 	stripNames []string,
-	updateEnvironment string,
 ) []string {
 	cmd := BuildSessionBootstrapCommand(session, stripNames)
 	cmd = append(
 		cmd,
 		";", "set-option", "-t", session, workspacePathOption, worktreeDir,
+		";", "set-option", "-t", session, workspaceIdentityOption,
+		workspacePathIdentity(worktreeDir),
+	)
+	if generation != "" {
+		cmd = append(
+			cmd,
+			";", "set-option", "-t", session, workspaceGenerationOption, generation,
+		)
+	}
+	return cmd
+}
+
+// buildProtectedSessionBootstrapCommand records the workspace identity in the
+// same pre-shell bootstrap transaction as the session environment policy.
+func buildProtectedSessionBootstrapCommand(
+	session, worktreeDir, generation string,
+	stripNames []string,
+	updateEnvironment string,
+) []string {
+	cmd := buildWorkspaceSessionBootstrapCommand(
+		session, worktreeDir, generation, stripNames,
 	)
 	return append(
 		cmd,

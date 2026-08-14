@@ -277,6 +277,19 @@ generation, main-worktree status, and lock state while holding the repository's
 cross-process mutation lock. It also performs generation-safe registry cleanup.
 The CLI and TUI retain selection, output, fleet publication, and tmux-session
 cleanup; stale inventory alone never authorizes deletion.
+Automation that has confirmed terminal-session state can add
+`--if-session-name` with `--if-session-absent`.
+`--if-session-socket-directory` selects an explicit `TMUX_TMPDIR`.
+`--if-session-socket-name` selects an exact named socket such as the
+workspace-specific server used by an imported pull request. Supply both
+selectors for a legacy named socket located under an explicit `TMUX_TMPDIR`;
+otherwise omit the directory to use the canonical named-socket location.
+These flags require `--if-generation`. Kwt revalidates absence while holding
+the same project lifecycle fences used by guarded `kwt open`. A live-session
+identity is rejected with a retryable conflict: callers must explicitly stop
+the exact session, freshly confirm absence, and retry. Kwt does not claim an
+atomic live-session freeze on a shared tmux server because tmux command queues
+can continue changing topology while an external signal helper starts.
 Known Git removal failures use the stable `removal_failed` code and preserve
 their credential-sanitized message and partial-result fields across the daemon
 boundary. Unexpected failures use `internal` and withhold their cause.

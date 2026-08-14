@@ -48,6 +48,9 @@ type tuiBackend struct {
 	discoverLaunchWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
 	listSessions              func() ([]string, error)
+	ensureWorkspace           func(context.Context, string, string, models.Layout) error
+	ensureWorktree            func(context.Context, string, string, string, models.Layout) error
+	attachSession             func(string, bool) error
 	ensureAndAttach           func(context.Context, string, string, models.Layout, bool) error
 	registerProject           func(context.Context, models.Project) error
 	registerWorkspace         func(models.Workspace) (models.Workspace, error)
@@ -70,6 +73,7 @@ func newTUIBackend(cfg *models.Config) *tuiBackend {
 func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBackend {
 	protectedNames := credentials.ProtectedNames(cfg)
 	tmuxCmd := tmux.NewTmuxCommandWithStripNames("", protectedNames)
+	runner := tmux.NewWorkspaceRunner(tmuxCmd, protectedNames)
 	backend := &tuiBackend{
 		cfg:            cfg,
 		tmux:           tmuxCmd,
@@ -85,18 +89,18 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		discoverLaunchWorktrees:  discoverLaunchRepoWorktrees,
 		collectStatuses:          collectTUIStatuses,
 		listSessions:             tmuxCmd.ListSessions,
-		ensureAndAttach: tmux.NewWorkspaceRunner(
-			tmuxCmd,
-			protectedNames,
-		).EnsureAndAttach,
-		registerProject:         registerProjectWithLifecycle,
-		registerWorkspace:       config.RegisterWorkspace,
-		unregisterWorkspace:     config.UnregisterWorkspace,
-		readFleetState:          readTUIFleetState,
-		acknowledgeRemoteSource: acknowledgeRemoteSourcePath,
-		removeWorktree:          removeDaemonWorktree,
-		runProjectOperation:     runTUIProjectOperation,
-		now:                     time.Now,
+		ensureWorkspace:          runner.Ensure,
+		ensureWorktree:           runner.EnsureWithGeneration,
+		attachSession:            runner.Attach,
+		ensureAndAttach:          runner.EnsureAndAttach,
+		registerProject:          registerProjectWithLifecycle,
+		registerWorkspace:        config.RegisterWorkspace,
+		unregisterWorkspace:      config.UnregisterWorkspace,
+		readFleetState:           readTUIFleetState,
+		acknowledgeRemoteSource:  acknowledgeRemoteSourcePath,
+		removeWorktree:           removeDaemonWorktree,
+		runProjectOperation:      runTUIProjectOperation,
+		now:                      time.Now,
 	}
 	backend.loadTargetConfig = func(repoRoot string, interactive bool) (*models.Config, error) {
 		return config.LoadForTargetFrom(backend.cfg, repoRoot, interactive)
@@ -280,10 +284,11 @@ func (b *tuiBackend) applyInventoryConfig(effective *models.Config) error {
 	b.protectedNames = credentials.ProtectedNames(b.cfg)
 	b.tmux = tmux.NewTmuxCommandWithStripNames("", b.protectedNames)
 	b.listSessions = b.tmux.ListSessions
-	b.ensureAndAttach = tmux.NewWorkspaceRunner(
-		b.tmux,
-		b.protectedNames,
-	).EnsureAndAttach
+	runner := tmux.NewWorkspaceRunner(b.tmux, b.protectedNames)
+	b.ensureWorkspace = runner.Ensure
+	b.ensureWorktree = runner.EnsureWithGeneration
+	b.attachSession = runner.Attach
+	b.ensureAndAttach = runner.EnsureAndAttach
 	return nil
 }
 
@@ -1659,26 +1664,44 @@ func (b *tuiBackend) attachWorkspace(ctx context.Context, row dashboard.Row, lay
 	if row.Entry == nil && row.Workspace == nil {
 		return fmt.Errorf("no worktree selected")
 	}
-	if err := rejectProtectedWorkspaceOpen(
-		ctx,
-		rowPaneRoot(row),
-	); err != nil {
+	generation := ""
+	if row.Entry != nil {
+		generation = row.Entry.Generation
+	}
+	if err := rejectProtectedWorkspaceOpen(ctx, rowPaneRoot(row), generation); err != nil {
 		return err
 	}
 	if err := b.acknowledgeRemoteSource(rowPaneRoot(row)); err != nil {
-		return err
-	}
-	sessionName, err := b.sessionName(row)
-	if err != nil {
 		return err
 	}
 	layout, err := b.resolveLayout(row, layoutName, interactive)
 	if err != nil {
 		return err
 	}
-	return b.ensureAndAttach(
-		ctx, sessionName, rowPaneRoot(row), layout, insideTmux,
+	if row.Entry == nil {
+		sessionName, err := b.sessionName(row)
+		if err != nil {
+			return err
+		}
+		return b.ensureAndAttach(
+			ctx, sessionName, rowPaneRoot(row), layout, insideTmux,
+		)
+	}
+	sessionName, err := runWorktreeSessionEstablishment(
+		ctx,
+		row.Entry.Path,
+		row.Entry.Generation,
+		b.protectedNames,
+		func(sessionName string) error {
+			return b.ensureWorktree(
+				ctx, sessionName, row.Entry.Path, row.Entry.Generation, layout,
+			)
+		},
 	)
+	if err != nil {
+		return err
+	}
+	return b.attachSession(sessionName, insideTmux)
 }
 
 func rowPaneRoot(row dashboard.Row) string {

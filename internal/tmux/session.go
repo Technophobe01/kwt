@@ -75,6 +75,30 @@ func previousWorkspaceSessionName(
 	return sanitizeTmuxName(raw)
 }
 
+// MatchesLegacyWorkspaceSessionPath recognizes pre-marker KWT sessions by
+// the path-derived suffix shared by the current and previous naming schemes.
+// The repository and branch portions are intentionally not compared because
+// either can change while a legacy client remains attached to the worktree.
+func MatchesLegacyWorkspaceSessionPath(name, worktreePath string) bool {
+	suffix := "-" + template.ShortHash(worktreePath)
+	return isKWTSessionName(name) &&
+		strings.HasSuffix(name, suffix)
+}
+
+func isKWTSessionName(name string) bool {
+	return strings.HasPrefix(name, "kwt-wt-") ||
+		strings.HasPrefix(name, "kwt-workspace-")
+}
+
+// IsKWTWorktreeSessionName reports whether name may belong to a Git worktree.
+// The current kwt-wt namespace is unambiguous. The legacy kwt-workspace
+// namespace is not: its next component may be either a repository host or the
+// directory-workspace marker, and "dir" is a valid host alias. Callers may
+// exempt a directory session only when independent workspace markers prove it.
+func IsKWTWorktreeSessionName(name string) bool {
+	return isKWTSessionName(name)
+}
+
 // sanitizeTmuxName replaces characters tmux disallows in a session name
 // ('.' and ':') plus path separators and whitespace with '-'.
 func sanitizeTmuxName(s string) string {

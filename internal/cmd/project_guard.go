@@ -3,14 +3,90 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	kwt "go.kenn.io/kwt"
 	"go.kenn.io/kwt/internal/config"
+	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/pkg/models"
 	"go.kenn.io/kwt/service"
 )
+
+func runWorktreeSessionEstablishment(
+	ctx context.Context,
+	worktreePath string,
+	expectedGeneration string,
+	protectedNames []string,
+	establish func(string) error,
+) (string, error) {
+	mainPath, err := git.NewWithContext(ctx, worktreePath).GetMainRepositoryPath()
+	if err != nil {
+		return "", fmt.Errorf("resolve selected repository root: %w", err)
+	}
+	home, err := config.CanonicalHome()
+	if err != nil {
+		return "", err
+	}
+	expansion, err := kwt.CaptureExpansionContext()
+	if err != nil {
+		return "", err
+	}
+	guard, err := observeGuardedProjectOperation(ctx, home, mainPath, expansion)
+	if err != nil {
+		return "", err
+	}
+	projects := []models.Project(nil)
+	if guard.claim != nil {
+		projects = []models.Project{guard.claim.Registration.Effective}
+	}
+	var sessionName string
+	err = guard.run(ctx, func() error {
+		var establishErr error
+		sessionName, establishErr = withCurrentWorktreeSession(
+			ctx,
+			mainPath,
+			worktreePath,
+			expectedGeneration,
+			projects,
+			protectedNames,
+			establish,
+		)
+		return establishErr
+	})
+	return sessionName, err
+}
+
+func withCurrentWorktreeSession(
+	ctx context.Context,
+	mainPath string,
+	worktreePath string,
+	expectedGeneration string,
+	projects []models.Project,
+	protectedNames []string,
+	establish func(string) error,
+) (string, error) {
+	var sessionName string
+	err := git.NewWithContext(ctx, mainPath).WithWorktreeGeneration(
+		worktreePath,
+		expectedGeneration,
+		func() error {
+			var err error
+			sessionName, _, err = lifecycle.ResolveCurrentWorktreeSessionIdentity(
+				ctx,
+				worktreePath,
+				projects,
+				protectedNames,
+			)
+			if err != nil {
+				return err
+			}
+			return establish(sessionName)
+		},
+	)
+	return sessionName, err
+}
 
 func commandFlagChanged(cmd *cobra.Command, name string) bool {
 	if cmd == nil {
@@ -37,7 +113,7 @@ func observeRequiredGuardedProjectOperation(
 	if err != nil {
 		return nil, err
 	}
-	if guard.claim == nil || !projectClaimHasExpectedIdentity(
+	if guard.claim == nil || !guard.claim.Registered || !projectClaimHasExpectedIdentity(
 		guard.claim, expectedIdentities,
 	) {
 		return nil, service.NewError(
@@ -137,19 +213,45 @@ func registerProjectWithLifecycle(
 	ctx context.Context,
 	project models.Project,
 ) error {
+	_, err := registerProjectIdentityWithLifecycle(ctx, project)
+	return err
+}
+
+func registerProjectIdentityWithLifecycle(
+	ctx context.Context,
+	project models.Project,
+) (kwt.Project, error) {
 	home, err := config.CanonicalHome()
 	if err != nil {
-		return err
+		return kwt.Project{}, err
 	}
 	expansion, err := kwt.CaptureExpansionContext()
 	if err != nil {
-		return err
+		return kwt.Project{}, err
 	}
-	return lifecycle.TransitionProjectRegistration(
+	canonicalIdentity, err := lifecycle.ResolveProspectiveProjectIdentity(
+		ctx, home, expansion, project,
+	)
+	if err != nil {
+		return kwt.Project{}, err
+	}
+	return lifecycle.TransitionProjectRegistrationWithIdentity(
 		ctx,
 		home,
 		expansion,
 		project,
-		func() error { return config.RegisterProject(project) },
+		func() (kwt.Project, error) {
+			registered, registerErr := config.RegisterProjectWithIdentity(project)
+			if registerErr != nil {
+				return kwt.Project{}, registerErr
+			}
+			return kwt.Project{
+				Repository:              canonicalIdentity,
+				Name:                    registered.Project.Name,
+				Path:                    registered.Project.Path,
+				LastTouched:             registered.Project.LastTouched,
+				RegistrationFingerprint: registered.Fingerprint,
+			}, nil
+		},
 	)
 }

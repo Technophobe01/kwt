@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"go.kenn.io/kwt/pkg/models"
 )
@@ -13,17 +14,18 @@ import (
 // workspaceTmux is the minimal tmux surface the workspace runner needs.
 // *TmuxCommand satisfies it; tests use a mock.
 type workspaceTmux interface {
-	HasSession(session string) bool
+	HasSessionContext(context.Context, string) (bool, error)
 	RunCommandContext(ctx context.Context, args ...string) error
 	RunCommandOutputContext(ctx context.Context, args ...string) (string, error)
 	SwitchClient(target string) error
 	AttachSession(session string) error
 	AttachSessionWithoutEnvironment(context.Context, string) error
-	KillSession(session string) error
-	GlobalEnvironment() (string, error)
-	SessionEnvironment(session string) (string, error)
-	sessionOption(session, option string) (string, error)
-	globalOption(option string) (string, error)
+	KillSessionContext(context.Context, string) error
+	GlobalEnvironmentContext(context.Context) (string, error)
+	SessionEnvironmentContext(context.Context, string) (string, error)
+	sessionOptionContext(context.Context, string, string) (string, error)
+	sessionUserOption(context.Context, string, string) (string, error)
+	globalOptionContext(context.Context, string) (string, error)
 }
 
 // ProtectedWorkspaceSocketName returns the deterministic tmux socket name for
@@ -56,6 +58,8 @@ type WorkspaceRunner struct {
 	credentialNames []string
 	protected       bool
 }
+
+const partialSessionCleanupTimeout = 2 * time.Second
 
 // NewProtectedWorkspaceRunner requires credential-clean tmux state and a
 // matching kwt workspace marker before it reuses an existing session.
@@ -130,12 +134,44 @@ func (r *WorkspaceRunner) Attach(session string, insideTmux bool) error {
 func (r *WorkspaceRunner) Ensure(
 	ctx context.Context, session, worktreeDir string, layout models.Layout,
 ) error {
+	return r.ensure(ctx, session, worktreeDir, "", layout)
+}
+
+// EnsureWithGeneration creates or repairs a worktree session and records its
+// durable Git generation so guarded removal remains safe after path moves.
+func (r *WorkspaceRunner) EnsureWithGeneration(
+	ctx context.Context,
+	session, worktreeDir, generation string,
+	layout models.Layout,
+) error {
+	return r.ensure(ctx, session, worktreeDir, generation, layout)
+}
+
+func (r *WorkspaceRunner) ensure(
+	ctx context.Context,
+	session, worktreeDir, generation string,
+	layout models.Layout,
+) error {
 	if err := ValidateStartDirectory(worktreeDir); err != nil {
 		return err
 	}
-	sessionExists := r.tmux.HasSession(session)
+	sessionExists, err := r.tmux.HasSessionContext(ctx, session)
+	if err != nil {
+		return fmt.Errorf("cannot inspect tmux session: %w", err)
+	}
+	if sessionExists && generation != "" {
+		if err := r.validateExistingWorktreeIdentity(
+			ctx,
+			session,
+			worktreeDir,
+			generation,
+		); err != nil {
+			return err
+		}
+	}
 	if r.protected {
 		if err := r.validateProtectedState(
+			ctx,
 			session,
 			worktreeDir,
 			sessionExists,
@@ -144,11 +180,62 @@ func (r *WorkspaceRunner) Ensure(
 		}
 	}
 	if sessionExists {
-		if err := r.repairBootstrap(ctx, session, worktreeDir); err != nil {
+		if err := r.repairBootstrap(ctx, session, worktreeDir, generation); err != nil {
 			return err
 		}
-	} else if err := r.create(ctx, session, worktreeDir, layout); err != nil {
+	} else if err := r.create(ctx, session, worktreeDir, generation, layout); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (r *WorkspaceRunner) validateExistingWorktreeIdentity(
+	ctx context.Context,
+	session string,
+	worktreeDir string,
+	generation string,
+) error {
+	workspaceIdentity, err := r.tmux.sessionUserOption(
+		ctx,
+		session,
+		workspaceIdentityOption,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot inspect tmux workspace identity: %w", err)
+	}
+	workspaceIdentity = strings.TrimSpace(workspaceIdentity)
+	if workspaceIdentity == "" {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"tmux session %q lacks worktree identity markers; remove it before reopening the worktree",
+			session,
+		)}
+	}
+	if workspaceIdentity != workspacePathIdentity(worktreeDir) {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"tmux session %q belongs to a different workspace identity",
+			session,
+		)}
+	}
+	existingGeneration, err := r.tmux.sessionUserOption(
+		ctx,
+		session,
+		workspaceGenerationOption,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot inspect tmux workspace generation: %w", err)
+	}
+	existingGeneration = strings.TrimSpace(existingGeneration)
+	if existingGeneration == "" {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"tmux session %q lacks worktree identity markers; remove it before reopening the worktree",
+			session,
+		)}
+	}
+	if existingGeneration != generation {
+		return &SessionSafetyError{Reason: fmt.Sprintf(
+			"tmux session %q belongs to a different worktree generation",
+			session,
+		)}
 	}
 	return nil
 }
@@ -167,16 +254,20 @@ func (r *WorkspaceRunner) AttachProtected(
 	if err := ValidateStartDirectory(worktreeDir); err != nil {
 		return err
 	}
-	if !r.tmux.HasSession(session) {
+	sessionExists, err := r.tmux.HasSessionContext(ctx, session)
+	if err != nil {
+		return fmt.Errorf("cannot inspect protected tmux session: %w", err)
+	}
+	if !sessionExists {
 		return &SessionSafetyError{Reason: fmt.Sprintf(
 			"protected tmux session %q is not running",
 			session,
 		)}
 	}
-	if err := r.validateProtectedState(session, worktreeDir, true); err != nil {
+	if err := r.validateProtectedState(ctx, session, worktreeDir, true); err != nil {
 		return err
 	}
-	if err := r.repairBootstrap(ctx, session, worktreeDir); err != nil {
+	if err := r.repairBootstrap(ctx, session, worktreeDir, ""); err != nil {
 		return err
 	}
 	return r.tmux.AttachSessionWithoutEnvironment(ctx, session)
@@ -215,10 +306,11 @@ func (r *WorkspaceRunner) EnsureAndAttachProtected(
 }
 
 func (r *WorkspaceRunner) validateProtectedState(
+	ctx context.Context,
 	session, worktreeDir string,
 	sessionExists bool,
 ) error {
-	globalEnvironment, err := r.tmux.GlobalEnvironment()
+	globalEnvironment, err := r.tmux.GlobalEnvironmentContext(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot verify tmux server environment: %w", err)
 	}
@@ -235,7 +327,7 @@ func (r *WorkspaceRunner) validateProtectedState(
 		return nil
 	}
 
-	sessionEnvironment, err := r.tmux.SessionEnvironment(session)
+	sessionEnvironment, err := r.tmux.SessionEnvironmentContext(ctx, session)
 	if err != nil {
 		return fmt.Errorf(
 			"cannot verify existing tmux session environment: %w",
@@ -251,7 +343,8 @@ func (r *WorkspaceRunner) validateProtectedState(
 			name,
 		)}
 	}
-	workspacePath, err := r.tmux.sessionOption(
+	workspacePath, err := r.tmux.sessionOptionContext(
+		ctx,
 		session,
 		workspacePathOption,
 	)
@@ -301,29 +394,38 @@ func firstMatchingName(names, sensitive []string) (string, bool) {
 //     STARSHIP_* into the session table directly, never promoting them to the
 //     server-global table the previous source reads.
 //
-// A show-environment failure on either query falls back to whichever sources
-// remain.
-func (r *WorkspaceRunner) sessionStripNames(session string, sessionExists bool) []string {
+// A non-cancellation show-environment failure on either query falls back to
+// whichever sources remain. Cancellation stops the operation so lifecycle
+// locks are not retained by bootstrap discovery.
+func (r *WorkspaceRunner) sessionStripNames(
+	ctx context.Context,
+	session string,
+	sessionExists bool,
+) ([]string, error) {
 	launcherEnv := os.Environ()
 	launcher := append(
 		StripEnvNames(launcherEnv),
 		matchingProtectedEnvironmentNames(launcherEnv, r.extraStripNames)...,
 	)
 	var serverDerived, sessionDerived []string
-	if output, err := r.tmux.GlobalEnvironment(); err == nil {
+	if output, err := r.tmux.GlobalEnvironmentContext(ctx); err == nil {
 		serverNames := ParseServerEnvNames(output)
 		serverDerived = append(
 			CanonicalStripNames(serverNames),
 			matchingProtectedNames(serverNames, r.extraStripNames)...,
 		)
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 	if sessionExists {
-		if output, err := r.tmux.SessionEnvironment(session); err == nil {
+		if output, err := r.tmux.SessionEnvironmentContext(ctx, session); err == nil {
 			sessionNames := ParseServerEnvNames(output)
 			sessionDerived = append(
 				CanonicalStripNames(sessionNames),
 				matchingProtectedNames(sessionNames, r.extraStripNames)...,
 			)
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
 	}
 	return MergeStripNames(
@@ -332,7 +434,7 @@ func (r *WorkspaceRunner) sessionStripNames(session string, sessionExists bool) 
 		launcher,
 		serverDerived,
 		sessionDerived,
-	)
+	), nil
 }
 
 func matchingProtectedEnvironmentNames(
@@ -374,12 +476,17 @@ func matchingProtectedNames(names, protectedNames []string) []string {
 // half-built workspace — including one whose only pane is still the
 // placeholder — behind for a later EnsureAndAttach to find and attach to.
 func (r *WorkspaceRunner) create(
-	ctx context.Context, session, worktreeDir string, layout models.Layout,
+	ctx context.Context,
+	session, worktreeDir, generation string,
+	layout models.Layout,
 ) error {
 	// The session does not exist yet, so only the launcher and server-global
 	// sources contribute strip names; querying the session table would be a
 	// guaranteed-to-fail subprocess.
-	stripNames := r.sessionStripNames(session, false)
+	stripNames, err := r.sessionStripNames(ctx, session, false)
+	if err != nil {
+		return fmt.Errorf("cannot inspect tmux bootstrap environment: %w", err)
+	}
 	createCmd := BuildSessionCreateCommand(session, worktreeDir)
 	firstPane, err := r.tmux.RunCommandOutputContext(ctx, createCmd...)
 	if err != nil {
@@ -388,30 +495,33 @@ func (r *WorkspaceRunner) create(
 	paneIDs := make([]string, 0, len(layout.Panes))
 	paneIDs = append(paneIDs, strings.TrimSpace(firstPane))
 
-	bootCmd := BuildSessionBootstrapCommand(session, stripNames)
+	bootCmd := buildWorkspaceSessionBootstrapCommand(
+		session, worktreeDir, generation, stripNames,
+	)
 	if r.protected {
-		updateEnvironment, updateErr := r.protectedUpdateEnvironment(session)
+		updateEnvironment, updateErr := r.protectedUpdateEnvironment(ctx, session)
 		if updateErr != nil {
-			return r.abort(session, []string{
+			return r.abort(ctx, session, []string{
 				"show-options", "-t", session, "update-environment",
 			}, updateErr)
 		}
 		bootCmd = buildProtectedSessionBootstrapCommand(
 			session,
 			worktreeDir,
+			generation,
 			stripNames,
 			updateEnvironment,
 		)
 	}
 	if err := r.tmux.RunCommandContext(ctx, bootCmd...); err != nil {
-		return r.abort(session, bootCmd, err)
+		return r.abort(ctx, session, bootCmd, err)
 	}
 	defaultShellCmd := []string{
 		"show-options", "-v", "-t", session, "default-shell",
 	}
 	defaultShellOut, err := r.tmux.RunCommandOutputContext(ctx, defaultShellCmd...)
 	if err != nil {
-		return r.abort(session, defaultShellCmd, err)
+		return r.abort(ctx, session, defaultShellCmd, err)
 	}
 	defaultShell := strings.TrimSpace(defaultShellOut)
 	if defaultShell == "" {
@@ -421,31 +531,31 @@ func (r *WorkspaceRunner) create(
 			defaultShellCmd...,
 		)
 		if err != nil {
-			return r.abort(session, defaultShellCmd, err)
+			return r.abort(ctx, session, defaultShellCmd, err)
 		}
 		defaultShell = strings.TrimSpace(defaultShellOut)
 	}
 	if defaultShell == "" {
-		return r.abort(session, defaultShellCmd, fmt.Errorf("tmux returned an empty default-shell"))
+		return r.abort(ctx, session, defaultShellCmd, fmt.Errorf("tmux returned an empty default-shell"))
 	}
 	respawnCmd := BuildFirstPaneRespawnCommand(paneIDs[0], worktreeDir, defaultShell)
 	if err := r.tmux.RunCommandContext(ctx, respawnCmd...); err != nil {
-		return r.abort(session, respawnCmd, err)
+		return r.abort(ctx, session, respawnCmd, err)
 	}
 	for _, args := range BuildRemainingPaneSequence(session, worktreeDir, layout) {
 		if args[0] == "split-window" {
 			out, err := r.tmux.RunCommandOutputContext(ctx, args...)
 			if err != nil {
-				return r.abort(session, args, err)
+				return r.abort(ctx, session, args, err)
 			}
 			paneIDs = append(paneIDs, strings.TrimSpace(out))
 		} else if err := r.tmux.RunCommandContext(ctx, args...); err != nil {
-			return r.abort(session, args, err)
+			return r.abort(ctx, session, args, err)
 		}
 	}
 	for _, args := range BuildPaneCommandSequence(paneIDs, layout.Panes) {
 		if err := r.tmux.RunCommandContext(ctx, args...); err != nil {
-			return r.abort(session, args, err)
+			return r.abort(ctx, session, args, err)
 		}
 	}
 	return nil
@@ -459,18 +569,24 @@ func (r *WorkspaceRunner) create(
 // it.
 func (r *WorkspaceRunner) repairBootstrap(
 	ctx context.Context,
-	session, worktreeDir string,
+	session, worktreeDir, generation string,
 ) error {
-	stripNames := r.sessionStripNames(session, true)
-	bootCmd := BuildSessionBootstrapCommand(session, stripNames)
+	stripNames, err := r.sessionStripNames(ctx, session, true)
+	if err != nil {
+		return fmt.Errorf("cannot inspect tmux bootstrap environment: %w", err)
+	}
+	bootCmd := buildWorkspaceSessionBootstrapCommand(
+		session, worktreeDir, generation, stripNames,
+	)
 	if r.protected {
-		updateEnvironment, err := r.protectedUpdateEnvironment(session)
+		updateEnvironment, err := r.protectedUpdateEnvironment(ctx, session)
 		if err != nil {
 			return fmt.Errorf("cannot inspect protected tmux update-environment: %w", err)
 		}
 		bootCmd = buildProtectedSessionBootstrapCommand(
 			session,
 			worktreeDir,
+			generation,
 			stripNames,
 			updateEnvironment,
 		)
@@ -481,13 +597,16 @@ func (r *WorkspaceRunner) repairBootstrap(
 	return nil
 }
 
-func (r *WorkspaceRunner) protectedUpdateEnvironment(session string) (string, error) {
-	value, err := r.tmux.sessionOption(session, "update-environment")
+func (r *WorkspaceRunner) protectedUpdateEnvironment(
+	ctx context.Context,
+	session string,
+) (string, error) {
+	value, err := r.tmux.sessionOptionContext(ctx, session, "update-environment")
 	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(value) == "" {
-		value, err = r.tmux.globalOption("update-environment")
+		value, err = r.tmux.globalOptionContext(ctx, "update-environment")
 		if err != nil {
 			return "", err
 		}
@@ -508,9 +627,19 @@ func (r *WorkspaceRunner) protectedUpdateEnvironment(session string) (string, er
 // abort wraps a construction-command failure and kills the just-created
 // session so it does not linger half-built. Killing is best-effort: a failure
 // there is annotated onto the returned error but never replaces it.
-func (r *WorkspaceRunner) abort(session string, args []string, err error) error {
+func (r *WorkspaceRunner) abort(
+	ctx context.Context,
+	session string,
+	args []string,
+	err error,
+) error {
 	wrapped := wrapTmuxErr(args, err)
-	if killErr := r.tmux.KillSession(session); killErr != nil {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		partialSessionCleanupTimeout,
+	)
+	defer cancel()
+	if killErr := r.tmux.KillSessionContext(cleanupCtx, session); killErr != nil {
 		return fmt.Errorf("%w (also failed to kill partial session: %v)", wrapped, killErr)
 	}
 	return wrapped

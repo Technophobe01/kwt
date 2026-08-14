@@ -10,26 +10,79 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	kwt "go.kenn.io/kwt"
 	"go.kenn.io/kwt/internal/config"
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/internal/utils"
+	"go.kenn.io/kwt/internal/worktree"
 	"go.kenn.io/kwt/pkg/models"
 	"go.kenn.io/kwt/service"
 )
+
+type blockingOpenRemovalGuard struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *blockingOpenRemovalGuard) Quiesce(
+	_ context.Context,
+	_ tmux.RemovalSessionCondition,
+) (tmux.RemovalSessionLease, error) {
+	close(g.entered)
+	<-g.release
+	return openTestRemovalLease{}, nil
+}
+
+type openTestRemovalLease struct{}
+
+func (openTestRemovalLease) Terminate(context.Context) error { return nil }
+func (openTestRemovalLease) Resume() error                   { return nil }
+
+type signalingOpenWorkspaceRunner struct {
+	ensure chan struct{}
+}
+
+func (r *signalingOpenWorkspaceRunner) Ensure(
+	context.Context, string, string, models.Layout,
+) error {
+	r.ensure <- struct{}{}
+	return nil
+}
+
+func (r *signalingOpenWorkspaceRunner) EnsureWithGeneration(
+	ctx context.Context,
+	sessionName, workingDirectory, _ string,
+	layout models.Layout,
+) error {
+	return r.Ensure(ctx, sessionName, workingDirectory, layout)
+}
+
+func (r *signalingOpenWorkspaceRunner) Attach(string, bool) error { return nil }
+
+func (r *signalingOpenWorkspaceRunner) EnsureAndAttach(
+	context.Context, string, string, models.Layout, bool,
+) error {
+	r.ensure <- struct{}{}
+	return nil
+}
 
 type recordingOpenWorkspaceRunner struct {
 	ensured          bool
 	attached         bool
 	sessionName      string
 	workingDirectory string
+	generation       string
 	layout           models.Layout
 	insideTmux       bool
 }
@@ -52,6 +105,16 @@ func (r *recordingOpenWorkspaceRunner) Ensure(
 	r.workingDirectory = workingDirectory
 	r.layout = layout
 	return nil
+}
+
+func (r *recordingOpenWorkspaceRunner) EnsureWithGeneration(
+	ctx context.Context,
+	sessionName, workingDirectory, generation string,
+	layout models.Layout,
+) error {
+	err := r.Ensure(ctx, sessionName, workingDirectory, layout)
+	r.generation = generation
+	return err
 }
 
 func (r *recordingOpenWorkspaceRunner) EnsureAndAttach(
@@ -594,16 +657,20 @@ func TestOpenSelectedWorktreeStartsSessionWithoutAttaching(t *testing.T) {
 	}
 	openLayout = tmux.BlankLayoutName
 	openSelectLayout = false
-	worktreePath := t.TempDir()
+	initCommandTestConfig(t, t.TempDir())
+	worktreePath := newTUITestRepo(t)
+	generation, err := git.New(worktreePath).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
 
-	err := openSelectedWorktree(
+	err = openSelectedWorktree(
 		context.Background(),
 		&CommandContext{Config: &models.Config{
 			Fleet: models.FleetConfig{TokenEnv: "CUSTOM_FLEET_TOKEN"},
 		}},
 		&discovery.GlobalWorktreeEntry{
-			Path:   worktreePath,
-			Branch: "feature",
+			Path:       worktreePath,
+			Branch:     "feature",
+			Generation: generation,
 			RepositoryInfo: &url.RepositoryInfo{
 				FullPath: "github.com/acme/widget",
 			},
@@ -622,6 +689,134 @@ func TestOpenSelectedWorktreeStartsSessionWithoutAttaching(t *testing.T) {
 		[]string{"KWT_GITHUB_TOKEN", "KWT_FLEET_TOKEN", "CUSTOM_FLEET_TOKEN"},
 		protectedNames,
 	)
+}
+
+func TestOpenSelectedWorktreeUsesBranchObservedInsideLifecycleGuard(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "branch-switch-open")
+	runTUITestGit(t, repoPath, "branch", "feature/original")
+	runTUITestGit(t, repoPath, "worktree", "add", worktreePath, "feature/original")
+	generation := tuiTestWorktreeGeneration(t, repoPath, worktreePath)
+	repositoryInfo, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+	initCommandTestConfig(t, t.TempDir())
+
+	runner := &recordingOpenWorkspaceRunner{}
+	originalRunner := newOpenWorkspaceRunner
+	originalBeforeAcquire := beforeProjectGuardAcquire
+	originalLayout := openLayout
+	originalExpectedRepository := openExpectedRepository
+	t.Cleanup(func() {
+		newOpenWorkspaceRunner = originalRunner
+		beforeProjectGuardAcquire = originalBeforeAcquire
+		openLayout = originalLayout
+		openExpectedRepository = originalExpectedRepository
+	})
+	newOpenWorkspaceRunner = func([]string) openWorkspaceRunner { return runner }
+	openLayout = tmux.BlankLayoutName
+	openExpectedRepository = ""
+	switched := false
+	beforeProjectGuardAcquire = func() {
+		if switched {
+			return
+		}
+		switched = true
+		runTUITestGit(t, worktreePath, "switch", "-c", "feature/current")
+	}
+
+	err = openSelectedWorktree(
+		context.Background(),
+		&CommandContext{Config: &models.Config{}},
+		&discovery.GlobalWorktreeEntry{
+			Path: worktreePath, Branch: "feature/original", Generation: generation,
+			RepositoryInfo: repositoryInfo,
+		},
+		nil,
+		true,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, runner.ensured)
+	assert.Equal(t, tmux.WorkspaceSessionName(
+		repositoryInfo, "feature/current", worktreePath,
+	), runner.sessionName)
+}
+
+func TestOrdinaryOpenCannotRaceGuardedRemoval(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "open-race")
+	runTUITestGit(t, repoPath, "branch", "open-race")
+	runTUITestGit(t, repoPath, "worktree", "add", worktreePath, "open-race")
+	generation, err := git.New(repoPath).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+	initCommandTestConfig(t, t.TempDir())
+	home := os.Getenv("KWT_HOME")
+	expansion, err := kwt.CaptureExpansionContext()
+	require.NoError(t, err)
+	removalSessionName, _, err := lifecycle.ResolveCurrentWorktreeSessionIdentity(
+		context.Background(), worktreePath, nil, nil,
+	)
+	require.NoError(t, err)
+	removalGuard := &blockingOpenRemovalGuard{
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	removalDone := make(chan error, 1)
+	go func() {
+		_, removeErr := lifecycle.NewRemovalService(lifecycle.RemovalServiceOptions{
+			Home: home, SessionGuard: removalGuard,
+		}).Remove(context.Background(), lifecycle.RemovalRequest{
+			RepositoryPath: repoPath,
+			Path:           worktreePath, ExpectedGeneration: generation,
+			Expansion: expansion,
+			Session: &tmux.RemovalSessionCondition{
+				SessionName: removalSessionName, Absent: true,
+			},
+		})
+		removalDone <- removeErr
+	}()
+	<-removalGuard.entered
+
+	runner := &signalingOpenWorkspaceRunner{ensure: make(chan struct{}, 1)}
+	originalRunner := newOpenWorkspaceRunner
+	originalLayout := openLayout
+	originalExpectedRepository := openExpectedRepository
+	t.Cleanup(func() {
+		newOpenWorkspaceRunner = originalRunner
+		openLayout = originalLayout
+		openExpectedRepository = originalExpectedRepository
+	})
+	newOpenWorkspaceRunner = func([]string) openWorkspaceRunner { return runner }
+	openLayout = tmux.BlankLayoutName
+	openExpectedRepository = ""
+	openDone := make(chan error, 1)
+	go func() {
+		openDone <- openSelectedWorktree(
+			context.Background(),
+			&CommandContext{Config: &models.Config{}},
+			&discovery.GlobalWorktreeEntry{
+				Path: worktreePath, Branch: "open-race", Generation: generation,
+				RepositoryInfo: &url.RepositoryInfo{FullPath: repoPath},
+			},
+			nil,
+			true,
+			false,
+		)
+	}()
+
+	select {
+	case <-runner.ensure:
+		t.Fatal("ordinary open established a session during guarded removal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(removalGuard.release)
+	require.NoError(t, <-removalDone)
+	require.Error(t, <-openDone)
+	select {
+	case <-runner.ensure:
+		t.Fatal("ordinary open established a session after its worktree was removed")
+	default:
+	}
 }
 
 func (r *recordingOpenWorkspaceRunner) Attach(
@@ -813,14 +1008,19 @@ func TestExpectedOpenRejectsStaleDiscoveryAfterWorktreeReplacement(t *testing.T)
 }
 
 func TestOpenSelectedWorktreeAcknowledgesPersistedRemoteSource(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	worktreePath := t.TempDir()
+	initCommandTestConfig(t, t.TempDir())
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "feature-remote")
+	runTUITestGit(t, repoPath, "branch", "feature/remote")
+	runTUITestGit(t, repoPath, "worktree", "add", worktreePath, "feature/remote")
+	generation, err := git.New(repoPath).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
 	reg, err := registry.New()
 	require.NoError(t, err)
 	require.NoError(t, reg.Register(&registry.WorktreeEntry{
 		Path:                   worktreePath,
 		Branch:                 "feature/remote",
+		Generation:             generation,
 		UnreviewedRemoteSource: true,
 	}))
 
@@ -841,8 +1041,9 @@ func TestOpenSelectedWorktreeAcknowledgesPersistedRemoteSource(t *testing.T) {
 		context.Background(),
 		&CommandContext{Config: &models.Config{}},
 		&discovery.GlobalWorktreeEntry{
-			Path:   worktreePath,
-			Branch: "feature/remote",
+			Path:       worktreePath,
+			Branch:     "feature/remote",
+			Generation: generation,
 			RepositoryInfo: &url.RepositoryInfo{
 				FullPath: "github.com/acme/widget",
 			},
@@ -869,6 +1070,8 @@ func TestOpenSelectedWorktreeStartSessionDoesNotPromptForTargetTrust(t *testing.
 		[]byte("[layouts]\ndefault = \"focus\"\n"),
 		0o644,
 	))
+	generation, err := git.New(repo).WorktreeGeneration(repo)
+	require.NoError(t, err)
 
 	runner := &recordingOpenWorkspaceRunner{}
 	oldNewRunner := newOpenWorkspaceRunner
@@ -891,8 +1094,9 @@ func TestOpenSelectedWorktreeStartSessionDoesNotPromptForTargetTrust(t *testing.
 		context.Background(),
 		&CommandContext{Config: &models.Config{}},
 		&discovery.GlobalWorktreeEntry{
-			Path:   repo,
-			Branch: "feature",
+			Path:       repo,
+			Branch:     "feature",
+			Generation: generation,
 			RepositoryInfo: &url.RepositoryInfo{
 				FullPath: "github.com/acme/widget",
 			},

@@ -38,6 +38,7 @@ var (
 
 type openWorkspaceRunner interface {
 	Ensure(context.Context, string, string, models.Layout) error
+	EnsureWithGeneration(context.Context, string, string, string, models.Layout) error
 	Attach(string, bool) error
 	EnsureAndAttach(
 		context.Context,
@@ -375,6 +376,7 @@ func openSelectedWorktree(
 	if err := rejectProtectedWorkspaceOpen(
 		commandCtx,
 		entry.Path,
+		entry.Generation,
 	); err != nil {
 		return err
 	}
@@ -419,8 +421,8 @@ func openSelectedWorktree(
 		return err
 	}
 
-	session := tmux.WorkspaceSessionName(entry.RepositoryInfo, entry.Branch, entry.Path)
-	runner := newOpenWorkspaceRunner(credentials.ProtectedNames(ctx.Config))
+	protectedNames := credentials.ProtectedNames(ctx.Config)
+	runner := newOpenWorkspaceRunner(protectedNames)
 	if openExpectedRepository != "" {
 		return openExpectedWorktree(
 			commandCtx,
@@ -429,14 +431,24 @@ func openSelectedWorktree(
 			runner,
 			startSession,
 			os.Getenv("TMUX") != "",
+			protectedNames,
 		)
 	}
-	if startSession {
-		return runner.Ensure(commandCtx, session, entry.Path, layout)
-	}
-	return runner.EnsureAndAttach(
-		commandCtx, session, entry.Path, layout, os.Getenv("TMUX") != "",
+	session, err := runWorktreeSessionEstablishment(
+		commandCtx,
+		entry.Path,
+		entry.Generation,
+		protectedNames,
+		func(session string) error {
+			return runner.EnsureWithGeneration(
+				commandCtx, session, entry.Path, entry.Generation, layout,
+			)
+		},
 	)
+	if err != nil || startSession {
+		return err
+	}
+	return runner.Attach(session, os.Getenv("TMUX") != "")
 }
 
 func openExpectedWorktree(
@@ -446,6 +458,7 @@ func openExpectedWorktree(
 	runner openWorkspaceRunner,
 	startSession bool,
 	insideTmux bool,
+	protectedNames []string,
 ) error {
 	mainPath, err := git.New(entry.Path).GetMainRepositoryPath()
 	if err != nil {
@@ -490,17 +503,25 @@ func openExpectedWorktree(
 			currentSession != openExpectedSession {
 			return registrationChangedOpenError(nil)
 		}
-		generationErr := git.New(mainPath).WithWorktreeGeneration(
+		_, generationErr := withCurrentWorktreeSession(
+			ctx,
+			mainPath,
 			current.Path,
 			openExpectedGeneration,
-			func() error {
+			[]models.Project{guard.claim.Registration.Effective},
+			protectedNames,
+			func(lockedSession string) error {
+				if lockedSession != openExpectedSession {
+					return registrationChangedOpenError(nil)
+				}
 				if err := acknowledgeRemoteSourcePath(current.Path); err != nil {
 					return err
 				}
-				return runner.Ensure(
+				return runner.EnsureWithGeneration(
 					ctx,
 					openExpectedSession,
 					current.Path,
+					openExpectedGeneration,
 					layout,
 				)
 			},
@@ -537,6 +558,7 @@ func openSelectedDirectoryWorkspace(
 	if err := rejectProtectedWorkspaceOpen(
 		commandCtx,
 		workspace.Path,
+		"",
 	); err != nil {
 		return err
 	}

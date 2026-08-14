@@ -25,6 +25,7 @@ import (
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/fleet"
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/lifecycle"
 	"go.kenn.io/kwt/internal/pullrequest"
 	"go.kenn.io/kwt/internal/registry"
 	"go.kenn.io/kwt/internal/tmux"
@@ -3603,6 +3604,148 @@ func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, "no worktree selected", err.Error())
+}
+
+func TestTUIWorktreeAttachCannotRaceGuardedRemoval(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "tui-open-race")
+	runTUITestGit(t, repoPath, "branch", "tui-open-race")
+	runTUITestGit(t, repoPath, "worktree", "add", worktreePath, "tui-open-race")
+	generation, err := git.New(repoPath).WorktreeGeneration(worktreePath)
+	require.NoError(t, err)
+	initCommandTestConfig(t, t.TempDir())
+	home := os.Getenv("KWT_HOME")
+	file, err := os.OpenFile(filepath.Join(home, "config.toml"), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(
+		file,
+		"\n[[projects]]\nrepository = %q\nname = 'repository'\npath = %q\n",
+		repoPath,
+		repoPath,
+	)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	expansion, err := kwt.CaptureExpansionContext()
+	require.NoError(t, err)
+	removalSessionName, _, err := lifecycle.ResolveCurrentWorktreeSessionIdentity(
+		context.Background(), worktreePath, nil, nil,
+	)
+	require.NoError(t, err)
+	removalGuard := &blockingOpenRemovalGuard{
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	removalDone := make(chan error, 1)
+	go func() {
+		_, removeErr := lifecycle.NewRemovalService(lifecycle.RemovalServiceOptions{
+			Home: home, SessionGuard: removalGuard,
+		}).Remove(context.Background(), lifecycle.RemovalRequest{
+			RepositoryPath: repoPath,
+			Path:           worktreePath, ExpectedGeneration: generation,
+			Expansion: expansion,
+			Session: &tmux.RemovalSessionCondition{
+				SessionName: removalSessionName, Absent: true,
+			},
+		})
+		removalDone <- removeErr
+	}()
+	<-removalGuard.entered
+
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	ensureCalled := make(chan struct{}, 1)
+	attachCalled := make(chan struct{}, 1)
+	backend.ensureWorktree = func(
+		context.Context, string, string, string, models.Layout,
+	) error {
+		ensureCalled <- struct{}{}
+		return nil
+	}
+	backend.attachSession = func(string, bool) error {
+		attachCalled <- struct{}{}
+		return nil
+	}
+	attachDone := make(chan error, 1)
+	go func() {
+		attachDone <- backend.attachWorkspace(
+			context.Background(),
+			dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+				Path: worktreePath, Branch: "tui-open-race", Generation: generation,
+				RepositoryInfo: &url.RepositoryInfo{FullPath: repoPath},
+			}},
+			tmux.BlankLayoutName,
+			false,
+			false,
+		)
+	}()
+
+	select {
+	case <-ensureCalled:
+		t.Fatal("TUI established a session during guarded removal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(removalGuard.release)
+	require.NoError(t, <-removalDone)
+	require.Error(t, <-attachDone)
+	select {
+	case <-ensureCalled:
+		t.Fatal("TUI established a session after its worktree was removed")
+	default:
+	}
+	select {
+	case <-attachCalled:
+		t.Fatal("TUI attached after its worktree was removed")
+	default:
+	}
+}
+
+func TestTUIWorktreeAttachUsesBranchObservedInsideLifecycleGuard(t *testing.T) {
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "branch-switch-tui")
+	runTUITestGit(t, repoPath, "branch", "feature/original")
+	runTUITestGit(t, repoPath, "worktree", "add", worktreePath, "feature/original")
+	generation := tuiTestWorktreeGeneration(t, repoPath, worktreePath)
+	repositoryInfo, err := worktree.RepositoryInfoFromLocalPath(repoPath)
+	require.NoError(t, err)
+	initCommandTestConfig(t, t.TempDir())
+
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	var ensuredSession string
+	var attachedSession string
+	backend.ensureWorktree = func(
+		_ context.Context, session string, _, _ string, _ models.Layout,
+	) error {
+		ensuredSession = session
+		return nil
+	}
+	backend.attachSession = func(session string, _ bool) error {
+		attachedSession = session
+		return nil
+	}
+	originalBeforeAcquire := beforeProjectGuardAcquire
+	t.Cleanup(func() { beforeProjectGuardAcquire = originalBeforeAcquire })
+	switched := false
+	beforeProjectGuardAcquire = func() {
+		if switched {
+			return
+		}
+		switched = true
+		runTUITestGit(t, worktreePath, "switch", "-c", "feature/current")
+	}
+
+	err = backend.attachWorkspace(
+		context.Background(),
+		dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+			Path: worktreePath, Branch: "feature/original", Generation: generation,
+			RepositoryInfo: repositoryInfo,
+		}},
+		tmux.BlankLayoutName,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	expected := tmux.WorkspaceSessionName(repositoryInfo, "feature/current", worktreePath)
+	assert.Equal(t, expected, ensuredSession)
+	assert.Equal(t, expected, attachedSession)
 }
 
 func TestTUIBackendAttachAcknowledgesRemoteSourceBeforeWorkspaceLaunch(t *testing.T) {

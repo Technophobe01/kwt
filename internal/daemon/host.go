@@ -236,6 +236,7 @@ func runHost(
 				CapabilitySSHResolve,
 				CapabilityInventory,
 				CapabilityRemoval,
+				CapabilityGuardedRemoval,
 			},
 			StartedAt: startedAt,
 		},
