@@ -8,6 +8,7 @@ import (
 	"go.kenn.io/kit/openssh"
 	"go.kenn.io/kit/safefileio"
 	"go.kenn.io/kwt/internal/credentials"
+	"go.kenn.io/kwt/service"
 )
 
 type sshProcessRunner func(
@@ -64,6 +65,21 @@ func newRunner(
 			Executable:  options.Executable,
 			Environment: environment,
 			Prompt:      request.Prompt,
+			Describe: func(_ string, hint string) (service.OperationPrompt, error) {
+				prompt := describeSSHPrompt(hint)
+				hopCount := request.promptTargetCount
+				if hopCount == 0 {
+					hopCount = 1
+				}
+				prompt.Details = map[string]any{
+					"logical_target":   promptTargetDetails(target.LogicalTarget),
+					"effective_target": promptTargetDetails(target.EffectiveTarget),
+					"display_target":   target.DisplayTarget,
+					"hop_index":        request.promptTargetIndex,
+					"hop_count":        hopCount,
+				}
+				return prompt, nil
+			},
 		})
 		if err != nil {
 			return -1, errors.Join(err, cleanup())
@@ -78,6 +94,17 @@ func newRunner(
 		closeErr := askpass.Close()
 		return exitCode, errors.Join(runErr, askpass.Err(), closeErr, cleanup())
 	}, nil
+}
+
+func promptTargetDetails(target Target) map[string]any {
+	details := map[string]any{"hostname": target.Hostname}
+	if target.User != "" {
+		details["user"] = target.User
+	}
+	if target.Port != 0 {
+		details["port"] = target.Port
+	}
+	return details
 }
 
 func runSSHVersion(
