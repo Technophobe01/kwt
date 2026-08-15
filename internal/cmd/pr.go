@@ -41,6 +41,9 @@ var (
 	prJSON         bool
 	prStartSession bool
 
+	prImportExpectedRepository   string
+	prImportExpectedRegistration string
+
 	prAttachExpectedRepository   string
 	prAttachExpectedRegistration string
 	prAttachExpectedGeneration   string
@@ -121,6 +124,18 @@ func init() {
 		false,
 		"ensure the imported workspace's tmux session exists without attaching",
 	)
+	prImportCmd.Flags().StringVar(
+		&prImportExpectedRepository,
+		"expected-repository",
+		"",
+		"require this registered project identity before importing",
+	)
+	prImportCmd.Flags().StringVar(
+		&prImportExpectedRegistration,
+		"expected-registration",
+		"",
+		"require this project registration fingerprint before importing",
+	)
 	prAttachCmd.Flags().StringVar(
 		&prAttachExpectedRepository,
 		"expected-repository",
@@ -182,11 +197,24 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return prExactArgs(1)(cmd, args)
 	}
-	project, err := preparePRProject()
+	guarded, err := validateExpectedPRImportFlags(cmd)
 	if err != nil {
 		return writePRError(cmd, err)
 	}
 	number, err := pullrequest.ParseSelectorNumber(args[0])
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	var home string
+	var project pullrequest.Project
+	if guarded {
+		home, err = config.CanonicalHome()
+		if err == nil {
+			project, err = prepareGuardedPRImportProject(cmd.Context(), home)
+		}
+	} else {
+		project, err = preparePRProject()
+	}
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -210,18 +238,29 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 			))
 		}
 	}
-	home, err := config.CanonicalHome()
-	if err != nil {
-		return writePRError(cmd, err)
+	if home == "" {
+		home, err = config.CanonicalHome()
+		if err != nil {
+			return writePRError(cmd, err)
+		}
 	}
 	expansion, err := kwt.CaptureExpansionContext()
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	guard, err := observeRequiredGuardedProjectOperation(
-		cmd.Context(), home, project.Path, expansion,
-		registeredIdentity, project.Identity,
-	)
+	var guard *guardedProjectOperation
+	if guarded {
+		guard, err = observeExpectedGuardedProjectOperation(
+			cmd.Context(), home, project.Path, expansion,
+			prImportExpectedRepository,
+			prImportExpectedRegistration,
+		)
+	} else {
+		guard, err = observeRequiredGuardedProjectOperation(
+			cmd.Context(), home, project.Path, expansion,
+			registeredIdentity, project.Identity,
+		)
+	}
 	if err != nil {
 		return writePRError(cmd, err)
 	}
@@ -267,6 +306,46 @@ func runPRImport(cmd *cobra.Command, args []string) error {
 	}
 	result.PullRequest.Workspace = &result.Workspace
 	return writePRJSON(cmd, result)
+}
+
+func validateExpectedPRImportFlags(cmd *cobra.Command) (bool, error) {
+	repositoryChanged := commandFlagChanged(cmd, "expected-repository")
+	registrationChanged := commandFlagChanged(cmd, "expected-registration")
+	if !repositoryChanged && !registrationChanged {
+		return false, nil
+	}
+	if !repositoryChanged || !registrationChanged {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected repository and registration must be provided together",
+			false, nil, nil,
+		)
+	}
+	if prImportExpectedRepository == "" || prImportExpectedRegistration == "" {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected repository and registration must be nonempty",
+			false, nil, nil,
+		)
+	}
+	if !lifecycle.EqualProjectIdentity(
+		prImportExpectedRepository,
+		prImportExpectedRepository,
+	) {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected repository identity is invalid",
+			false, nil, nil,
+		)
+	}
+	if !config.ValidProjectRegistrationFingerprint(prImportExpectedRegistration) {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected project registration fingerprint is invalid",
+			false, nil, nil,
+		)
+	}
+	return true, nil
 }
 
 func runPRAttach(cmd *cobra.Command, args []string) error {
@@ -929,6 +1008,74 @@ func preparePRProject() (pullrequest.Project, error) {
 		return pullrequest.Project{}, err
 	}
 	return project, nil
+}
+
+func prepareGuardedPRImportProject(
+	ctx context.Context,
+	home string,
+) (pullrequest.Project, error) {
+	snapshot, err := config.LoadGlobalSnapshotAt(home)
+	if err != nil {
+		return pullrequest.Project{}, pullrequest.NewError(
+			pullrequest.CodeWorkspaceCreation,
+			"failed to load kwt project registrations",
+			false,
+			err,
+		)
+	}
+
+	var expected *config.ProjectRegistration
+	for index := range snapshot.Projects {
+		fingerprint, fingerprintErr := snapshot.Projects[index].Fingerprint()
+		if fingerprintErr != nil {
+			return pullrequest.Project{}, pullrequest.NewError(
+				pullrequest.CodeWorkspaceCreation,
+				"failed to inspect kwt project registration",
+				false,
+				fingerprintErr,
+			)
+		}
+		if fingerprint == prImportExpectedRegistration {
+			expected = &snapshot.Projects[index]
+			break
+		}
+	}
+	if expected == nil {
+		return pullrequest.Project{}, changedPRImportRegistration(nil)
+	}
+
+	expectedIdentity, err := lifecycle.ResolveProjectRegistrationIdentity(
+		ctx,
+		*expected,
+		credentials.ProtectedNames(snapshot.Config)...,
+	)
+	if err != nil || !lifecycle.EqualProjectIdentity(
+		expectedIdentity,
+		prImportExpectedRepository,
+	) {
+		return pullrequest.Project{}, changedPRImportRegistration(err)
+	}
+
+	selected, err := resolvePRProject(snapshot.Config, prProject)
+	if err != nil {
+		return pullrequest.Project{}, err
+	}
+	if !samePRPath(selected.Path, expected.Effective.Path) ||
+		!lifecycle.EqualProjectIdentity(selected.Identity, expectedIdentity) {
+		return pullrequest.Project{}, changedPRImportRegistration(nil)
+	}
+	selected.Identity = expectedIdentity
+	return selected, nil
+}
+
+func changedPRImportRegistration(cause error) error {
+	return service.NewError(
+		service.RegistrationChanged,
+		"the project registration changed before the operation began",
+		true,
+		nil,
+		cause,
+	)
 }
 
 func preparePRService(
