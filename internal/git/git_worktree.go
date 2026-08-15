@@ -29,6 +29,18 @@ const (
 var (
 	inspectWorktreeStat = os.Stat
 	inspectDotGitRead   = os.ReadFile
+
+	// ErrWorktreeNotFound reports that no worktree administrative record owns
+	// the requested path.
+	ErrWorktreeNotFound = errors.New("worktree not found")
+	// ErrWorktreeRepositoryMismatch reports that another repository owns the
+	// requested worktree path.
+	ErrWorktreeRepositoryMismatch = errors.New(
+		"worktree belongs to a different repository",
+	)
+	// ErrWorktreeGenerationNotFound reports that the selected repository owns
+	// the worktree but its durable KWT generation has not been initialized.
+	ErrWorktreeGenerationNotFound = errors.New("worktree generation not found")
 )
 
 type worktreeCreationReservation struct {
@@ -1839,6 +1851,12 @@ func (g *Git) readWorktreeGenerationWithoutCredentials(
 	}
 	data, err := os.ReadFile(filepath.Join(gitDir, "kwt-generation"))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf(
+				"read worktree identity: %w",
+				errors.Join(ErrWorktreeGenerationNotFound, err),
+			)
+		}
 		return "", fmt.Errorf("read worktree identity: %w", err)
 	}
 	generation := strings.TrimSpace(string(data))
@@ -1886,8 +1904,8 @@ func (g *Git) worktreeGitDirWithoutCredentials(
 				directCommonClaim = true
 			} else {
 				return "", fmt.Errorf(
-					"resolve worktree Git directory: %s belongs to a different repository",
-					path,
+					"resolve worktree Git directory for %s: %w",
+					path, ErrWorktreeRepositoryMismatch,
 				)
 			}
 		}
@@ -1927,8 +1945,8 @@ func (g *Git) worktreeGitDirWithoutCredentials(
 	}
 	if pointsOutsideCommon {
 		return "", fmt.Errorf(
-			"resolve worktree Git directory: %s belongs to a different repository",
-			path,
+			"resolve worktree Git directory for %s: %w",
+			path, ErrWorktreeRepositoryMismatch,
 		)
 	}
 
@@ -1976,7 +1994,10 @@ func (g *Git) worktreeGitDirWithoutCredentials(
 			path,
 		)
 	}
-	return "", fmt.Errorf("resolve worktree Git directory: worktree not found")
+	return "", fmt.Errorf(
+		"resolve worktree Git directory: %w",
+		ErrWorktreeNotFound,
+	)
 }
 
 func worktreeAdminDirMatchesPath(

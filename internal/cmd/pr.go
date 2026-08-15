@@ -30,11 +30,22 @@ type prService interface {
 	Import(context.Context, pullrequest.Project, string) (pullrequest.ImportResult, error)
 }
 
+type verifiedPRProvenance struct {
+	record         pullrequest.Provenance
+	liveGeneration string
+}
+
 var (
 	prProject      string
 	prState        string
 	prJSON         bool
 	prStartSession bool
+
+	prAttachExpectedRepository   string
+	prAttachExpectedRegistration string
+	prAttachExpectedGeneration   string
+	prAttachExpectedSession      string
+	prAttachExpectedSocket       string
 
 	loadPRConfig                     = config.Load
 	loadPRTargetConfig               = config.LoadForTarget
@@ -45,9 +56,13 @@ var (
 	validatePRWorkspaceSessionConfig = defaultValidatePRWorkspaceSessionConfig
 	ensurePRWorkspaceSession         = defaultStartPRWorkspaceSession
 	attachExistingPRWorkspaceSession = defaultAttachExistingPRWorkspaceSession
-	readPRWorkspaceGeneration        = func(path string) (string, error) {
-		return gitadapter.New(path).ReadWorktreeGeneration(path)
+	readPRWorkspaceGeneration        = func(projectPath, path string) (string, error) {
+		return gitadapter.New(projectPath).ReadWorktreeGeneration(path)
 	}
+	withPRWorkspaceGeneration     = defaultWithPRWorkspaceGeneration
+	errImportedPRWorkspaceChanged = errors.New(
+		"imported pull-request workspace changed",
+	)
 )
 
 func provenanceGenerationMatches(recorded, live string) bool {
@@ -105,6 +120,36 @@ func init() {
 		"start-session",
 		false,
 		"ensure the imported workspace's tmux session exists without attaching",
+	)
+	prAttachCmd.Flags().StringVar(
+		&prAttachExpectedRepository,
+		"expected-repository",
+		"",
+		"require this registered project identity before attaching",
+	)
+	prAttachCmd.Flags().StringVar(
+		&prAttachExpectedRegistration,
+		"expected-registration",
+		"",
+		"require this project registration fingerprint before attaching",
+	)
+	prAttachCmd.Flags().StringVar(
+		&prAttachExpectedGeneration,
+		"expected-generation",
+		"",
+		"require this worktree generation before attaching",
+	)
+	prAttachCmd.Flags().StringVar(
+		&prAttachExpectedSession,
+		"expected-session",
+		"",
+		"require this protected tmux session name before attaching",
+	)
+	prAttachCmd.Flags().StringVar(
+		&prAttachExpectedSocket,
+		"expected-socket",
+		"",
+		"require this protected tmux socket name before attaching",
 	)
 	prCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return writePRError(cmd, pullrequest.NewError(pullrequest.CodeInvalidSelector, err.Error(), false, nil))
@@ -228,13 +273,18 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return prExactArgs(1)(cmd, args)
 	}
-	record, err := importedWorkspaceProvenance(
+	guarded, err := validateExpectedPRAttachFlags(cmd)
+	if err != nil {
+		return writePRError(cmd, err)
+	}
+	verified, err := importedWorkspaceProvenance(
 		cmd.Context(),
 		args[0],
 	)
 	if err != nil {
-		return writePRError(cmd, err)
+		return writePRError(cmd, guardedPRAttachError(err, guarded))
 	}
+	record := verified.record
 	cfg, err := loadPRTargetConfig(record.Project.Path, false)
 	if err != nil {
 		return writePRError(cmd, pullrequest.NewError(
@@ -252,21 +302,31 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return writePRError(cmd, err)
 	}
-	guard, err := observeRequiredGuardedProjectOperation(
-		cmd.Context(), home, record.Project.Path, expansion,
-		pullrequest.ProvenanceRepositoryIdentities(record)...,
-	)
+	var guard *guardedProjectOperation
+	if guarded {
+		guard, err = observeExpectedGuardedProjectOperation(
+			cmd.Context(), home, record.Project.Path, expansion,
+			prAttachExpectedRepository,
+			prAttachExpectedRegistration,
+		)
+	} else {
+		guard, err = observeRequiredGuardedProjectOperation(
+			cmd.Context(), home, record.Project.Path, expansion,
+			pullrequest.ProvenanceRepositoryIdentities(record)...,
+		)
+	}
 	if err != nil {
 		return writePRError(cmd, err)
 	}
 	var socketName string
 	err = guard.run(cmd.Context(), func() error {
-		current, currentErr := importedWorkspaceProvenance(
+		currentVerified, currentErr := importedWorkspaceProvenance(
 			cmd.Context(), args[0],
 		)
 		if currentErr != nil {
-			return currentErr
+			return guardedPRAttachError(currentErr, guarded)
 		}
+		current := currentVerified.record
 		if !provenanceMatchesProjectClaim(current, guard.claim) {
 			return service.NewError(
 				service.RegistrationChanged,
@@ -274,10 +334,44 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 				true, nil, nil,
 			)
 		}
+		if guarded {
+			guardedCurrent := current
+			guardedCurrent.Workspace.Generation = currentVerified.liveGeneration
+			if !expectedPRAttachMatches(guardedCurrent, guard.claim) {
+				return service.NewError(
+					service.RegistrationChanged,
+					"the imported workspace changed before attachment",
+					true, nil, nil,
+				)
+			}
+			current.Workspace.Generation = currentVerified.liveGeneration
+		}
 		record = current
-		socketName, currentErr = ensurePRWorkspaceSession(
-			cmd.Context(), record.Workspace, cfg,
+		establish := func() error {
+			socketName, currentErr = ensurePRWorkspaceSession(
+				cmd.Context(), record.Workspace, cfg,
+			)
+			return currentErr
+		}
+		if !guarded {
+			return establish()
+		}
+		currentErr = withPRWorkspaceGeneration(
+			cmd.Context(),
+			record.Project.Path,
+			record.Workspace.Path,
+			currentVerified.liveGeneration,
+			establish,
 		)
+		var conditionErr *gitadapter.ConditionError
+		if errors.As(currentErr, &conditionErr) &&
+			conditionErr.Reason == gitadapter.ReasonGenerationChanged {
+			return service.NewError(
+				service.RegistrationChanged,
+				"the imported workspace changed before attachment",
+				true, nil, currentErr,
+			)
+		}
 		return currentErr
 	})
 	if service.IsCode(err, service.RegistrationChanged) {
@@ -304,6 +398,131 @@ func runPRAttach(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func defaultWithPRWorkspaceGeneration(
+	ctx context.Context,
+	projectPath string,
+	workspacePath string,
+	generation string,
+	establish func() error,
+) error {
+	return gitadapter.NewWithContext(ctx, projectPath).WithWorktreeGeneration(
+		workspacePath,
+		generation,
+		establish,
+	)
+}
+
+func guardedPRAttachError(err error, guarded bool) error {
+	if !guarded || !errors.Is(err, errImportedPRWorkspaceChanged) {
+		return err
+	}
+	return service.NewError(
+		service.RegistrationChanged,
+		"the imported workspace changed before attachment",
+		true,
+		nil,
+		err,
+	)
+}
+
+func validateExpectedPRAttachFlags(cmd *cobra.Command) (bool, error) {
+	names := []string{
+		"expected-repository",
+		"expected-registration",
+		"expected-generation",
+		"expected-session",
+		"expected-socket",
+	}
+	values := []string{
+		prAttachExpectedRepository,
+		prAttachExpectedRegistration,
+		prAttachExpectedGeneration,
+		prAttachExpectedSession,
+		prAttachExpectedSocket,
+	}
+	changed := 0
+	for _, name := range names {
+		if commandFlagChanged(cmd, name) {
+			changed++
+		}
+	}
+	if changed == 0 {
+		return false, nil
+	}
+	if changed != len(names) {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected repository, registration, generation, session, and socket must be provided together",
+			false, nil, nil,
+		)
+	}
+	for _, value := range values {
+		if value == "" {
+			return false, service.NewError(
+				service.InvalidRequest,
+				"expected repository, registration, generation, session, and socket must be nonempty",
+				false, nil, nil,
+			)
+		}
+	}
+	if !lifecycle.EqualProjectIdentity(
+		prAttachExpectedRepository,
+		prAttachExpectedRepository,
+	) {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected repository identity is invalid",
+			false, nil, nil,
+		)
+	}
+	if !config.ValidProjectRegistrationFingerprint(prAttachExpectedRegistration) {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected project registration fingerprint is invalid",
+			false, nil, nil,
+		)
+	}
+	if err := gitadapter.ValidateWorktreeGeneration(prAttachExpectedGeneration); err != nil {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected worktree generation is invalid",
+			false, nil, err,
+		)
+	}
+	if strings.ContainsAny(prAttachExpectedSession, "\t\r\n") ||
+		strings.TrimSpace(prAttachExpectedSocket) != prAttachExpectedSocket ||
+		strings.ContainsAny(prAttachExpectedSocket, "\t\r\n/\\") {
+		return false, service.NewError(
+			service.InvalidRequest,
+			"expected protected session identity is invalid",
+			false, nil, nil,
+		)
+	}
+	return true, nil
+}
+
+func expectedPRAttachMatches(
+	record pullrequest.Provenance,
+	claim *lifecycle.ProjectClaim,
+) bool {
+	if claim == nil || !projectClaimHasExpectedIdentity(
+		claim,
+		[]string{prAttachExpectedRepository},
+	) {
+		return false
+	}
+	fingerprint, err := claim.Registration.Fingerprint()
+	if err != nil || fingerprint != prAttachExpectedRegistration {
+		return false
+	}
+	return record.Workspace.Generation == prAttachExpectedGeneration &&
+		record.Workspace.SessionName == prAttachExpectedSession &&
+		tmux.ProtectedWorkspaceSocketName(
+			record.Workspace.SessionName,
+			record.Workspace.Path,
+		) == prAttachExpectedSocket
+}
+
 func provenanceMatchesProjectClaim(
 	record pullrequest.Provenance,
 	claim *lifecycle.ProjectClaim,
@@ -320,7 +539,7 @@ func provenanceMatchesProjectClaim(
 func importedWorkspaceProvenance(
 	ctx context.Context,
 	workspacePath string,
-) (pullrequest.Provenance, error) {
+) (verifiedPRProvenance, error) {
 	path := utils.CanonicalPath(workspacePath)
 	var pathMatches []pullrequest.Provenance
 	err := pullrequest.NewFileStore(prStorePath()).View(
@@ -335,44 +554,66 @@ func importedWorkspaceProvenance(
 		},
 	)
 	if err != nil {
-		return pullrequest.Provenance{}, pullrequest.NewError(
+		return verifiedPRProvenance{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation,
 			"failed to read pull-request provenance",
 			false,
 			err,
 		)
 	}
-	liveGeneration := ""
+	type generationObservation struct {
+		generation string
+		err        error
+	}
+	observations := make(map[string]generationObservation, len(pathMatches))
+	matches := make([]pullrequest.Provenance, 0, len(pathMatches))
 	for _, record := range pathMatches {
-		if record.Workspace.Generation == "" {
-			continue
+		projectKey := utils.PathKey(record.Project.Path)
+		observation, observed := observations[projectKey]
+		if !observed {
+			observation.generation, observation.err = readPRWorkspaceGeneration(
+				record.Project.Path,
+				workspacePath,
+			)
+			observations[projectKey] = observation
 		}
-		liveGeneration, err = readPRWorkspaceGeneration(workspacePath)
-		if err != nil {
-			return pullrequest.Provenance{}, pullrequest.NewError(
+		if observation.err != nil {
+			if record.Workspace.Generation == "" && errors.Is(
+				observation.err,
+				gitadapter.ErrWorktreeGenerationNotFound,
+			) {
+				// Ownership was proven before the missing marker was reported.
+				// The project inventory below initializes the generation under
+				// the repository worktree lock and verifies the legacy record.
+				matches = append(matches, record)
+				continue
+			}
+			if errors.Is(observation.err, gitadapter.ErrWorktreeNotFound) ||
+				errors.Is(
+					observation.err,
+					gitadapter.ErrWorktreeRepositoryMismatch,
+				) ||
+				prProjectCheckoutMissing(record.Project.Path) {
+				continue
+			}
+			return verifiedPRProvenance{}, pullrequest.NewError(
 				pullrequest.CodeWorkspaceCreation,
 				"failed to inspect live workspace generation",
 				false,
-				err,
+				observation.err,
 			)
 		}
-		break
-	}
-	matches := make([]pullrequest.Provenance, 0, len(pathMatches))
-	for _, record := range pathMatches {
-		if provenanceGenerationMatches(
-			record.Workspace.Generation,
-			liveGeneration,
-		) {
+		if record.Workspace.Generation == "" ||
+			record.Workspace.Generation == observation.generation {
 			matches = append(matches, record)
 		}
 	}
 	if len(matches) != 1 {
-		return pullrequest.Provenance{}, pullrequest.NewError(
+		return verifiedPRProvenance{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation,
 			"workspace is not a uniquely verified pull-request import",
 			false,
-			nil,
+			errImportedPRWorkspaceChanged,
 		)
 	}
 	record := matches[0]
@@ -381,23 +622,37 @@ func importedWorkspaceProvenance(
 		record,
 	)
 	if err != nil {
-		return pullrequest.Provenance{}, pullrequest.NewError(
+		return verifiedPRProvenance{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation,
 			"failed to verify imported workspace provenance",
 			false,
 			err,
 		)
 	}
-	if !samePRProjectClone(record, liveProject) ||
-		!containsPRWorkspace(liveWorkspaces, record) {
-		return pullrequest.Provenance{}, pullrequest.NewError(
+	verifiedWorkspace, workspaceMatches := verifiedPRWorkspace(
+		liveWorkspaces,
+		record,
+	)
+	if !samePRProjectClone(record, liveProject) || !workspaceMatches {
+		return verifiedPRProvenance{}, pullrequest.NewError(
 			pullrequest.CodeWorkspaceCreation,
 			"workspace no longer matches its pull-request provenance",
 			false,
-			nil,
+			errImportedPRWorkspaceChanged,
 		)
 	}
-	return record, nil
+	return verifiedPRProvenance{
+		record:         record,
+		liveGeneration: verifiedWorkspace.Generation,
+	}, nil
+}
+
+func prProjectCheckoutMissing(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func rejectProtectedWorkspaceOpen(
@@ -429,7 +684,10 @@ func rejectProtectedWorkspaceOpen(
 		pathMatched = pathMatched || samePRPath(workspace.Path, workspacePath)
 	}
 	if pathMatched {
-		liveGeneration, err = readPRWorkspaceGeneration(workspacePath)
+		liveGeneration, err = readPRWorkspaceGeneration(
+			workspacePath,
+			workspacePath,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to verify live generation for pull-request workspace: %w",
@@ -489,7 +747,8 @@ func defaultInspectPRProjectClone(
 	}
 	if len(registered) > 1 {
 		return pullrequest.Project{}, nil, fmt.Errorf(
-			"recorded project is not uniquely registered",
+			"%w: recorded project is not uniquely registered",
+			errImportedPRWorkspaceChanged,
 		)
 	}
 	if len(registered) == 1 &&
@@ -502,7 +761,8 @@ func defaultInspectPRProjectClone(
 			publishableProjectRepository(registered[0]),
 		) {
 		return pullrequest.Project{}, nil, fmt.Errorf(
-			"registered project conflicts with recorded identity",
+			"%w: registered project conflicts with recorded identity",
+			errImportedPRWorkspaceChanged,
 		)
 	}
 	g := gitadapter.New(project.Path)
@@ -535,7 +795,8 @@ func defaultInspectPRProjectClone(
 		project.Identity,
 	) {
 		return pullrequest.Project{}, nil, fmt.Errorf(
-			"live project conflicts with recorded identity",
+			"%w: live project conflicts with recorded identity",
+			errImportedPRWorkspaceChanged,
 		)
 	}
 	return project, livePRWorkspaces(info, project, live), nil
@@ -602,6 +863,14 @@ func containsPRWorkspace(
 	live []pullrequest.Workspace,
 	recorded pullrequest.Provenance,
 ) bool {
+	_, ok := verifiedPRWorkspace(live, recorded)
+	return ok
+}
+
+func verifiedPRWorkspace(
+	live []pullrequest.Workspace,
+	recorded pullrequest.Provenance,
+) (pullrequest.Workspace, bool) {
 	for _, candidate := range live {
 		if utils.CanonicalPath(candidate.Path) ==
 			utils.CanonicalPath(recorded.Workspace.Path) &&
@@ -611,10 +880,10 @@ func containsPRWorkspace(
 				candidate.Generation,
 			) &&
 			prWorkspaceIdentityMatches(candidate, recorded) {
-			return true
+			return candidate, true
 		}
 	}
-	return false
+	return pullrequest.Workspace{}, false
 }
 
 func prWorkspaceIdentityMatches(
