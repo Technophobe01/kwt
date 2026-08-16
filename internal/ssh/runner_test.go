@@ -206,9 +206,15 @@ func TestRunnerClassifiesHostKeyConfirmationAndAttributesProxyHop(t *testing.T) 
 			environment []string,
 		) (int, error) {
 			var output bytes.Buffer
+			confirmEnvironment := append(
+				append([]string(nil), environment...),
+				"SSH_ASKPASS_PROMPT=confirm",
+			)
 			exitCode, handled := RunAskpassHelper(
-				[]string{"kwt", "Continue connecting (yes/no)?"},
-				append(environment, "SSH_ASKPASS_PROMPT=confirm"),
+				[]string{"kwt", `The authenticity of host 'relay.example.test (100.64.0.7)' can't be established.
+ED25519 key fingerprint is SHA256:fixture.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? `},
+				confirmEnvironment,
 				&output,
 			)
 			require.True(t, handled)
@@ -224,7 +230,7 @@ func TestRunnerClassifiesHostKeyConfirmationAndAttributesProxyHop(t *testing.T) 
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, "ssh_host_key", captured.Kind)
 	assert.False(t, captured.Sensitive)
-	assert.Equal(t, "Continue connecting (yes/no)?", captured.Message)
+	assert.Contains(t, captured.Message, "The authenticity of host")
 	assert.Equal(t, map[string]any{
 		"hostname": target.LogicalTarget.Hostname,
 	}, captured.Details["logical_target"])
