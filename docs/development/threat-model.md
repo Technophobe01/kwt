@@ -125,9 +125,16 @@ environment values, daemon events, logs, or persistent state. Deliberate empty
 responses remain distinct from rejection. Kwt creates no channel state unless
 the selected system OpenSSH satisfies the 8.4 forced-askpass floor.
 OpenSSH's own askpass confirmation hint distinguishes host-key confirmation
-from credential input without parsing server-controlled prompt text. Published
-prompt details contain only the already reviewed route targets and hop position;
-they contain no credentials or environment values.
+from credential input before kwt parses the confirmation text into a reviewed
+host, algorithm, and fingerprint for native clients. Every unhinted prompt
+remains sensitive authentication input, even when its text matches OpenSSH's
+standard host-key question; server-controlled prose is not trusted provenance.
+Confirmation requests outside the complete unknown-host shape also remain
+sensitive authentication input, so they reach the client without claiming a
+host-key identity or enabling echoed input.
+Published prompt details contain only that host-key review identity, the
+already reviewed route targets, and hop position; they contain no credentials
+or environment values.
 
 SSH route resolution validates user, hostname, and port before invoking
 OpenSSH. POSIX resolution quotes the validated argv into the account login

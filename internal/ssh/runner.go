@@ -71,13 +71,31 @@ func newRunner(
 				if hopCount == 0 {
 					hopCount = 1
 				}
-				prompt.Details = map[string]any{
+				details := map[string]any{
 					"logical_target":   promptTargetDetails(target.LogicalTarget),
 					"effective_target": promptTargetDetails(target.EffectiveTarget),
 					"display_target":   target.DisplayTarget,
 					"hop_index":        request.promptTargetIndex,
 					"hop_count":        hopCount,
 				}
+				var hostKey *hostKeyPromptDetails
+				if prompt.Kind == "ssh_host_key" {
+					parsed, err := parseHostKeyPrompt(message)
+					if err != nil {
+						prompt.Kind = "ssh_authentication"
+						prompt.Sensitive = true
+					} else {
+						hostKey = &parsed
+					}
+				}
+				if hostKey != nil {
+					details["host_key"] = map[string]any{
+						"host":        hostKey.Host,
+						"algorithm":   hostKey.Algorithm,
+						"fingerprint": hostKey.Fingerprint,
+					}
+				}
+				prompt.Details = details
 				return prompt, nil
 			},
 		})
