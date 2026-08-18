@@ -184,7 +184,11 @@ kwt ssh lease build.example.com \
 ```
 
 `kwt ssh lease` is the long-lived native-client bridge to the same-machine
-daemon. It re-resolves the logical target, refuses a changed route, prepares
+daemon. Native clients that already reviewed a snapshot pass
+`--route-identity` and `--projection-policy`; kwt refuses a changed route.
+When those flags are omitted, the same CLI invocation resolves the route and
+immediately acquires it, avoiding a second helper process while retaining the
+daemon's pre- and post-connection revalidation. The daemon prepares
 every ProxyJump hop in order, and streams operation events as NDJSON. Prompt
 capable clients use `--host-key-policy review`, which requires an explicit
 OpenSSH review prompt unless the route already requires a known key.
@@ -229,6 +233,39 @@ master remains warm. Agent-forwarding masters disconnect immediately. Daemon
 replacement reports its active lease count, waits through
 `daemon.replacement_grace`, then invalidates remaining leases and terminates
 their verified masters; a successor never adopts them as live connections.
+
+## Short-lived SSH commands and copies
+
+```sh
+kwt ssh exec build.example.com -- uname -a
+kwt ssh copy build.example.com ./kwt /tmp/kwt.incoming
+```
+
+`kwt ssh exec` and `kwt ssh copy` resolve and acquire a daemon-owned route,
+run one system OpenSSH client through that generation-bound master, hold the
+lease through an authenticated owner stream while it runs, and release the
+lease afterward. The owner stream remains live when job control suspends the
+foreground CLI, but closes automatically if that process exits. Kwt—not its
+caller—constructs the SSH or SFTP invocation,
+including ProxyJump transport, port grammar, private projection files, and
+fail-closed control-socket behavior. Remote stdout and stderr are streamed as
+they arrive; connection progress is streamed to stderr unless `--quiet` is
+set. An OpenSSH or SFTP exit status is preserved, including SSH's status 255,
+while failures before client execution keep kwt's stable typed error surface.
+Machine callers add `--json`: a kwt failure before SSH or SFTP starts writes the
+shared error envelope to stdout, while successful client execution continues
+to stream the remote command's unmodified output. Cleanup failures after the
+client starts are reported only on stderr and never append framing to stdout.
+
+Both commands default to `--host-key-policy strict` for unattended callers.
+Use `--host-key-policy review` from a terminal to permit the daemon's bounded
+host-key and authentication prompts. A nonterminal caller never answers a
+prompt implicitly and receives `ssh_interaction_required`. Copy accepts one
+local file and one remote path, resolves the local source to an absolute
+literal path, escapes SFTP batch metacharacters in both paths, and never embeds
+the destination in a remote shell command. It translates the reviewed SSH
+projection into SFTP's option grammar internally, so consumers never handle
+control-path quoting or the SSH/SFTP `-p` versus `-P` distinction.
 
 When `kwt add -b` creates a branch, it fetches `origin` and starts from its
 default branch. If that remote base is unavailable, it falls back to local

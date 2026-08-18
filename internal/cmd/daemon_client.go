@@ -76,8 +76,28 @@ func requireSSHResolveCapability(observation kwtdaemon.Observation) error {
 	return nil
 }
 
+func requireSSHLifecycleCapabilities(observation kwtdaemon.Observation) error {
+	if observation.Client != nil && slices.Contains(
+		observation.Status.Capabilities,
+		kwtdaemon.CapabilitySSHLifecycle,
+	) && slices.Contains(
+		observation.Status.Capabilities,
+		kwtdaemon.CapabilitySSHLeaseHold,
+	) {
+		return nil
+	}
+	return service.NewError(
+		service.DaemonIncompatible,
+		"the running kwt daemon does not provide current SSH lifecycle management",
+		false,
+		nil,
+		nil,
+	)
+}
+
 type sshLeaseControl interface {
 	Touch(context.Context, string) error
+	Hold(context.Context, string) (io.ReadCloser, error)
 	Release(context.Context, string) error
 }
 
@@ -85,6 +105,10 @@ type daemonSSHLeaseControl struct{ client *kwtdaemon.Client }
 
 func (c daemonSSHLeaseControl) Touch(ctx context.Context, leaseID string) error {
 	return c.client.TouchSSHLease(ctx, leaseID)
+}
+
+func (c daemonSSHLeaseControl) Hold(ctx context.Context, leaseID string) (io.ReadCloser, error) {
+	return c.client.HoldSSHLease(ctx, leaseID)
 }
 
 func (c daemonSSHLeaseControl) Release(ctx context.Context, leaseID string) error {
@@ -105,15 +129,8 @@ func acquireSSHLeaseViaDaemon(
 		if err != nil {
 			return kwtdaemon.SSHLeaseResult{}, nil, err
 		}
-		if observation.Client == nil || !slices.Contains(
-			observation.Status.Capabilities,
-			kwtdaemon.CapabilitySSHLifecycle,
-		) {
-			return kwtdaemon.SSHLeaseResult{}, nil, service.NewError(
-				service.DaemonIncompatible,
-				"the running kwt daemon does not provide SSH lifecycle management",
-				false, nil, nil,
-			)
+		if err := requireSSHLifecycleCapabilities(observation); err != nil {
+			return kwtdaemon.SSHLeaseResult{}, nil, err
 		}
 		var exposed atomic.Bool
 		trackedCallbacks := kwtdaemon.OperationCallbacks{

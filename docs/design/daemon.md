@@ -45,13 +45,16 @@ immediately, then continues reporting observed drain state while it waits.
 Active work and leases may finish until `daemon.replacement_grace`; the default
 is five minutes.
 
-The API schema is `1.10.0`. It exposes authenticated status, graceful shutdown,
+The API schema is `1.11.0`. It exposes authenticated status, graceful shutdown,
 worktree inventory, guarded project unregistration, and repository-config
 approval under `/api/v1`, proof-capable liveness at `/api/ping`, and
 credential-free OpenAPI at `/openapi.json`. Inventory clients require the
 `worktree.inventory.v1` capability; guarded unregistration requires
 `project.removal.v1`, SSH route resolution requires `ssh.resolve.v1`, and
-daemon-owned connection leases require `ssh.lifecycle.v1`.
+daemon-owned connection leases require `ssh.lifecycle.v1`. Clients that bind
+short commands to a connection-owned hold additionally require
+`ssh.lease.hold.v1`; stale development daemons fail capability negotiation
+before acquiring a lease rather than falling back to periodic touches.
 Daemons advertise `operation.stream.v1` when they can
 carry ordered domain-operation events and bound prompt responses. Advertising
 that transport capability does not start a domain operation or move any
@@ -182,6 +185,22 @@ bound is exceeded. The daemon also caps the encoded public route snapshot at
 8 MiB; the client reserves 64 KiB above that bound for response framing, and an
 oversized snapshot fails as `ssh_resolution_failed`. Resolution does not create
 a connection, control socket, trust decision, credential prompt, or lease.
+
+`kwt ssh lease` may resolve and acquire in one CLI process when the caller has
+no prior snapshot. Clients performing a conditional launch continue supplying
+the reviewed route identity and projection policy. `kwt ssh exec` and
+`kwt ssh copy` use the combined form for one bounded command or transfer: the
+daemon owns route resolution, prompt handling, ProxyJump masters, and lease
+lifecycle, while the foreground kwt process owns the system SSH or SFTP child
+and streams its output directly. Copy uses SFTP rather than a remote shell,
+resolves the local source to an absolute literal path, and escapes SFTP batch
+metacharacters; the child receives only the daemon's
+generation-bound, fail-closed arguments. Consumers do not reconstruct those
+arguments or load SSH configuration again. Cancellation terminates the entire
+client process tree. An authenticated HTTP stream binds the lease to the
+foreground owner without depending on that process to run heartbeat code while
+job-control suspended; disconnecting the stream restores ordinary bounded
+expiry. The client releases the daemon lease under a separate cleanup deadline.
 
 `kwt projects` and `kwt list` auto-start or reuse the daemon and require a
 current inventory result. They fail instead of falling back to cached or direct
