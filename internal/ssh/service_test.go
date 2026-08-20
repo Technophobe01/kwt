@@ -53,9 +53,10 @@ func (r *fixedObservationResolver) Resolve(
 }
 
 func TestServiceBuildsSnapshotFromCompletePrivateObservation(t *testing.T) {
+	relayTarget := openssh.Target{User: "relay", Hostname: "relay.example.test", Port: 22}
 	resolver := &fixedObservationResolver{observation: routeObservation{route: openssh.Route{
 		{
-			Target: openssh.Target{User: "relay", Hostname: "relay.example.test", Port: 22},
+			Target: relayTarget,
 			Config: openssh.EffectiveConfig{
 				User: "jump", Hostname: "relay.internal", Port: 2222,
 				StrictHostKeyChecking: "yes",
@@ -76,6 +77,9 @@ func TestServiceBuildsSnapshotFromCompletePrivateObservation(t *testing.T) {
 			},
 		},
 	}}}
+	resolver.observation.identityFiles = map[openssh.Target][]string{
+		relayTarget: {"/keys/relay"},
+	}
 	observedAt := time.Date(2026, 8, 11, 18, 30, 0, 0, time.FixedZone("CDT", -5*60*60))
 	service := NewService(ServiceOptions{
 		Resolver: resolver,
@@ -139,6 +143,33 @@ func TestServiceFullObservationChangesRouteIdentity(t *testing.T) {
 	changed := append(openssh.Route(nil), base...)
 	changed[0].Config.Options = []openssh.Option{{Name: "futureoption", Value: "two"}}
 	second := resolve(changed)
+	assert.NotEqual(t, first.RouteIdentity, second.RouteIdentity)
+}
+
+func TestServiceOrderedConfiguredIdentitiesChangeRouteIdentity(t *testing.T) {
+	target := openssh.Target{Hostname: "build.example.test"}
+	route := openssh.Route{{
+		Target: target,
+		Config: openssh.EffectiveConfig{Hostname: "build.internal"},
+	}}
+	resolve := func(identityFiles []string) RouteSnapshot {
+		service := NewService(ServiceOptions{
+			Resolver: &fixedObservationResolver{observation: routeObservation{
+				route: route,
+				identityFiles: map[openssh.Target][]string{
+					target: identityFiles,
+				},
+			}},
+		})
+		snapshot, err := service.Resolve(context.Background(), ResolveRequest{
+			Target: Target{Hostname: "build.example.test"},
+		})
+		require.NoError(t, err)
+		return snapshot
+	}
+
+	first := resolve([]string{"/keys/first", "/keys/second"})
+	second := resolve([]string{"/keys/second", "/keys/first"})
 	assert.NotEqual(t, first.RouteIdentity, second.RouteIdentity)
 }
 
