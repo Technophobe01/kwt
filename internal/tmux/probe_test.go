@@ -3,6 +3,8 @@ package tmux
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +15,21 @@ type fakeProbeExitError int
 
 func (e fakeProbeExitError) Error() string { return "tmux exited" }
 func (e fakeProbeExitError) ExitCode() int { return int(e) }
+
+func TestProbeProtectedSessionTreatsMissingTmuxAsIndeterminate(t *testing.T) {
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "missing"))
+
+	state, err := ProbeProtectedSession(
+		context.Background(),
+		"kwt-pr-0123456789abcdef",
+		"kwt-wt-widget-main-01234567",
+		nil,
+		"",
+	)
+
+	assert.ErrorIs(t, err, exec.ErrNotFound)
+	assert.Equal(t, ProtectedSessionIndeterminate, state)
+}
 
 func TestClassifyProtectedSessionProbe(t *testing.T) {
 	tests := []struct {
@@ -27,6 +44,7 @@ func TestClassifyProtectedSessionProbe(t *testing.T) {
 		{name: "no server", stderr: "no server running on /tmp/tmux/socket\n", err: fakeProbeExitError(1), want: ProtectedSessionAbsent},
 		{name: "missing socket", stderr: "error connecting to /tmp/tmux/socket (No such file or directory)\n", err: fakeProbeExitError(1), want: ProtectedSessionAbsent},
 		{name: "missing session", stderr: "can't find session: expected\n", err: fakeProbeExitError(1), want: ProtectedSessionAbsent},
+		{name: "tmux 2.1 missing session", stderr: "can't find session expected\n", err: fakeProbeExitError(1), want: ProtectedSessionAbsent},
 		{name: "permission failure", stderr: "error connecting to /tmp/tmux/socket (Permission denied)\n", err: fakeProbeExitError(1), want: ProtectedSessionIndeterminate, wantErr: true},
 		{name: "unexpected session", output: "other\n", want: ProtectedSessionIndeterminate, wantErr: true},
 		{name: "multiple sessions", output: "expected\nother\n", want: ProtectedSessionIndeterminate, wantErr: true},
@@ -51,7 +69,7 @@ func TestClassifyProtectedSessionProbePreservesCancellation(t *testing.T) {
 		"expected",
 		"",
 		"no server running on /tmp/tmux/socket\n",
-		errors.Join(context.Canceled, fakeProbeExitError(1)),
+		errors.Join(context.Canceled, exec.ErrNotFound),
 	)
 
 	assert.Equal(t, ProtectedSessionIndeterminate, state)

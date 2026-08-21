@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"os/exec"
 
 	"go.kenn.io/kwt/internal/discovery"
+	"go.kenn.io/kwt/internal/tmux"
 	"go.kenn.io/kwt/pkg/models"
 )
 
@@ -22,13 +24,14 @@ type Handoff struct {
 }
 
 type Row struct {
-	Entry       *discovery.GlobalWorktreeEntry
-	Status      *models.WorktreeStatus
-	Fleet       *FleetInfo
-	Workspace   *WorkspaceInfo
-	SessionName string
-	SessionLive bool
-	Creating    bool
+	Entry        *discovery.GlobalWorktreeEntry
+	Status       *models.WorktreeStatus
+	Fleet        *FleetInfo
+	Workspace    *WorkspaceInfo
+	SessionName  string
+	SessionLive  bool
+	TmuxEndpoint tmux.SessionEndpoint
+	Creating     bool
 }
 
 // WorkspaceInfo is the TUI-facing view of one registered directory workspace.
@@ -81,7 +84,7 @@ type Backend interface {
 	RemoveWorktree(ctx context.Context, row Row, force bool) error
 	UnregisterWorkspace(row Row) error
 	KillSession(row Row) error
-	OpenInTmux(ctx context.Context, row Row, layoutName string) error
+	OpenInTmux(ctx context.Context, row Row, layoutName string) (*exec.Cmd, error)
 	LayoutNames() []string
 	InsideTmux() bool
 }
