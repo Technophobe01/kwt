@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -46,14 +48,14 @@ type tuiBackend struct {
 	discoverGlobalWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	discoverProjectWorktrees  func(string) ([]*discovery.GlobalWorktreeEntry, error)
 	discoverLaunchWorktrees   func(string) ([]*discovery.GlobalWorktreeEntry, error)
-	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, error)
+	collectStatuses           func(context.Context, string, []*discovery.GlobalWorktreeEntry) (map[string]*models.WorktreeStatus, []string, error)
 	resolveSessions           func(context.Context, []tmux.WorkspaceEndpointRequest) ([]tmux.WorkspaceSession, error)
 	liveEndpoints             func(context.Context, tmux.WorkspaceEndpointRequest) ([]tmux.SessionEndpoint, error)
+	resolveLive               func(context.Context, tmux.WorkspaceEndpointRequest) (tmux.SessionEndpoint, error)
 	ensureWorkspace           func(context.Context, string, string, models.Layout) (tmux.SessionEndpoint, error)
 	ensureWorktree            func(context.Context, string, string, string, models.Layout) (tmux.SessionEndpoint, error)
 	attachSession             func(context.Context, tmux.SessionEndpoint) error
 	prepareResidentAttach     func(context.Context, tmux.SessionEndpoint) (*exec.Cmd, error)
-	killEndpoint              func(tmux.SessionEndpoint) error
 	cleanupEndpoint           func(context.Context, tmux.SessionEndpoint, tmux.WorkspaceEndpointRequest) error
 	killProtectedEndpoint     func(context.Context, tmux.SessionEndpoint, tmux.WorkspaceEndpointRequest) error
 	registerProject           func(context.Context, models.Project) error
@@ -65,6 +67,7 @@ type tuiBackend struct {
 	now                       func() time.Time
 	queryInventory            func(context.Context, kwt.Request, bool, io.Writer) (kwt.Result, error)
 	removeWorktree            func(context.Context, kwt.RemovalRequest) (kwt.RemovalResult, error)
+	resolveRemovalRoot        func(context.Context, dashboard.Row, *models.Config) (string, error)
 	runProjectOperation       func(context.Context, string, bool, []string, func() error) error
 	stderr                    io.Writer
 }
@@ -74,11 +77,30 @@ type tuiRemovalEndpoint struct {
 	Protected bool
 }
 
+type tuiRemovalOperation struct {
+	request               kwt.RemovalRequest
+	row                   dashboard.Row
+	endpointRequest       tmux.WorkspaceEndpointRequest
+	config                *models.Config
+	remove                func(context.Context, kwt.RemovalRequest) (kwt.RemovalResult, error)
+	liveEndpoints         func(context.Context, tmux.WorkspaceEndpointRequest) ([]tmux.SessionEndpoint, error)
+	cleanupEndpoint       func(context.Context, tmux.SessionEndpoint, tmux.WorkspaceEndpointRequest) error
+	killProtectedEndpoint func(context.Context, tmux.SessionEndpoint, tmux.WorkspaceEndpointRequest) error
+}
+
 type removedWorktreeCleanupError struct{ err error }
+
+type tuiRemovalRefreshRequiredError struct{ err error }
 
 func (e *removedWorktreeCleanupError) Error() string { return e.err.Error() }
 func (e *removedWorktreeCleanupError) Unwrap() error { return e.err }
 func (*removedWorktreeCleanupError) WorktreeRemoved() bool {
+	return true
+}
+
+func (e *tuiRemovalRefreshRequiredError) Error() string { return e.err.Error() }
+func (e *tuiRemovalRefreshRequiredError) Unwrap() error { return e.err }
+func (*tuiRemovalRefreshRequiredError) RefreshRequired() bool {
 	return true
 }
 
@@ -109,6 +131,7 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 			tmuxDiagnosticReporter(os.Stderr),
 		),
 		liveEndpoints:           sessions.LiveEndpoints,
+		resolveLive:             sessions.ResolveLive,
 		ensureWorkspace:         sessions.Establish,
 		ensureWorktree:          sessions.EstablishWithGeneration,
 		attachSession:           sessions.Attach,
@@ -119,10 +142,10 @@ func newTUIBackendWithLaunchDir(cfg *models.Config, launchDir string) *tuiBacken
 		readFleetState:          readTUIFleetState,
 		acknowledgeRemoteSource: acknowledgeRemoteSourcePath,
 		removeWorktree:          removeDaemonWorktree,
+		resolveRemovalRoot:      repositoryRootForRowWithConfig,
 		runProjectOperation:     runTUIProjectOperation,
 		now:                     time.Now,
 	}
-	backend.killEndpoint = sessions.Kill
 	backend.cleanupEndpoint = sessions.KillMatching
 	backend.killProtectedEndpoint = backend.killProtectedTUIEndpoint
 	backend.loadTargetConfig = func(repoRoot string, interactive bool) (*models.Config, error) {
@@ -137,6 +160,148 @@ func (b *tuiBackend) ListFast(ctx context.Context) ([]dashboard.Row, []string, e
 
 func (b *tuiBackend) List(ctx context.Context) ([]dashboard.Row, []string, error) {
 	return b.list(ctx, true)
+}
+
+func (b *tuiBackend) LoadInventory(ctx context.Context, request dashboard.InventoryRequest) (dashboard.InventoryResult, error) {
+	b.mu.Lock()
+	queryInventory := b.queryInventory
+	launchDir := b.launchDir
+	stderr := b.stderr
+	b.mu.Unlock()
+	if queryInventory == nil {
+		rows, warnings, err := b.list(ctx, request.CollectStatuses)
+		return dashboard.InventoryResult{Rows: rows, Warnings: warnings, Current: err == nil}, err
+	}
+
+	query := kwt.Request{IncludeProtectedSockets: true}
+	interactive := config.StdinInteractive()
+	switch request.Scope {
+	case dashboard.InventoryCachedDashboard:
+		query.View = kwt.ViewDashboard
+		query.LaunchDirectory = launchDir
+	case dashboard.InventoryCurrentRepository:
+		info, statErr := os.Stat(request.WorkingDirectory)
+		if statErr != nil {
+			return dashboard.InventoryResult{}, fmt.Errorf("repository refresh working directory: %w", statErr)
+		}
+		if !info.IsDir() {
+			return dashboard.InventoryResult{}, fmt.Errorf("repository refresh working directory is not a directory")
+		}
+		query.View = kwt.ViewRepository
+		query.WorkingDirectory = request.WorkingDirectory
+		interactive = false
+	case dashboard.InventoryCurrentDashboard:
+		query.View = kwt.ViewDashboard
+		query.LaunchDirectory = launchDir
+		query.RequireCurrent = true
+	default:
+		return dashboard.InventoryResult{}, fmt.Errorf("unknown inventory scope %d", request.Scope)
+	}
+
+	result, err := queryInventory(ctx, query, interactive, stderr)
+	if err != nil {
+		return dashboard.InventoryResult{}, err
+	}
+	entries := make([]*discovery.GlobalWorktreeEntry, 0, len(result.Snapshot.Entries))
+	for _, entry := range result.Snapshot.Entries {
+		entries = append(entries, dashboardInventoryEntry(entry))
+	}
+
+	b.mu.Lock()
+	if request.Scope == dashboard.InventoryCurrentDashboard && result.Freshness == kwt.Fresh {
+		if err := b.applyInventoryConfigLocked(result.Snapshot.Config); err != nil {
+			b.mu.Unlock()
+			return dashboard.InventoryResult{}, err
+		}
+		launchEntries := make([]*discovery.GlobalWorktreeEntry, 0, len(result.Snapshot.LaunchEntries))
+		for _, entry := range result.Snapshot.LaunchEntries {
+			launchEntries = append(launchEntries, dashboardInventoryEntry(entry))
+		}
+		b.registerLaunchProject(ctx, launchEntries)
+		b.registerLaunchWorkspace(launchEntries)
+	}
+	baseDir := ""
+	var workspaces []models.Workspace
+	if b.cfg != nil {
+		baseDir = b.cfg.Worktree.BaseDir
+		if request.Scope != dashboard.InventoryCurrentRepository {
+			workspaces = append([]models.Workspace(nil), b.cfg.Workspaces...)
+		}
+	}
+	collectStatuses := b.collectStatuses
+	resolveSessions := b.resolveSessions
+	b.mu.Unlock()
+
+	var statusByPath map[string]*models.WorktreeStatus
+	var warnings []string
+	if request.CollectStatuses && collectStatuses != nil {
+		statusByPath, warnings, err = collectStatuses(ctx, baseDir, entries)
+		if err != nil {
+			return dashboard.InventoryResult{}, err
+		}
+	}
+	worktreeSessions, directorySessions, err := resolveDashboardSessionsWith(
+		ctx, resolveSessions, entries, workspaces,
+	)
+	if err != nil {
+		return dashboard.InventoryResult{}, err
+	}
+	rows := make([]dashboard.Row, 0, len(entries)+len(workspaces))
+	for index, entry := range entries {
+		worktreeStatus := statusByPath[entry.Path]
+		if worktreeStatus == nil {
+			worktreeStatus = unknownStatusForEntry(entry)
+		}
+		rows = append(rows, buildTUIRow(entry, worktreeStatus, worktreeSessions[index]))
+	}
+	rows = append(rows, workspaceRows(workspaces, directorySessions)...)
+	if request.Scope == dashboard.InventoryCurrentRepository {
+		if err := validateRepositoryRows(rows, request.ProjectIdentity, request.WorkingDirectory); err != nil {
+			return dashboard.InventoryResult{}, err
+		}
+	}
+	return dashboard.InventoryResult{
+		Rows:       rows,
+		Warnings:   warnings,
+		ObservedAt: result.ObservedAt,
+		Current:    result.Freshness == kwt.Fresh,
+	}, nil
+}
+
+func validateRepositoryRows(rows []dashboard.Row, expected, workingDirectory string) error {
+	if len(rows) == 0 {
+		return fmt.Errorf("repository refresh returned no worktrees")
+	}
+	mainFound := false
+	anchorFound := false
+	for _, row := range rows {
+		if row.Entry == nil || !lifecycle.EqualProjectIdentity(dashboardProjectIdentity(row), expected) {
+			return fmt.Errorf("repository refresh returned unrelated repository")
+		}
+		mainFound = mainFound || row.Entry.IsMain
+		anchorFound = anchorFound || utils.IsSameOrChildPath(workingDirectory, row.Entry.Path)
+	}
+	if !mainFound {
+		return fmt.Errorf("repository refresh returned no main worktree")
+	}
+	if !anchorFound {
+		return fmt.Errorf("repository refresh anchor is outside returned worktrees")
+	}
+	return nil
+}
+
+func dashboardProjectIdentity(row dashboard.Row) string {
+	if row.Entry == nil || row.Entry.RepositoryInfo == nil {
+		return ""
+	}
+	info := row.Entry.RepositoryInfo
+	if info.FullPath != "" {
+		return info.FullPath
+	}
+	if info.Host != "" && info.Owner != "" && info.Repository != "" {
+		return path.Join(info.Host, info.Owner, info.Repository)
+	}
+	return ""
 }
 
 func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
@@ -202,8 +367,9 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 	}
 
 	var statusByPath map[string]*models.WorktreeStatus
+	var statusWarnings []string
 	if includeStatuses {
-		statusByPath, discoveryErr = b.collectStatuses(
+		statusByPath, statusWarnings, discoveryErr = b.collectStatuses(
 			ctx,
 			b.cfg.Worktree.BaseDir,
 			entries,
@@ -222,7 +388,7 @@ func (b *tuiBackend) list(ctx context.Context, includeStatuses bool) ([]dashboar
 		rows = append(rows, buildTUIRow(entry, st, worktreeSessions[index]))
 	}
 	rows = append(rows, workspaceRows(b.cfg.Workspaces, directorySessions)...)
-	return rows, nil, nil
+	return rows, statusWarnings, nil
 }
 
 func (b *tuiBackend) listDaemon(ctx context.Context, includeStatuses bool) ([]dashboard.Row, []string, error) {
@@ -257,8 +423,9 @@ func (b *tuiBackend) listDaemon(ctx context.Context, includeStatuses bool) ([]da
 		renderWorkspaces = append([]models.Workspace(nil), b.cfg.Workspaces...)
 	}
 	var statusByPath map[string]*models.WorktreeStatus
+	var statusWarnings []string
 	if includeStatuses {
-		statusByPath, err = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
+		statusByPath, statusWarnings, err = b.collectStatuses(ctx, b.cfg.Worktree.BaseDir, entries)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -280,7 +447,7 @@ func (b *tuiBackend) listDaemon(ctx context.Context, includeStatuses bool) ([]da
 		rows = append(rows, buildTUIRow(entry, status, worktreeSessions[index]))
 	}
 	rows = append(rows, workspaceRows(renderWorkspaces, directorySessions)...)
-	return rows, nil, nil
+	return rows, statusWarnings, nil
 }
 
 func (b *tuiBackend) applyInventoryConfig(effective *models.Config) error {
@@ -314,11 +481,11 @@ func (b *tuiBackend) applyInventoryConfigLocked(effective *models.Config) error 
 		b.reportTmuxDiagnostic,
 	)
 	b.liveEndpoints = b.workspaceSessions.LiveEndpoints
+	b.resolveLive = b.workspaceSessions.ResolveLive
 	b.ensureWorkspace = b.workspaceSessions.Establish
 	b.ensureWorktree = b.workspaceSessions.EstablishWithGeneration
 	b.attachSession = b.workspaceSessions.Attach
 	b.prepareResidentAttach = b.workspaceSessions.PrepareResidentAttach
-	b.killEndpoint = b.workspaceSessions.Kill
 	b.cleanupEndpoint = b.workspaceSessions.KillMatching
 	return nil
 }
@@ -355,6 +522,15 @@ func dashboardInventoryEntry(entry kwt.Entry) *discovery.GlobalWorktreeEntry {
 
 func (b *tuiBackend) resolveDashboardSessions(
 	ctx context.Context,
+	entries []*discovery.GlobalWorktreeEntry,
+	workspaces []models.Workspace,
+) ([]tmux.WorkspaceSession, []tmux.WorkspaceSession, error) {
+	return resolveDashboardSessionsWith(ctx, b.resolveSessions, entries, workspaces)
+}
+
+func resolveDashboardSessionsWith(
+	ctx context.Context,
+	resolveSessions func(context.Context, []tmux.WorkspaceEndpointRequest) ([]tmux.WorkspaceSession, error),
 	entries []*discovery.GlobalWorktreeEntry,
 	workspaces []models.Workspace,
 ) ([]tmux.WorkspaceSession, []tmux.WorkspaceSession, error) {
@@ -397,7 +573,7 @@ func (b *tuiBackend) resolveDashboardSessions(
 			WorkspacePath: workspace.Path,
 		})
 	}
-	resolved, err := b.resolveSessions(ctx, requests)
+	resolved, err := resolveSessions(ctx, requests)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -444,14 +620,25 @@ func bestEffortDashboardSessionResolver(
 	}
 }
 
-// MergeFleet overlays hub state onto locally discovered rows. It publishes
-// this host's manifest and reads the hub synchronously, so callers must keep
-// it off the first-paint path and cancel ctx when the result is no longer
-// wanted.
+// MergeFleet overlays hub state onto locally discovered rows. It reads the hub
+// synchronously, so callers must keep it off the first-paint path and cancel
+// ctx when the result is no longer wanted. Publication remains on explicit
+// mutations and sync commands because building a complete host manifest would
+// reintroduce fleet-wide status collection here.
 func (b *tuiBackend) MergeFleet(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.mergeFleetRows(ctx, rows)
+	snapshot := tuiBackend{
+		readFleetState: b.readFleetState,
+		now:            b.now,
+	}
+	if b.cfg != nil {
+		cfg := *b.cfg
+		cfg.Projects = append([]models.Project(nil), b.cfg.Projects...)
+		cfg.Workspaces = append([]models.Workspace(nil), b.cfg.Workspaces...)
+		snapshot.cfg = &cfg
+	}
+	b.mu.Unlock()
+	return snapshot.mergeFleetRows(ctx, rows)
 }
 
 func (b *tuiBackend) mergeFleetRows(ctx context.Context, rows []dashboard.Row) ([]dashboard.Row, []string) {
@@ -1010,27 +1197,39 @@ func collectTUIStatuses(
 	ctx context.Context,
 	baseDir string,
 	entries []*discovery.GlobalWorktreeEntry,
-) (map[string]*models.WorktreeStatus, error) {
+) (map[string]*models.WorktreeStatus, []string, error) {
 	worktrees := make([]*models.Worktree, 0, len(entries))
 	for _, entry := range entries {
+		repository := ""
+		if entry.RepositoryInfo != nil {
+			repository = entry.RepositoryInfo.FullPath
+		}
 		worktrees = append(worktrees, &models.Worktree{
 			Path:       entry.Path,
 			Branch:     entry.Branch,
+			Repository: repository,
 			CommitHash: entry.CommitHash,
 			IsMain:     entry.IsMain,
 		})
 	}
 
 	collector := status.NewStatusCollectorWithOptions(tuiStatusCollectorOptions(baseDir))
-	statuses, err := collector.CollectAll(ctx, worktrees)
+	collection, err := collector.CollectAll(ctx, worktrees)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	statusByPath := make(map[string]*models.WorktreeStatus, len(statuses))
-	for _, st := range statuses {
+	statusByPath := make(map[string]*models.WorktreeStatus, len(collection.Statuses))
+	for _, st := range collection.Statuses {
 		statusByPath[st.Path] = st
 	}
-	return statusByPath, nil
+	warnings := make([]string, 0, min(len(collection.Diagnostics), 8))
+	for _, diagnostic := range collection.Diagnostics[:min(len(collection.Diagnostics), 8)] {
+		warnings = append(warnings, fmt.Sprintf("status unavailable for %s: %v", diagnostic.Path, diagnostic.Err))
+	}
+	if len(collection.Diagnostics) > len(warnings) {
+		warnings = append(warnings, fmt.Sprintf("status unavailable for %d more worktrees", len(collection.Diagnostics)-len(warnings)))
+	}
+	return statusByPath, warnings, nil
 }
 
 func tuiStatusCollectorOptions(baseDir string) status.StatusCollectorOptions {
@@ -1061,10 +1260,6 @@ func readTUIFleetState(ctx context.Context, cfg *models.Config) (fleet.FleetStat
 	client, err := newFleetClientFromConfig(cfg)
 	if err != nil {
 		return fleet.FleetState{}, err
-	}
-	if cfg != nil && cfg.Fleet.Enabled {
-		var publishWarning bytes.Buffer
-		_ = publishFleetBestEffort(ctx, cfg, newFleetManifestBuilder(), &publishWarning)
 	}
 	state, _, notModified, err := client.State(ctx, "")
 	if err != nil {
@@ -1592,52 +1787,112 @@ func sameRepositoryIdentity(left string, right string) bool {
 }
 
 func (b *tuiBackend) RemoveWorktree(ctx context.Context, row dashboard.Row, force bool) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if row.Entry == nil {
-		return fmt.Errorf("no worktree selected")
-	}
-	if row.Entry.IsMain {
-		return fmt.Errorf("refusing to remove a main worktree")
-	}
-	generation := row.Entry.Generation
-	if strings.TrimSpace(generation) == "" {
-		return fmt.Errorf("worktree generation unavailable; refresh before removing")
-	}
-	repoRoot, err := b.repositoryRootForRow(row)
+	operation, err := b.prepareRemoval(ctx, row, force)
 	if err != nil {
 		return err
 	}
-	endpointRequest := removalEndpointRequest(row)
-	result, removalErr := b.removeWorktree(ctx, kwt.RemovalRequest{
-		RepositoryPath: repoRoot,
-		Path:           row.Entry.Path, ExpectedGeneration: generation,
-		Force: force,
-	})
+	return operation.run(ctx)
+}
+
+func (b *tuiBackend) prepareRemoval(
+	ctx context.Context,
+	row dashboard.Row,
+	force bool,
+) (tuiRemovalOperation, error) {
+	if row.Entry == nil {
+		return tuiRemovalOperation{}, fmt.Errorf("no worktree selected")
+	}
+	if row.Entry.IsMain {
+		return tuiRemovalOperation{}, fmt.Errorf("refusing to remove a main worktree")
+	}
+	generation := row.Entry.Generation
+	if strings.TrimSpace(generation) == "" {
+		return tuiRemovalOperation{}, fmt.Errorf("worktree generation unavailable; refresh before removing")
+	}
+	branch := strings.TrimSpace(row.Entry.Branch)
+	head := strings.TrimSpace(row.Entry.CommitHash)
+	if force && (branch == "" || head == "") {
+		return tuiRemovalOperation{}, fmt.Errorf("worktree checkout unavailable; refresh before removing")
+	}
+	b.mu.Lock()
+	var cfg *models.Config
+	if b.cfg != nil {
+		cfg = cloneTUIConfig(b.cfg)
+	}
+	resolveRemovalRoot := b.resolveRemovalRoot
+	removeWorktree := b.removeWorktree
+	liveEndpoints := b.liveEndpoints
+	cleanupEndpoint := b.cleanupEndpoint
+	killProtectedEndpoint := b.killProtectedEndpoint
+	b.mu.Unlock()
+
+	repoRoot, err := resolveRemovalRoot(ctx, row, cfg)
+	if err != nil {
+		return tuiRemovalOperation{}, err
+	}
+	return tuiRemovalOperation{
+		request: kwt.RemovalRequest{
+			RepositoryPath: repoRoot,
+			Path:           row.Entry.Path, ExpectedGeneration: generation,
+			ExpectedBranch: branch, ExpectedHead: head, Force: force,
+		},
+		row: row, endpointRequest: removalEndpointRequest(row), config: cfg,
+		remove: removeWorktree, liveEndpoints: liveEndpoints,
+		cleanupEndpoint:       cleanupEndpoint,
+		killProtectedEndpoint: killProtectedEndpoint,
+	}, nil
+}
+
+func cloneTUIConfig(value *models.Config) *models.Config {
+	if value == nil {
+		return nil
+	}
+	copyConfig := *value
+	copyConfig.Agents = maps.Clone(value.Agents)
+	copyConfig.Projects = slices.Clone(value.Projects)
+	copyConfig.Workspaces = slices.Clone(value.Workspaces)
+	copyConfig.RepositorySettings = slices.Clone(value.RepositorySettings)
+	for index := range copyConfig.RepositorySettings {
+		copyConfig.RepositorySettings[index].SetupCommands = slices.Clone(value.RepositorySettings[index].SetupCommands)
+		copyConfig.RepositorySettings[index].CopyFiles = slices.Clone(value.RepositorySettings[index].CopyFiles)
+	}
+	copyConfig.Layouts.Presets = slices.Clone(value.Layouts.Presets)
+	for index := range copyConfig.Layouts.Presets {
+		copyConfig.Layouts.Presets[index].Panes = slices.Clone(value.Layouts.Presets[index].Panes)
+	}
+	copyConfig.Naming.SanitizeChars = maps.Clone(value.Naming.SanitizeChars)
+	return &copyConfig
+}
+
+func (operation tuiRemovalOperation) run(ctx context.Context) error {
+	result, removalErr := operation.remove(ctx, operation.request)
 	if removalErr != nil && !result.WorktreeRemoved {
-		if daemonMutationRequiresRefresh(removalErr) {
-			publishTUIFleetBestEffort(ctx, b.cfg)
+		dirtyConflict := strings.Contains(
+			removalErr.Error(), "contains modified or untracked files",
+		) || strings.Contains(removalErr.Error(), "has local changes")
+		refreshRequired := daemonMutationRequiresRefresh(removalErr) ||
+			service.IsCode(removalErr, service.Conflict) || dirtyConflict
+		if refreshRequired {
+			publishTUIFleetBestEffort(ctx, operation.config)
 		}
-		if strings.Contains(removalErr.Error(), "contains modified or untracked files") ||
-			strings.Contains(removalErr.Error(), "has local changes") {
-			return fmt.Errorf("worktree has uncommitted changes")
+		if dirtyConflict {
+			removalErr = errors.New("worktree has uncommitted changes")
+		}
+		if refreshRequired {
+			return &tuiRemovalRefreshRequiredError{err: removalErr}
 		}
 		return removalErr
 	}
 
-	publishTUIFleetBestEffort(ctx, b.cfg)
+	publishTUIFleetBestEffort(ctx, operation.config)
 
-	endpoints, cleanupErr := b.removalEndpoints(
-		ctx,
-		row,
-		endpointRequest,
-	)
+	endpoints, cleanupErr := removalEndpointsWith(ctx, operation.row, operation.endpointRequest, operation.liveEndpoints)
 	for _, endpoint := range endpoints {
 		var err error
 		if endpoint.Protected {
-			err = b.killProtectedEndpoint(ctx, endpoint.Endpoint, endpointRequest)
+			err = operation.killProtectedEndpoint(ctx, endpoint.Endpoint, operation.endpointRequest)
 		} else {
-			err = b.cleanupEndpoint(ctx, endpoint.Endpoint, endpointRequest)
+			err = operation.cleanupEndpoint(ctx, endpoint.Endpoint, operation.endpointRequest)
 		}
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf(
@@ -1669,10 +1924,11 @@ func removalEndpointRequest(row dashboard.Row) tmux.WorkspaceEndpointRequest {
 	}
 }
 
-func (b *tuiBackend) removalEndpoints(
+func removalEndpointsWith(
 	ctx context.Context,
 	row dashboard.Row,
 	request tmux.WorkspaceEndpointRequest,
+	liveEndpoints func(context.Context, tmux.WorkspaceEndpointRequest) ([]tmux.SessionEndpoint, error),
 ) ([]tuiRemovalEndpoint, error) {
 	removalEndpoints := make([]tuiRemovalEndpoint, 0, 3)
 	protectedEndpoint := row.TmuxEndpoint
@@ -1684,7 +1940,7 @@ func (b *tuiBackend) removalEndpoints(
 			Protected: true,
 		})
 	}
-	endpoints, err := b.liveEndpoints(ctx, request)
+	endpoints, err := liveEndpoints(ctx, request)
 	if err != nil {
 		return removalEndpoints, fmt.Errorf("inspect workspace tmux sessions: %w", err)
 	}
@@ -1701,11 +1957,14 @@ func (b *tuiBackend) killProtectedTUIEndpoint(
 	endpoint tmux.SessionEndpoint,
 	request tmux.WorkspaceEndpointRequest,
 ) error {
+	b.mu.Lock()
+	protectedNames := append([]string(nil), b.protectedNames...)
+	b.mu.Unlock()
 	request.SessionName = endpoint.SessionName
 	err := tmux.KillProtectedWorkspaceSessionsIfMatchingContext(
 		ctx,
 		endpoint.SocketName,
-		b.protectedNames,
+		protectedNames,
 		os.Getenv("TMUX_TMPDIR"),
 		request,
 	)
@@ -1716,15 +1975,25 @@ func (b *tuiBackend) killProtectedTUIEndpoint(
 }
 
 func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {
+	return repositoryRootForRowWithConfig(context.Background(), row, b.cfg)
+}
+
+func repositoryRootForRowWithConfig(
+	ctx context.Context,
+	row dashboard.Row,
+	cfg *models.Config,
+) (string, error) {
 	if row.Entry == nil {
 		return "", fmt.Errorf("no worktree selected")
 	}
 
-	repoRoot, err := git.New(row.Entry.Path).GetMainRepositoryPath()
+	repoRoot, err := git.NewWithContext(ctx, row.Entry.Path).GetMainRepositoryPath()
 	if err == nil {
-		if identityErr := b.validateRepositoryRootForRow(
+		if identityErr := validateRepositoryRootForRowWithConfig(
+			ctx,
 			repoRoot,
 			row,
+			cfg,
 		); identityErr != nil {
 			return "", identityErr
 		}
@@ -1732,16 +2001,18 @@ func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {
 	}
 	directErr := err
 
-	if b.cfg != nil {
-		for _, project := range b.cfg.Projects {
+	if cfg != nil {
+		for _, project := range cfg.Projects {
 			if !projectMatchesRow(project, row) {
 				continue
 			}
-			repoRoot, err := git.New(project.Path).GetMainRepositoryPath()
+			repoRoot, err := git.NewWithContext(ctx, project.Path).GetMainRepositoryPath()
 			if err == nil {
-				if identityErr := b.validateRepositoryRootForRow(
+				if identityErr := validateRepositoryRootForRowWithConfig(
+					ctx,
 					repoRoot,
 					row,
+					cfg,
 				); identityErr != nil {
 					return "", identityErr
 				}
@@ -1753,21 +2024,23 @@ func (b *tuiBackend) repositoryRootForRow(row dashboard.Row) (string, error) {
 	return "", fmt.Errorf("failed to find repository root: %w", directErr)
 }
 
-func (b *tuiBackend) validateRepositoryRootForRow(
+func validateRepositoryRootForRowWithConfig(
+	ctx context.Context,
 	repoRoot string,
 	row dashboard.Row,
+	cfg *models.Config,
 ) error {
 	if row.Entry == nil || len(rowRepositoryIdentityCandidates(
 		row.Entry.RepositoryInfo,
 	)) == 0 {
 		return nil
 	}
-	if b.cfg != nil {
-		for _, project := range b.cfg.Projects {
+	if cfg != nil {
+		for _, project := range cfg.Projects {
 			if !projectMatchesRow(project, row) {
 				continue
 			}
-			projectRoot, err := git.New(project.Path).GetMainRepositoryPath()
+			projectRoot, err := git.NewWithContext(ctx, project.Path).GetMainRepositoryPath()
 			if err == nil &&
 				utils.PathKey(projectRoot) == utils.PathKey(repoRoot) {
 				return nil
@@ -1776,11 +2049,11 @@ func (b *tuiBackend) validateRepositoryRootForRow(
 	}
 
 	var projects []models.Project
-	if b.cfg != nil {
-		projects = b.cfg.Projects
+	if cfg != nil {
+		projects = cfg.Projects
 	}
 	liveInfo, err := worktree.RepositoryInfoWithProjects(
-		git.New(repoRoot),
+		git.NewWithContext(ctx, repoRoot),
 		projects,
 	)
 	if err == nil {
@@ -1848,11 +2121,42 @@ func cleanComparablePath(path string) string {
 
 func (b *tuiBackend) KillSession(row dashboard.Row) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if row.SessionName == "" {
-		return fmt.Errorf("no live workspace")
+	cleanupEndpoint := b.cleanupEndpoint
+	killProtectedEndpoint := b.killProtectedEndpoint
+	b.mu.Unlock()
+	request, err := killEndpointRequest(row)
+	if err != nil {
+		return err
 	}
-	return b.killEndpoint(row.TmuxEndpoint)
+	endpoint := row.TmuxEndpoint
+	if endpoint.SessionName == "" {
+		endpoint.SessionName = request.SessionName
+	}
+	if row.Entry != nil && row.Entry.Protected && endpoint.SocketName != "" {
+		return killProtectedEndpoint(context.Background(), endpoint, request)
+	}
+	return cleanupEndpoint(context.Background(), endpoint, request)
+}
+
+func killEndpointRequest(row dashboard.Row) (tmux.WorkspaceEndpointRequest, error) {
+	sessionName := strings.TrimSpace(row.SessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(row.TmuxEndpoint.SessionName)
+	}
+	if sessionName == "" {
+		return tmux.WorkspaceEndpointRequest{}, fmt.Errorf("no live workspace")
+	}
+	request := tmux.WorkspaceEndpointRequest{SessionName: sessionName}
+	switch {
+	case row.Entry != nil:
+		request.WorkspacePath = row.Entry.Path
+		request.WorkspaceGeneration = row.Entry.Generation
+	case row.Workspace != nil:
+		request.WorkspacePath = row.Workspace.Path
+	default:
+		return tmux.WorkspaceEndpointRequest{}, fmt.Errorf("no worktree selected")
+	}
+	return request, nil
 }
 
 func (b *tuiBackend) OpenInTmux(
@@ -1869,10 +2173,75 @@ func (b *tuiBackend) OpenInTmux(
 	return b.prepareResidentAttach(ctx, endpoint)
 }
 
+func (b *tuiBackend) OpenExistingInTmux(
+	ctx context.Context,
+	row dashboard.Row,
+) (*exec.Cmd, error) {
+	b.mu.Lock()
+	resolveLive := b.resolveLive
+	acknowledge := b.acknowledgeRemoteSource
+	prepare := b.prepareResidentAttach
+	b.mu.Unlock()
+	endpoint, err := resolveExistingWorkspaceEndpoint(ctx, row, resolveLive, acknowledge)
+	if err != nil {
+		return nil, err
+	}
+	return prepare(ctx, endpoint)
+}
+
 func (b *tuiBackend) AttachOutsideTmux(row dashboard.Row, layoutName string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.attachWorkspace(context.Background(), row, layoutName, config.StdinInteractive())
+}
+
+func (b *tuiBackend) AttachExistingOutsideTmux(row dashboard.Row) error {
+	b.mu.Lock()
+	resolveLive := b.resolveLive
+	acknowledge := b.acknowledgeRemoteSource
+	attach := b.attachSession
+	b.mu.Unlock()
+	ctx := context.Background()
+	endpoint, err := resolveExistingWorkspaceEndpoint(ctx, row, resolveLive, acknowledge)
+	if err != nil {
+		return err
+	}
+	return attach(ctx, endpoint)
+}
+
+func resolveExistingWorkspaceEndpoint(
+	ctx context.Context,
+	row dashboard.Row,
+	resolveLive func(context.Context, tmux.WorkspaceEndpointRequest) (tmux.SessionEndpoint, error),
+	acknowledge func(string) error,
+) (tmux.SessionEndpoint, error) {
+	if row.Entry == nil && row.Workspace == nil {
+		return tmux.SessionEndpoint{}, fmt.Errorf("no worktree selected")
+	}
+	generation := ""
+	if row.Entry != nil {
+		generation = row.Entry.Generation
+	}
+	workspacePath := rowPaneRoot(row)
+	if err := rejectProtectedWorkspaceOpen(ctx, workspacePath, generation); err != nil {
+		return tmux.SessionEndpoint{}, err
+	}
+	if acknowledge != nil {
+		if err := acknowledge(workspacePath); err != nil {
+			return tmux.SessionEndpoint{}, err
+		}
+	}
+	if row.SessionName == "" {
+		return tmux.SessionEndpoint{}, fmt.Errorf("cached workspace has no session name")
+	}
+	if resolveLive == nil {
+		return tmux.SessionEndpoint{}, fmt.Errorf("live workspace resolver is unavailable")
+	}
+	return resolveLive(ctx, tmux.WorkspaceEndpointRequest{
+		SessionName:         row.SessionName,
+		WorkspacePath:       workspacePath,
+		WorkspaceGeneration: generation,
+	})
 }
 
 // LayoutNames returns the names the TUI layout cycler offers: the reserved

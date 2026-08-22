@@ -216,7 +216,23 @@ func TestTUIStatusCollectorOptionsFetchesSyncState(t *testing.T) {
 	assert.Equal(t, "/worktrees", opts.BaseDir)
 }
 
-func TestReadTUIFleetStatePublishesBeforeReadingHub(t *testing.T) {
+func TestCollectTUIStatusesSurfacesPerRowDiagnostic(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	entry := &discovery.GlobalWorktreeEntry{
+		Path: missing, Branch: "topic",
+		RepositoryInfo: &url.RepositoryInfo{FullPath: "github.com/acme/widget"},
+	}
+
+	statuses, warnings, err := collectTUIStatuses(context.Background(), t.TempDir(), []*discovery.GlobalWorktreeEntry{entry})
+
+	require.NoError(t, err)
+	require.Contains(t, statuses, missing)
+	assert.Equal(t, models.WorktreeStatusUnknown, statuses[missing].Status)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "status unavailable for "+missing)
+}
+
+func TestReadTUIFleetStateReadsHubWithoutPublishingGlobalStatus(t *testing.T) {
 	resetFleetCommandDeps(t)
 
 	cfg := &models.Config{Fleet: models.FleetConfig{
@@ -227,7 +243,7 @@ func TestReadTUIFleetStatePublishesBeforeReadingHub(t *testing.T) {
 	client := &stubFleetClient{}
 	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
 		sequence = append(sequence, "publish")
-		assert.Same(t, cfg, gotCfg)
+		assert.Equal(t, cfg, gotCfg)
 		assert.NotNil(t, builder)
 		return errors.New("hub unavailable")
 	}
@@ -245,11 +261,10 @@ func TestReadTUIFleetStatePublishesBeforeReadingHub(t *testing.T) {
 	_, err := readTUIFleetState(context.Background(), cfg)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"client", "builder", "publish", "state"}, sequence,
-		"the client must be validated before the expensive manifest build")
+	assert.Equal(t, []string{"client", "state"}, sequence)
 }
 
-func TestReadTUIFleetStateIgnoresPublishWarningWithoutPanicking(t *testing.T) {
+func TestReadTUIFleetStateDoesNotBuildManifest(t *testing.T) {
 	resetFleetCommandDeps(t)
 
 	cfg := &models.Config{Fleet: models.FleetConfig{
@@ -258,7 +273,8 @@ func TestReadTUIFleetStateIgnoresPublishWarningWithoutPanicking(t *testing.T) {
 	}}
 	client := &stubFleetClient{}
 	newFleetManifestBuilder = func() fleet.ManifestBuildProvider {
-		return &stubFleetManifestBuilder{err: errors.New("build failed")}
+		t.Fatal("TUI fleet reads must not build a global manifest")
+		return nil
 	}
 	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
 		return fleet.PublishBestEffort(ctx, gotCfg, builder, warn)
@@ -295,8 +311,8 @@ func TestTUIBackendListAndMergeFleetAreConcurrencySafe(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	// Read cfg.Projects the way the manifest builder does during publish.
@@ -350,13 +366,13 @@ func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		assert.Equal(t, "/global", baseDir)
 		assert.Len(t, entries, 2)
 		return map[string]*models.WorktreeStatus{
 			globalEntry.Path: {Path: globalEntry.Path, Branch: globalEntry.Branch},
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch, IsCurrent: true},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -392,9 +408,9 @@ func TestTUIBackendListFastSkipsStatusCollection(t *testing.T) {
 		context.Context,
 		string,
 		[]*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		t.Fatal("fast listing must not collect Git status")
-		return nil, nil
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -427,7 +443,7 @@ func TestTUIBackendListCollectsStatusForImportedWorktree(t *testing.T) {
 		_ context.Context,
 		_ string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Equal(t, []*discovery.GlobalWorktreeEntry{entry}, entries)
 		return map[string]*models.WorktreeStatus{
 			entry.Path: {
@@ -435,7 +451,7 @@ func TestTUIBackendListCollectsStatusForImportedWorktree(t *testing.T) {
 				Branch: entry.Branch,
 				Status: models.WorktreeStatusClean,
 			},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -527,7 +543,7 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		assert.ElementsMatch(t, []string{globalEntry.Path, projectEntry.Path}, []string{
 			entries[0].Path,
 			entries[1].Path,
@@ -535,7 +551,7 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 		return map[string]*models.WorktreeStatus{
 			globalEntry.Path:  {Path: globalEntry.Path, Branch: globalEntry.Branch},
 			projectEntry.Path: {Path: projectEntry.Path, Branch: projectEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -712,10 +728,10 @@ func TestTUIBackendMergeFleetIncludesRemoteOnlyFleetRows(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -790,8 +806,8 @@ func TestTUIBackendMergeFleetDoesNotOfferSyncWithoutRegisteredProject(t *testing
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -853,10 +869,10 @@ func TestTUIBackendMergeFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) 
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -958,10 +974,10 @@ func TestTUIBackendMergeFleetRendersFleetStatusFromLocalObservations(t *testing.
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -1058,10 +1074,10 @@ func TestTUIBackendMergeFleetMatchesLocalDetachedWorktreeToFleetRow(t *testing.T
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			detachedEntry.Path: {Path: detachedEntry.Path},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -1109,11 +1125,11 @@ func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Len(t, entries, 1)
 		return map[string]*models.WorktreeStatus{
 			entries[0].Path: {Path: entries[0].Path, Branch: entries[0].Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1166,13 +1182,13 @@ func TestTUIBackendListPrefersRegisteredIdentityForGlobalLocalOnlyDuplicate(t *t
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Len(t, entries, 1)
 		require.NotNil(t, entries[0].RepositoryInfo)
 		assert.Equal(t, "local.example/team/service", entries[0].RepositoryInfo.FullPath)
 		return map[string]*models.WorktreeStatus{
 			entries[0].Path: {Path: entries[0].Path, Branch: entries[0].Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1217,10 +1233,10 @@ func TestTUIBackendListRegistersLaunchRepositoryBestEffort(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1263,8 +1279,8 @@ func TestTUIBackendRegistersLaunchRepositoryOnceAcrossStagedLoad(t *testing.T) {
 		context.Context,
 		string,
 		[]*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1306,10 +1322,10 @@ func TestTUIBackendListAddsLaunchRepositoryToInMemoryProjects(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1358,10 +1374,10 @@ func TestTUIBackendLaunchRegistrationReusesExistingProjectByPath(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
-		}, nil
+		}, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 
@@ -1777,8 +1793,9 @@ func TestTUIBackendRemoveWorktreeDelegatesToDaemon(t *testing.T) {
 	worktreePath := filepath.Join(t.TempDir(), "daemon-tui-remove")
 	runTUITestGit(t, repoPath, "worktree", "add", "-b", "daemon-tui-remove", worktreePath)
 	generation := tuiTestWorktreeGeneration(t, repoPath, worktreePath)
+	head := strings.TrimSpace(runTUITestGitOutput(t, worktreePath, "rev-parse", "HEAD"))
 	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
-		Path: worktreePath, Branch: "daemon-tui-remove", Generation: generation,
+		Path: worktreePath, Branch: "daemon-tui-remove", CommitHash: head, Generation: generation,
 	}, SessionName: "workspace"}
 	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
 	backend.liveEndpoints = func(
@@ -1792,7 +1809,6 @@ func TestTUIBackendRemoveWorktreeDelegatesToDaemon(t *testing.T) {
 		_ context.Context,
 		input kwt.RemovalRequest,
 	) (kwt.RemovalResult, error) {
-		requireTUIBackendStateLocked(t, backend)
 		request = input
 		return kwt.RemovalResult{
 			Path: input.Path, Branch: "daemon-tui-remove", WorktreeRemoved: true,
@@ -1805,6 +1821,8 @@ func TestTUIBackendRemoveWorktreeDelegatesToDaemon(t *testing.T) {
 	assert.Equal(t, utils.PathKey(repoPath), utils.PathKey(request.RepositoryPath))
 	assert.Equal(t, utils.PathKey(worktreePath), utils.PathKey(request.Path))
 	assert.Equal(t, generation, request.ExpectedGeneration)
+	assert.Equal(t, "daemon-tui-remove", request.ExpectedBranch)
+	assert.Equal(t, head, request.ExpectedHead)
 	assert.DirExists(t, worktreePath, "only the daemon service may perform the mutation")
 }
 
@@ -1927,11 +1945,6 @@ func TestTUIBackendRemoveWorktreeKillsEveryMatchingEndpointAfterRemoval(t *testi
 		killed = append(killed, endpoint)
 		return nil
 	}
-	backend.killEndpoint = func(endpoint tmux.SessionEndpoint) error {
-		t.Fatalf("post-removal cleanup used unconditional kill: %+v", endpoint)
-		return nil
-	}
-
 	err := backend.RemoveWorktree(context.Background(), row, false)
 
 	require.NoError(t, err)
@@ -2241,7 +2254,7 @@ func TestTUIBackendCreateWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	}
 	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
 		published++
-		assert.Same(t, cfg, gotCfg)
+		assert.Equal(t, cfg, gotCfg)
 		assert.NotNil(t, builder)
 		assert.NotNil(t, warn)
 		return errors.New("hub unavailable")
@@ -2438,7 +2451,7 @@ func TestTUIBackendRemoveWorktreePublishesAfterSuccessfulMutation(t *testing.T) 
 	}
 	publishFleetBestEffort = func(ctx context.Context, gotCfg *models.Config, builder fleet.ManifestBuildProvider, warn *bytes.Buffer) error {
 		published++
-		assert.Same(t, cfg, gotCfg)
+		assert.Equal(t, cfg, gotCfg)
 		assert.NotNil(t, builder)
 		assert.NotNil(t, warn)
 		return errors.New("hub unavailable")
@@ -2626,6 +2639,7 @@ func TestTUIBackendRemoveWorktreeRejectsReplacementGeneration(t *testing.T) {
 	repoPath := newTUITestRepo(t)
 	worktreePath := filepath.Join(t.TempDir(), "replacement-worktree")
 	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/original", worktreePath)
+	originalHead := strings.TrimSpace(runTUITestGitOutput(t, worktreePath, "rev-parse", "HEAD"))
 	worktrees, err := git.New(repoPath).ListWorktrees()
 	require.NoError(t, err)
 	var originalGeneration string
@@ -2647,6 +2661,7 @@ func TestTUIBackendRemoveWorktreeRejectsReplacementGeneration(t *testing.T) {
 	require.NotEqual(t, originalGeneration, replacementGeneration)
 	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
 		Branch:     "codex/original",
+		CommitHash: originalHead,
 		Path:       worktreePath,
 		Generation: originalGeneration,
 	}}
@@ -2658,6 +2673,40 @@ func TestTUIBackendRemoveWorktreeRejectsReplacementGeneration(t *testing.T) {
 	err = backend.RemoveWorktree(context.Background(), row, true)
 
 	require.ErrorContains(t, err, "generation changed")
+	var refreshRequired interface{ RefreshRequired() bool }
+	require.ErrorAs(t, err, &refreshRequired)
+	assert.True(t, refreshRequired.RefreshRequired())
+	assert.DirExists(t, worktreePath)
+}
+
+func TestTUIBackendRemoveWorktreeChangedHeadRequiresRefresh(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	repoPath := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "changed-head-worktree")
+	runTUITestGit(t, repoPath, "worktree", "add", "-b", "codex/changed-head", worktreePath)
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Branch:     "codex/changed-head",
+		CommitHash: strings.TrimSpace(runTUITestGitOutput(t, worktreePath, "rev-parse", "HEAD")),
+		Path:       worktreePath,
+		Generation: tuiTestWorktreeGeneration(t, repoPath, worktreePath),
+	}}
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "new.txt"), []byte("new\n"), 0644))
+	runTUITestGit(t, worktreePath, "add", "new.txt")
+	runTUITestGit(t, worktreePath, "commit", "-m", "advance checkout")
+	backend := newTUIBackendWithLaunchDir(&models.Config{
+		Worktree: models.WorktreeConfig{BaseDir: t.TempDir()},
+	}, "")
+	useInProcessTUIRemoval(t, backend)
+
+	err := backend.RemoveWorktree(context.Background(), row, true)
+
+	require.Error(t, err)
+	var refreshRequired interface{ RefreshRequired() bool }
+	require.ErrorAs(t, err, &refreshRequired)
+	assert.True(t, refreshRequired.RefreshRequired())
 	assert.DirExists(t, worktreePath)
 }
 
@@ -2785,6 +2834,9 @@ func TestTUIBackendRemoveWorktreeDirtyErrorDoesNotSuggestCLIForce(t *testing.T) 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "uncommitted changes")
 	assert.NotContains(t, err.Error(), "kwt remove --force")
+	var refreshRequired interface{ RefreshRequired() bool }
+	require.ErrorAs(t, err, &refreshRequired)
+	assert.True(t, refreshRequired.RefreshRequired())
 	assert.DirExists(t, worktreePath)
 }
 
@@ -2813,8 +2865,9 @@ func TestTUIBackendForceRemoveDeletesDirtyWorktree(t *testing.T) {
 			Repository: "service-api",
 			FullPath:   "github.com/example/service-api",
 		},
-		Branch: "codex/dirty",
-		Path:   worktreePath,
+		Branch:     "codex/dirty",
+		CommitHash: strings.TrimSpace(runTUITestGitOutput(t, worktreePath, "rev-parse", "HEAD")),
+		Path:       worktreePath,
 		Generation: tuiTestWorktreeGeneration(
 			t,
 			repoPath,
@@ -3737,8 +3790,8 @@ func TestTUIBackendMergeFleetReturnsHubWarnings(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.readFleetState = func(context.Context, *models.Config) (fleet.FleetState, error) {
@@ -3772,8 +3825,8 @@ func TestTUIBackendListIncludesWorkspaceRows(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	liveSession := tmux.DirWorkspaceSessionName("old-name", dir)
 	backend.resolveSessions = func(
@@ -3814,8 +3867,8 @@ func TestTUIBackendAutoRegistersNonGitLaunchDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	var registered []models.Workspace
@@ -3846,8 +3899,8 @@ func TestTUIBackendSkipsAutoRegisterWhenAlreadyRegisteredWithCustomName(t *testi
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	called := false
@@ -3877,8 +3930,8 @@ func TestTUIBackendAutoRegistersLaunchWorkspaceOnlyOnce(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	registrations := 0
@@ -3926,8 +3979,8 @@ func TestTUIBackendNeverRegistersWorkspaceForGitLaunchDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
@@ -3955,8 +4008,8 @@ func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
-		return nil, nil
+	) (map[string]*models.WorktreeStatus, []string, error) {
+		return nil, nil, nil
 	}
 	backend.resolveSessions = resolveStoppedWorkspaceSessions
 	backend.registerWorkspace = func(workspace models.Workspace) (models.Workspace, error) {
@@ -4038,19 +4091,27 @@ func TestTUIBackendAttachWorkspaceGuardRejectsEmptyRow(t *testing.T) {
 	assert.Equal(t, "no worktree selected", err.Error())
 }
 
-func TestTUIKillSessionUsesEndpointRetainedByRow(t *testing.T) {
+func TestTUIKillSessionUsesContextMatchedEndpoint(t *testing.T) {
 	want := tmux.SessionEndpoint{
 		SessionName: "workspace",
 	}
 	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
 	var killed tmux.SessionEndpoint
-	backend.killEndpoint = func(endpoint tmux.SessionEndpoint) error {
-		requireTUIBackendStateLocked(t, backend)
+	var request tmux.WorkspaceEndpointRequest
+	backend.cleanupEndpoint = func(
+		_ context.Context,
+		endpoint tmux.SessionEndpoint,
+		got tmux.WorkspaceEndpointRequest,
+	) error {
 		killed = endpoint
+		request = got
 		return nil
 	}
-
 	err := backend.KillSession(dashboard.Row{
+		Entry: &discovery.GlobalWorktreeEntry{
+			Path:       "/work/widget",
+			Generation: "11111111111111111111111111111111",
+		},
 		SessionName:  "workspace",
 		SessionLive:  true,
 		TmuxEndpoint: want,
@@ -4058,6 +4119,11 @@ func TestTUIKillSessionUsesEndpointRetainedByRow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, want, killed)
+	assert.Equal(t, tmux.WorkspaceEndpointRequest{
+		SessionName:         "workspace",
+		WorkspacePath:       "/work/widget",
+		WorkspaceGeneration: "11111111111111111111111111111111",
+	}, request)
 }
 
 func TestDashboardInventoryEntryClassifiesProtectionFromWireMode(t *testing.T) {
@@ -4408,6 +4474,111 @@ func TestTUIBackendOpenInTmuxPreparesResidentAttach(t *testing.T) {
 	assert.Same(t, wantProcess, process)
 }
 
+func TestCachedLiveAttachNeverEstablishes(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	endpoint := tmux.SessionEndpoint{SessionName: "topic", SocketName: tmux.KWTServerSocketName}
+	backend.resolveLive = func(context.Context, tmux.WorkspaceEndpointRequest) (tmux.SessionEndpoint, error) {
+		return endpoint, nil
+	}
+	wantProcess := &exec.Cmd{}
+	backend.prepareResidentAttach = func(context.Context, tmux.SessionEndpoint) (*exec.Cmd, error) {
+		return wantProcess, nil
+	}
+	var ensured bool
+	backend.ensureWorktree = func(context.Context, string, string, string, models.Layout) (tmux.SessionEndpoint, error) {
+		ensured = true
+		return tmux.SessionEndpoint{}, nil
+	}
+	row := dashboard.Row{
+		Entry:       &discovery.GlobalWorktreeEntry{Path: "/work/topic", Branch: "topic", Generation: "0123456789abcdef0123456789abcdef"},
+		SessionName: "topic", SessionLive: true, TmuxEndpoint: endpoint,
+	}
+
+	process, err := backend.OpenExistingInTmux(context.Background(), row)
+
+	require.NoError(t, err)
+	assert.Same(t, wantProcess, process)
+	assert.False(t, ensured)
+}
+
+func TestTUIBackendRemovalDoesNotBlockInventoryConfiguration(t *testing.T) {
+	t.Setenv("KWT_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	repository := newTUITestRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "topic")
+	runTUITestGit(t, repository, "branch", "topic")
+	runTUITestGit(t, repository, "worktree", "add", worktreePath, "topic")
+	generation := tuiTestWorktreeGeneration(t, repository, worktreePath)
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, repository)
+	backend.liveEndpoints = func(context.Context, tmux.WorkspaceEndpointRequest) ([]tmux.SessionEndpoint, error) { return nil, nil }
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	backend.removeWorktree = func(context.Context, kwt.RemovalRequest) (kwt.RemovalResult, error) {
+		close(entered)
+		<-release
+		return kwt.RemovalResult{WorktreeRemoved: true}, nil
+	}
+	done := make(chan error, 1)
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Path: worktreePath, Branch: "topic", Generation: generation,
+	}}
+	go func() { done <- backend.RemoveWorktree(context.Background(), row, false) }()
+	<-entered
+
+	applied := make(chan error, 1)
+	go func() { applied <- backend.applyInventoryConfig(&models.Config{}) }()
+	select {
+	case err := <-applied:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("inventory configuration blocked behind worktree removal")
+	}
+
+	close(release)
+	require.NoError(t, <-done)
+}
+
+func TestTUIBackendRemovalPreparationDoesNotBlockInventoryConfiguration(t *testing.T) {
+	backend := newTUIBackendWithLaunchDir(&models.Config{}, "")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	backend.resolveRemovalRoot = func(
+		context.Context,
+		dashboard.Row,
+		*models.Config,
+	) (string, error) {
+		close(entered)
+		<-release
+		return "/repo", nil
+	}
+	backend.liveEndpoints = func(context.Context, tmux.WorkspaceEndpointRequest) ([]tmux.SessionEndpoint, error) {
+		return nil, nil
+	}
+	backend.removeWorktree = func(context.Context, kwt.RemovalRequest) (kwt.RemovalResult, error) {
+		return kwt.RemovalResult{WorktreeRemoved: true}, nil
+	}
+	row := dashboard.Row{Entry: &discovery.GlobalWorktreeEntry{
+		Path: "/repo/topic", Branch: "topic",
+		Generation: "0123456789abcdef0123456789abcdef",
+	}}
+	done := make(chan error, 1)
+	go func() { done <- backend.RemoveWorktree(context.Background(), row, false) }()
+	<-entered
+
+	applied := make(chan error, 1)
+	go func() { applied <- backend.applyInventoryConfig(&models.Config{}) }()
+	select {
+	case err := <-applied:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("inventory configuration blocked behind worktree removal preparation")
+	}
+
+	close(release)
+	require.NoError(t, <-done)
+}
+
 func defaultTmuxSessions(t *testing.T) []string {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -4564,10 +4735,10 @@ func TestTUIBackendSerializesUnregisterWithFullLoad(t *testing.T) {
 	release := make(chan struct{})
 	backend.collectStatuses = func(
 		context.Context, string, []*discovery.GlobalWorktreeEntry,
-	) (map[string]*models.WorktreeStatus, error) {
+	) (map[string]*models.WorktreeStatus, []string, error) {
 		close(collecting)
 		<-release
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var listRows []dashboard.Row

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os/exec"
+	"time"
 
 	"go.kenn.io/kwt/internal/discovery"
 	"go.kenn.io/kwt/internal/tmux"
@@ -18,9 +19,10 @@ const (
 )
 
 type Handoff struct {
-	Kind       HandoffKind
-	Row        Row
-	LayoutName string
+	Kind         HandoffKind
+	Row          Row
+	LayoutName   string
+	ExistingOnly bool
 }
 
 type Row struct {
@@ -32,6 +34,29 @@ type Row struct {
 	SessionLive  bool
 	TmuxEndpoint tmux.SessionEndpoint
 	Creating     bool
+	Removing     bool
+}
+
+type InventoryScope int
+
+const (
+	InventoryCachedDashboard InventoryScope = iota
+	InventoryCurrentRepository
+	InventoryCurrentDashboard
+)
+
+type InventoryRequest struct {
+	Scope            InventoryScope
+	WorkingDirectory string
+	ProjectIdentity  string
+	CollectStatuses  bool
+}
+
+type InventoryResult struct {
+	Rows       []Row
+	Warnings   []string
+	ObservedAt time.Time
+	Current    bool
 }
 
 // WorkspaceInfo is the TUI-facing view of one registered directory workspace.
@@ -63,6 +88,7 @@ type FleetInfo struct {
 }
 
 type Backend interface {
+	LoadInventory(context.Context, InventoryRequest) (InventoryResult, error)
 	// ListFast returns enough local metadata to paint dashboard rows without
 	// waiting for repository status collection.
 	ListFast(ctx context.Context) ([]Row, []string, error)
@@ -85,6 +111,7 @@ type Backend interface {
 	UnregisterWorkspace(row Row) error
 	KillSession(row Row) error
 	OpenInTmux(ctx context.Context, row Row, layoutName string) (*exec.Cmd, error)
+	OpenExistingInTmux(ctx context.Context, row Row) (*exec.Cmd, error)
 	LayoutNames() []string
 	InsideTmux() bool
 }

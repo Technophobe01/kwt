@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -98,9 +99,10 @@ func (r *fakePruneMergedRegistry) EntryMatches(
 
 func fakePruneMergedRemoval(
 	remove func(pruneMergedCandidate) error,
-) func(pruneMergedCandidate, func(func() error) (bool, error)) (bool, error) {
+) func(pruneMergedCandidate, bool, func(func() error) (bool, error)) (bool, error) {
 	return func(
 		candidate pruneMergedCandidate,
+		_ bool,
 		claim func(func() error) (bool, error),
 	) (bool, error) {
 		return claim(func() error { return remove(candidate) })
@@ -215,6 +217,221 @@ func TestPruneMergedDryRunAndJSONDoNotMutateOrPublish(t *testing.T) {
 	assert.Zero(t, publications)
 }
 
+func TestPruneMergedDirtyDryRunWouldRequireConfirmation(t *testing.T) {
+	resetPruneMergedCommand(t)
+	pruneDryRun = true
+	pruneJSON = true
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) { return true, nil }
+	validatePruneMergedDirtyWorktree = func(pruneMergedCandidate) error { return nil }
+	cmd, stdout, _ := fleetTestCommand()
+
+	err := runPruneMerged(cmd, nil)
+
+	require.NoError(t, err)
+	var report prunepolicy.Report
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &report))
+	assert.Equal(t, prunepolicy.WouldRequireConfirmation, report.Outcomes[0].Reason)
+	assert.Equal(t, 1, report.Summary.WouldRemove)
+}
+
+func TestPruneMergedDirtyNonInteractiveRequiresConfirmation(t *testing.T) {
+	resetPruneMergedCommand(t)
+	pruneJSON = true
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) { return true, nil }
+	cmd, stdout, _ := fleetTestCommand()
+
+	err := runPruneMerged(cmd, nil)
+
+	assertExitCode(t, err, 1)
+	var report prunepolicy.Report
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &report))
+	assert.Equal(t, prunepolicy.ConfirmationRequired, report.Outcomes[0].Reason)
+}
+
+func TestPruneMergedDirtyPromptRechecksAndForcesOnlyAfterYes(t *testing.T) {
+	resetPruneMergedCommand(t)
+	oldTerminal := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = oldTerminal })
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	var inspections int
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) {
+		inspections++
+		return true, nil
+	}
+	confirmPruneMergedDirty = func(_ *cobra.Command, candidate pruneMergedCandidate) (bool, error) {
+		assert.Contains(t, candidate.Policy.Path, "worktree")
+		return true, nil
+	}
+	var forced bool
+	removePruneMergedWorktree = func(
+		_ pruneMergedCandidate,
+		force bool,
+		claim func(func() error) (bool, error),
+	) (bool, error) {
+		forced = force
+		return claim(func() error { return nil })
+	}
+	cmd, _, _ := fleetTestCommand()
+
+	require.NoError(t, runPruneMerged(cmd, nil))
+	assert.Equal(t, 2, inspections, "classify after proof, then refresh before prompt")
+	assert.True(t, forced)
+}
+
+func TestPruneMergedDirtyPromptEscapesTerminalControlsInPath(t *testing.T) {
+	candidate := commandMergedCandidate("/worktrees/topic\u009b2Jforged", commandMergedHead)
+	cmd, _, stderr := fleetTestCommand()
+	cmd.SetIn(strings.NewReader("n\n"))
+
+	confirmed, err := defaultConfirmPruneMergedDirty(cmd, candidate)
+
+	require.NoError(t, err)
+	assert.False(t, confirmed)
+	assert.NotContains(t, stderr.String(), "\u009b")
+	assert.Contains(t, stderr.String(), `\u009b2J`)
+}
+
+func TestPruneMergedDirtyDeclineContinuesSuccessfully(t *testing.T) {
+	resetPruneMergedCommand(t)
+	oldTerminal := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = oldTerminal })
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) { return true, nil }
+	confirmPruneMergedDirty = func(*cobra.Command, pruneMergedCandidate) (bool, error) { return false, nil }
+	var removals int
+	removePruneMergedWorktree = func(
+		pruneMergedCandidate,
+		bool,
+		func(func() error) (bool, error),
+	) (bool, error) {
+		removals++
+		return true, nil
+	}
+	cmd, stdout, _ := fleetTestCommand()
+
+	err := runPruneMerged(cmd, nil)
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout.String(), string(prunepolicy.ConfirmationDeclined))
+	assert.Zero(t, removals)
+}
+
+func TestPruneMergedDirtyPromptTimeCleanUsesNonForcedRemoval(t *testing.T) {
+	resetPruneMergedCommand(t)
+	oldTerminal := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = oldTerminal })
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspections := 0
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) {
+		inspections++
+		return inspections == 1, nil
+	}
+	var forced bool
+	removePruneMergedWorktree = func(
+		_ pruneMergedCandidate,
+		force bool,
+		claim func(func() error) (bool, error),
+	) (bool, error) {
+		forced = force
+		return claim(func() error { return nil })
+	}
+	cmd, _, _ := fleetTestCommand()
+
+	require.NoError(t, runPruneMerged(cmd, nil))
+	assert.False(t, forced)
+}
+
+func TestPruneMergedDirtyPromptInspectionFailureStopsCandidate(t *testing.T) {
+	resetPruneMergedCommand(t)
+	oldTerminal := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = oldTerminal })
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspections := 0
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) {
+		inspections++
+		if inspections == 2 {
+			return false, os.ErrNotExist
+		}
+		return true, nil
+	}
+	cmd, stdout, _ := fleetTestCommand()
+
+	err := runPruneMerged(cmd, nil)
+
+	assertExitCode(t, err, 1)
+	assert.Contains(t, stdout.String(), string(prunepolicy.PathUnavailable))
+}
+
+func TestPruneMergedIgnoredOnlyWorktreeIsDirty(t *testing.T) {
+	repo := newTUITestRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("build/\n"), 0o644))
+	runTUITestGit(t, repo, "add", ".gitignore")
+	runTUITestGit(t, repo, "commit", "-m", "ignore build output")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "build"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "build", "output"), []byte("artifact"), 0o644))
+
+	dirty, err := defaultInspectPruneMergedDirty(pruneMergedCandidate{
+		RepositoryRoot: repo,
+		Policy:         prunepolicy.MergedCandidate{Path: repo},
+	})
+
+	require.NoError(t, err)
+	assert.True(t, dirty)
+}
+
+func TestRenderPruneReportGroupsRepeatedOutcomes(t *testing.T) {
+	cmd, stdout, _ := fleetTestCommand()
+	report := prunepolicy.Report{Policy: "merged", Outcomes: []prunepolicy.Outcome{
+		{Path: "/work/one", Reason: prunepolicy.ConfirmationRequired, Message: "confirmation required", Remediation: "Run interactively."},
+		{Path: "/work/two", Reason: prunepolicy.ConfirmationRequired, Message: "confirmation required", Remediation: "Run interactively."},
+	}}
+	report.Finalize()
+
+	require.NoError(t, renderPruneReport(cmd, report, false))
+	text := stdout.String()
+	assert.Equal(t, 1, strings.Count(text, "[confirmation_required]"))
+	assert.Contains(t, text, "/work/one")
+	assert.Contains(t, text, "/work/two")
+	assert.Equal(t, 1, strings.Count(text, "Run interactively."))
+}
+
+func TestPruneMergedJSONKeepsProgressOffStdout(t *testing.T) {
+	resetPruneMergedCommand(t)
+	pruneJSON = true
+	oldTerminal := maintenanceProgressIsTerminal
+	maintenanceProgressIsTerminal = func(io.Writer) bool { return false }
+	t.Cleanup(func() { maintenanceProgressIsTerminal = oldTerminal })
+	candidate := commandMergedCandidate("/worktrees/topic", commandMergedHead)
+	setPruneMergedInventory(candidate)
+	setPruneMergedProvider(providerForCommandCandidates(candidate))
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) { return false, nil }
+	cmd, stdout, stderr := fleetTestCommand()
+
+	_ = runPruneMerged(cmd, nil)
+
+	var report prunepolicy.Report
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &report))
+	assert.Contains(t, stderr.String(), "kwt: verify pull requests")
+}
+
 func TestPruneMergedDryRunMapsRevalidationChanges(t *testing.T) {
 	resetPruneMergedCommand(t)
 	pruneDryRun = true
@@ -239,7 +456,7 @@ func TestPruneMergedDryRunMapsRevalidationChanges(t *testing.T) {
 	require.Len(t, report.Outcomes, 1)
 	assert.Equal(t, prunepolicy.DirtyWorktree, report.Outcomes[0].Reason)
 	assert.Equal(t, "https://github.com/acme/widget/pull/17", report.Outcomes[0].Evidence["pr_url"])
-	assert.Empty(t, stderr.String())
+	assert.Contains(t, stderr.String(), "kwt: verify pull requests")
 	assert.Zero(t, removed)
 }
 
@@ -1088,7 +1305,9 @@ func TestPruneMergedInventoryUsesReadOnlyGitFactsAndUpstreamIdentity(t *testing.
 	assert.Equal(t, "worktree-topic", candidate.Policy.SourceBranch)
 	assert.Equal(t, utils.CanonicalPath(repositoryRoot), candidate.Policy.MainRepositoryPath)
 	assert.Equal(t, generation, candidate.Policy.Generation)
-	assert.True(t, candidate.Policy.Dirty)
+	dirty, err := defaultInspectPruneMergedDirty(*candidate)
+	require.NoError(t, err)
+	assert.True(t, dirty)
 	assert.True(t, candidate.RegistryExpected)
 	assert.Nil(t, candidate.InitialOutcome)
 }
@@ -1566,6 +1785,8 @@ func TestPruneMergedInventoryStripsCredentialsFromWorktreeGitProcesses(t *testin
 
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
+	_, err = defaultInspectPruneMergedDirty(candidates[0])
+	require.NoError(t, err)
 	probeContents, err := os.ReadFile(probeOutput)
 	require.NoError(t, err, "configured fsmonitor probe was not invoked")
 	assert.Equal(t, "unset|unset", string(probeContents))
@@ -1579,6 +1800,7 @@ func TestPruneMergedInventoryStripsCredentialsFromWorktreeGitProcesses(t *testin
 
 	removed, err := defaultRemovePruneMergedWorktree(
 		candidates[0],
+		false,
 		func(remove func() error) (bool, error) {
 			err := remove()
 			return err == nil || git.WorktreeWasRemoved(err), err
@@ -1654,6 +1876,7 @@ func resetPruneMergedCommand(t *testing.T) {
 	removePruneMergedWorktree = fakePruneMergedRemoval(
 		func(pruneMergedCandidate) error { return nil },
 	)
+	inspectPruneMergedDirty = func(pruneMergedCandidate) (bool, error) { return false, nil }
 	runPruneMergedProtectedOperation = func(
 		_ context.Context,
 		_ *models.Config,
@@ -1672,7 +1895,10 @@ func resetPruneMergedDeps(t *testing.T) {
 	oldInspect := inspectPruneMergedCandidates
 	oldProvider := newPruneMergedProvider
 	oldValidate := validatePruneMergedWorktree
+	oldValidateDirty := validatePruneMergedDirtyWorktree
 	oldRemove := removePruneMergedWorktree
+	oldInspectDirty := inspectPruneMergedDirty
+	oldConfirmDirty := confirmPruneMergedDirty
 	oldFindGlobalPaths := findPruneMergedGlobalPaths
 	oldProbeProtected := probePruneMergedProtectedSession
 	oldRunProtected := runPruneMergedProtectedOperation
@@ -1683,7 +1909,10 @@ func resetPruneMergedDeps(t *testing.T) {
 		inspectPruneMergedCandidates = oldInspect
 		newPruneMergedProvider = oldProvider
 		validatePruneMergedWorktree = oldValidate
+		validatePruneMergedDirtyWorktree = oldValidateDirty
 		removePruneMergedWorktree = oldRemove
+		inspectPruneMergedDirty = oldInspectDirty
+		confirmPruneMergedDirty = oldConfirmDirty
 		findPruneMergedGlobalPaths = oldFindGlobalPaths
 		probePruneMergedProtectedSession = oldProbeProtected
 		runPruneMergedProtectedOperation = oldRunProtected

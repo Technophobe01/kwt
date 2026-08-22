@@ -4,17 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"go.kenn.io/kwt/internal/git"
+	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
+	"go.kenn.io/kwt/service"
 )
 
 type inputMode int
@@ -56,6 +60,19 @@ type fastRowsMsg struct {
 	err      error
 }
 
+type inventoryMsg struct {
+	request InventoryRequest
+	result  InventoryResult
+	seq     int
+	err     error
+}
+
+type scopeFreshness struct {
+	ObservedAt time.Time
+	Current    bool
+	Diagnostic error
+}
+
 // fleetRowsMsg delivers the fleet overlay for the load identified by seq;
 // stale overlays (an intervening refresh bumped loadSeq) are dropped.
 type fleetRowsMsg struct {
@@ -71,11 +88,27 @@ type branchListMsg struct {
 }
 
 type actionDoneMsg struct {
-	message     string
-	err         error
-	refresh     bool
-	anchorPath  string
-	pendingPath string
+	message             string
+	err                 error
+	refresh             bool
+	globalStatusRefresh bool
+	anchorPath          string
+	pendingPath         string
+}
+
+type removalJob struct {
+	row              Row
+	force            bool
+	key              string
+	projectIdentity  string
+	workingDirectory string
+}
+
+type removalDoneMsg struct {
+	job     removalJob
+	err     error
+	removed bool
+	refresh bool
 }
 
 type openInTmuxReadyMsg struct {
@@ -91,39 +124,48 @@ type Model struct {
 	theme   theme
 	input   textinput.Model
 
-	rows                []Row
-	warnings            []string
-	cursor              int
-	filter              string
-	projectPerspective  string
-	projectFilter       string
-	projectSwitchCursor int
-	branches            []models.Branch
-	branchCursor        int
-	branchRow           Row
-	branchesLoading     bool
-	layouts             []string
-	selectedLayout      string
-	inputMode           inputMode
-	confirm             confirmState
-	fetching            bool
-	inventoryCurrent    bool
-	fleetPending        bool
-	fleetCancel         context.CancelFunc
-	loadSeq             int
-	pendingRefresh      bool
-	showHelp            bool
-	message             string
-	err                 error
-	stickyError         bool
-	handoff             Handoff
-	anchorPath          string
+	rows                    []Row
+	warnings                []string
+	cursor                  int
+	filter                  string
+	projectPerspective      string
+	projectFilter           string
+	projectSwitchCursor     int
+	branches                []models.Branch
+	branchCursor            int
+	branchRow               Row
+	branchesLoading         bool
+	layouts                 []string
+	selectedLayout          string
+	inputMode               inputMode
+	confirm                 confirmState
+	fetching                bool
+	fetchingRequest         InventoryRequest
+	inventorySeq            int
+	inventoryCurrent        bool
+	projectFresh            map[string]scopeFreshness
+	globalFresh             scopeFreshness
+	backgroundGlobalStarted bool
+	now                     func() time.Time
+	fleetPending            bool
+	fleetCancel             context.CancelFunc
+	loadSeq                 int
+	pendingRefresh          bool
+	showHelp                bool
+	message                 string
+	err                     error
+	stickyError             bool
+	handoff                 Handoff
+	anchorPath              string
 	// creating holds the destinations of worktree creations whose command has
 	// not returned yet. Git publishes a worktree before copy and setup commands
 	// finish, so a discovered row is not proof that creation is complete.
-	creating []string
-	width    int
-	height   int
+	creating            []string
+	removalQueue        []removalJob
+	removalActive       *removalJob
+	removalRefreshQueue []InventoryRequest
+	width               int
+	height              int
 }
 
 func NewModel(backend Backend, baseDir string) Model {
@@ -132,15 +174,17 @@ func NewModel(backend Backend, baseDir string) Model {
 	input.Prompt = ""
 
 	return Model{
-		backend:  backend,
-		baseDir:  baseDir,
-		keys:     newKeyMap(),
-		theme:    newTheme(),
-		input:    input,
-		layouts:  backend.LayoutNames(),
-		fetching: true,
-		width:    100,
-		height:   30,
+		backend:      backend,
+		baseDir:      baseDir,
+		keys:         newKeyMap(),
+		theme:        newTheme(),
+		input:        input,
+		layouts:      backend.LayoutNames(),
+		fetching:     true,
+		projectFresh: make(map[string]scopeFreshness),
+		now:          time.Now,
+		width:        100,
+		height:       30,
 	}
 }
 
@@ -180,7 +224,7 @@ func anchorRowIndex(rows []Row, anchorPath string) (int, bool) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.fetchFastRowsCmd()
+	return m.fetchInventoryCmd(InventoryRequest{Scope: InventoryCachedDashboard}, m.inventorySeq)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -191,12 +235,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case fastRowsMsg:
 		return m.applyFastRows(msg)
+	case inventoryMsg:
+		return m.applyInventory(msg)
 	case rowsMsg:
 		return m.applyRows(msg, true)
 	case fleetRowsMsg:
 		return m.applyFleetRows(msg)
 	case actionDoneMsg:
 		return m.applyActionDone(msg)
+	case removalDoneMsg:
+		return m.applyRemovalDone(msg)
 	case openInTmuxReadyMsg:
 		return m.applyOpenInTmuxReady(msg)
 	case branchListMsg:
@@ -298,6 +346,255 @@ func (m Model) applyFastRows(msg fastRowsMsg) (Model, tea.Cmd) {
 	return next, next.fetchRowsCmd()
 }
 
+func (m Model) applyInventory(msg inventoryMsg) (Model, tea.Cmd) {
+	if msg.seq != m.inventorySeq {
+		return m, nil
+	}
+	m.fetching = false
+	if msg.err != nil {
+		freshness := scopeFreshness{Diagnostic: msg.err}
+		switch msg.request.Scope {
+		case InventoryCurrentRepository:
+			project := projectFreshnessKey(msg.request.ProjectIdentity)
+			freshness.ObservedAt = m.projectFresh[project].ObservedAt
+			m.projectFresh[project] = freshness
+			m.message = projectRefreshErrorMessage(msg.err)
+		case InventoryCachedDashboard, InventoryCurrentDashboard:
+			freshness.ObservedAt = m.globalFresh.ObservedAt
+			m.globalFresh = freshness
+		}
+		if len(m.removalRefreshQueue) > 0 {
+			return m.startNextRemovalRefresh()
+		}
+		if msg.request.Scope == InventoryCurrentRepository && !m.backgroundGlobalStarted {
+			m.backgroundGlobalStarted = true
+			return m.startInventory(InventoryRequest{Scope: InventoryCurrentDashboard})
+		}
+		return m.startPendingRefresh()
+	}
+
+	switch msg.request.Scope {
+	case InventoryCachedDashboard:
+		m.globalFresh = scopeFreshness{ObservedAt: msg.result.ObservedAt}
+		m = m.replaceInventoryRows(msg.result.Rows, msg.result.Warnings, false)
+		if m.projectPerspective == "" && m.anchorPath != "" {
+			m.projectPerspective = launchPerspective(m.rows, m.anchorPath)
+		}
+		if m.projectPerspective != "" {
+			request := m.perspectiveRequest(m.projectPerspective)
+			if request.Scope == InventoryCurrentDashboard {
+				m.backgroundGlobalStarted = true
+			}
+			return m.startInventory(request)
+		}
+		m.backgroundGlobalStarted = true
+		return m.startInventory(InventoryRequest{
+			Scope: InventoryCurrentDashboard, CollectStatuses: true,
+		})
+	case InventoryCurrentRepository:
+		oldRows := m.filteredRows()
+		oldCursor := m.cursor
+		previousRows := m.rows
+		m.rows = mergeRepositoryRows(m.rows, msg.result.Rows, msg.request.ProjectIdentity)
+		m.rows = mergeCreatingRows(m.rows, previousRows, m.creating)
+		m.rows = m.applyRemovalState(m.rows)
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
+		m.warnings = msg.result.Warnings
+		m.projectFresh[projectFreshnessKey(msg.request.ProjectIdentity)] = scopeFreshness{
+			ObservedAt: msg.result.ObservedAt, Current: msg.result.Current,
+		}
+		m.inventoryCurrent = msg.result.Current
+		if len(m.removalRefreshQueue) > 0 {
+			return m.startNextRemovalRefresh()
+		}
+		if m.pendingRefresh {
+			return m.startPendingRefresh()
+		}
+		if !m.backgroundGlobalStarted {
+			m.backgroundGlobalStarted = true
+			return m.startInventory(InventoryRequest{Scope: InventoryCurrentDashboard})
+		}
+		return m.startFleetMerge()
+	case InventoryCurrentDashboard:
+		if msg.request.CollectStatuses {
+			m = m.replaceInventoryRows(msg.result.Rows, msg.result.Warnings, msg.result.Current)
+			m = m.markProjectsFresh(msg.result.Rows, msg.result.ObservedAt, msg.result.Current)
+		} else {
+			m = m.mergeStructuralDashboard(msg.result.Rows, msg.result.Warnings)
+		}
+		m.globalFresh = scopeFreshness{ObservedAt: msg.result.ObservedAt, Current: msg.result.Current}
+		m.inventoryCurrent = msg.result.Current
+		if m.pendingRefresh {
+			return m.startPendingRefresh()
+		}
+		return m.startFleetMerge()
+	default:
+		m.err = fmt.Errorf("unknown inventory scope %d", msg.request.Scope)
+		return m, nil
+	}
+}
+
+func projectRefreshErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if service.IsCode(err, service.InteractionRequired) {
+		return "project config requires trust; run kwt list there once"
+	}
+	return err.Error()
+}
+
+func (m Model) replaceInventoryRows(rows []Row, warnings []string, current bool) Model {
+	oldRows := m.filteredRows()
+	oldCursor := m.cursor
+	hadRows := len(m.rows) > 0
+	rows = mergeCreatingRows(append([]Row(nil), rows...), m.rows, m.creating)
+	rows = m.applyRemovalState(rows)
+	sortRows(rows)
+	m.rows = rows
+	m.warnings = warnings
+	m.inventoryCurrent = current
+	if !hadRows && m.anchorPath != "" {
+		m.projectPerspective = launchPerspective(rows, m.anchorPath)
+	}
+	filtered := m.filteredRows()
+	if m.anchorPath != "" {
+		if index, ok := anchorRowIndex(filtered, m.anchorPath); ok {
+			m.cursor = index
+		} else {
+			m.cursor = anchorCursorByPath(oldRows, oldCursor, filtered)
+		}
+		if hadRows || len(rows) > 0 {
+			m.anchorPath = ""
+		}
+	} else {
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, filtered)
+	}
+	m.cursor = clampCursor(m.cursor, len(filtered))
+	m = m.cancelFleetMerge()
+	m.fleetPending = false
+	return m
+}
+
+func (m Model) markProjectsFresh(rows []Row, observedAt time.Time, current bool) Model {
+	if m.projectFresh == nil {
+		m.projectFresh = make(map[string]scopeFreshness)
+	}
+	for _, row := range rows {
+		if row.Entry == nil {
+			continue
+		}
+		project := rowProjectKey(row)
+		if project == "" {
+			continue
+		}
+		m.projectFresh[projectFreshnessKey(project)] = scopeFreshness{
+			ObservedAt: observedAt, Current: current,
+		}
+	}
+	return m
+}
+
+func (m Model) mergeStructuralDashboard(rows []Row, warnings []string) Model {
+	previousByPath := make(map[string]Row)
+	for _, row := range m.rows {
+		if m.projectFresh[projectFreshnessKey(rowProjectKey(row))].Current && row.Status != nil {
+			previousByPath[pathIdentity(rowPath(row))] = row
+		}
+	}
+	markStale := func(row Row) {
+		if row.Entry == nil {
+			return
+		}
+		project := projectFreshnessKey(rowProjectKey(row))
+		if project == "" {
+			return
+		}
+		freshness := m.projectFresh[project]
+		freshness.Current = false
+		m.projectFresh[project] = freshness
+	}
+	for index := range rows {
+		previous, ok := previousByPath[pathIdentity(rowPath(rows[index]))]
+		if !ok {
+			markStale(rows[index])
+			continue
+		}
+		if sameCheckout(previous, rows[index]) {
+			rows[index].Status = previous.Status
+			continue
+		}
+		markStale(previous)
+		markStale(rows[index])
+	}
+	return m.replaceInventoryRows(rows, warnings, false)
+}
+
+func sameGeneration(left, right Row) bool {
+	if left.Entry == nil || right.Entry == nil {
+		return false
+	}
+	return left.Entry.Generation == right.Entry.Generation
+}
+
+func (m Model) applyRemovalState(rows []Row) []Row {
+	removing := make(map[string]bool, len(m.removalQueue)+1)
+	if m.removalActive != nil {
+		removing[m.removalActive.key] = true
+	}
+	for _, job := range m.removalQueue {
+		removing[job.key] = true
+	}
+	for index := range rows {
+		rows[index].Removing = removing[removalKey(rows[index])]
+	}
+	return rows
+}
+
+func (m Model) repositoryRequest(project string) InventoryRequest {
+	workingDirectory := ""
+	for _, row := range m.rows {
+		if equalProjectKey(rowProjectKey(row), project) && row.Entry != nil {
+			workingDirectory = row.Entry.Path
+			if row.Entry.IsMain {
+				break
+			}
+		}
+	}
+	return InventoryRequest{
+		Scope: InventoryCurrentRepository, WorkingDirectory: workingDirectory,
+		ProjectIdentity: project, CollectStatuses: true,
+	}
+}
+
+func (m Model) perspectiveRequest(project string) InventoryRequest {
+	request := m.repositoryRequest(project)
+	if request.WorkingDirectory == "" {
+		return InventoryRequest{Scope: InventoryCurrentDashboard}
+	}
+	return request
+}
+
+func (m Model) startInventory(request InventoryRequest) (Model, tea.Cmd) {
+	m.loadSeq++
+	m.fleetPending = false
+	m = m.cancelFleetMerge()
+	m.inventorySeq++
+	m.fetching = true
+	m.fetchingRequest = request
+	return m, m.fetchInventoryCmd(request, m.inventorySeq)
+}
+
+func (m Model) startFleetMerge() (Model, tea.Cmd) {
+	if len(m.rows) == 0 {
+		return m, nil
+	}
+	m.fleetPending = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.fleetCancel = cancel
+	return m, m.fleetRowsCmd(ctx, m.loadSeq, m.rows)
+}
+
 // carryEnrichment keeps what a fast load cannot know. ListFast is authoritative
 // about which worktrees exist locally, but it collects no statuses and no hub
 // state, so rows it lists keep the status and fleet overlay the last full load
@@ -359,6 +656,64 @@ func carryEnrichment(fast, previous []Row) []Row {
 	return rows
 }
 
+func mergeRepositoryRows(previous, current []Row, project string) []Row {
+	oldByCheckout := make(map[string]Row)
+	merged := make([]Row, 0, len(previous)+len(current))
+	for _, row := range previous {
+		if equalProjectKey(rowProjectKey(row), project) {
+			oldByCheckout[checkoutMergeKey(row)] = row
+			continue
+		}
+		merged = append(merged, row)
+	}
+	for _, row := range current {
+		if !equalProjectKey(rowProjectKey(row), project) {
+			continue
+		}
+		if old, ok := oldByCheckout[checkoutMergeKey(row)]; ok {
+			row = preserveDashboardFields(old, row)
+		}
+		merged = append(merged, row)
+	}
+	sortRows(merged)
+	return merged
+}
+
+func equalProjectKey(left, right string) bool {
+	return projectFreshnessKey(left) == projectFreshnessKey(right) && left != "" && right != ""
+}
+
+func projectFreshnessKey(project string) string {
+	return url.FoldRepositoryIdentity(project)
+}
+
+func checkoutMergeKey(row Row) string {
+	generation := ""
+	if row.Entry != nil {
+		generation = row.Entry.Generation
+	}
+	return pathIdentity(rowPath(row)) + "\x00" + generation
+}
+
+func preserveDashboardFields(previous, current Row) Row {
+	if previous.Entry == nil || current.Entry == nil {
+		return current
+	}
+	entry := *current.Entry
+	if entry.RepositoryURL == "" {
+		entry.RepositoryURL = previous.Entry.RepositoryURL
+	}
+	if entry.RepositoryInfo == nil && previous.Entry.RepositoryInfo != nil {
+		info := *previous.Entry.RepositoryInfo
+		entry.RepositoryInfo = &info
+	}
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = previous.Entry.CreatedAt
+	}
+	current.Entry = &entry
+	return current
+}
+
 // remoteProjection reduces a row that was local to what the hub still says about
 // it, for use when the fast load no longer finds it on disk. Deleting the local
 // worktree of something that also lives on other hosts should not hide those
@@ -388,19 +743,15 @@ func remoteProjection(row Row) (Row, bool) {
 	return Row{Fleet: &fleetInfo}, true
 }
 
-// sameCheckout reports whether two rows sharing a path describe the same
-// checkout. A worktree that switched branches keeps its path, so matching on
-// path alone would hand the new branch the previous one's status and hub state.
+// sameCheckout reports whether two rows describe the same local checkout.
+// Branch, generation, and HEAD can all change while the path stays fixed.
 func sameCheckout(before, now Row) bool {
-	branch := rowBranch(now)
-	if branch != rowBranch(before) {
-		return false
+	if before.Entry == nil || now.Entry == nil {
+		return before.Entry == nil && now.Entry == nil
 	}
-	if branch == "" || branch == "HEAD" {
-		// Detached: the commit is what distinguishes one checkout from another.
-		return entryCommit(before) == entryCommit(now)
-	}
-	return true
+	return sameGeneration(before, now) &&
+		rowBranch(before) == rowBranch(now) &&
+		entryCommit(before) == entryCommit(now)
 }
 
 func entryCommit(row Row) string {
@@ -433,6 +784,7 @@ func (m Model) applyRows(msg rowsMsg, refreshLayouts bool) (Model, tea.Cmd) {
 	sortRows(rows)
 	m.rows = rows
 	m.inventoryCurrent = true
+	m = m.markProjectsFresh(rows, m.now(), true)
 	if !hadRows && m.anchorPath != "" {
 		m.projectPerspective = launchPerspective(rows, m.anchorPath)
 	}
@@ -489,16 +841,31 @@ func (m Model) applyFleetRows(msg fleetRowsMsg) (Model, tea.Cmd) {
 	}
 	m.fleetPending = false
 	m = m.cancelFleetMerge()
-	m.warnings = msg.warnings
+	m.warnings = appendUniqueStrings(m.warnings, msg.warnings...)
 
 	oldRows := m.filteredRows()
 	oldCursor := m.cursor
 	rows := append([]Row(nil), msg.rows...)
 	rows = mergeCreatingRows(rows, m.rows, m.creating)
 	sortRows(rows)
-	m.rows = rows
+	m.rows = m.applyRemovalState(rows)
 	m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
 	return m, nil
+}
+
+func appendUniqueStrings(existing []string, additions ...string) []string {
+	seen := make(map[string]bool, len(existing)+len(additions))
+	result := append([]string(nil), existing...)
+	for _, value := range existing {
+		seen[value] = true
+	}
+	for _, value := range additions {
+		if value != "" && !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
 }
 
 func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
@@ -524,6 +891,17 @@ func (m Model) applyActionDone(msg actionDoneMsg) (Model, tea.Cmd) {
 		if msg.anchorPath != "" {
 			m.anchorPath = msg.anchorPath
 		}
+	}
+	if msg.globalStatusRefresh {
+		m.inventoryCurrent = false
+		m.globalFresh.Current = false
+		for project, freshness := range m.projectFresh {
+			freshness.Current = false
+			m.projectFresh[project] = freshness
+		}
+		return m.startInventory(InventoryRequest{
+			Scope: InventoryCurrentDashboard, CollectStatuses: true,
+		})
 	}
 	if msg.refresh && m.fetching {
 		m.pendingRefresh = true
@@ -588,12 +966,25 @@ func (m Model) startPendingRefresh() (Model, tea.Cmd) {
 // for a previous generation is cancelled, and its result dropped if it
 // arrives anyway.
 func (m Model) startFetch() (Model, tea.Cmd) {
-	m.loadSeq++
-	m.fetching = true
 	m.inventoryCurrent = false
-	m.fleetPending = false
-	m = m.cancelFleetMerge()
-	return m, m.fetchFastRowsCmd()
+	if m.projectPerspective != "" {
+		request := m.perspectiveRequest(m.projectPerspective)
+		if request.Scope == InventoryCurrentRepository {
+			project := projectFreshnessKey(m.projectPerspective)
+			freshness := m.projectFresh[project]
+			freshness.Current = false
+			m.projectFresh[project] = freshness
+		} else {
+			m.globalFresh.Current = false
+		}
+		return m.startInventory(request)
+	}
+	m.globalFresh.Current = false
+	for project, freshness := range m.projectFresh {
+		freshness.Current = false
+		m.projectFresh[project] = freshness
+	}
+	return m.startInventory(InventoryRequest{Scope: InventoryCurrentDashboard, CollectStatuses: true})
 }
 
 // mergeCreatingRows keeps pending creations visible across a listing that has
@@ -695,14 +1086,26 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.inputMode != inputNone {
 		return m.handleInputKey(msg)
 	}
-	if !m.inventoryCurrent && (key.Matches(msg, m.keys.Open) ||
+	if m.selectedRow().Removing && (key.Matches(msg, m.keys.Open) ||
 		key.Matches(msg, m.keys.New) ||
 		key.Matches(msg, m.keys.Existing) ||
 		key.Matches(msg, m.keys.Delete) ||
 		key.Matches(msg, m.keys.Sync) ||
 		key.Matches(msg, m.keys.Shell) ||
 		key.Matches(msg, m.keys.Kill)) {
-		m.message = "inventory is refreshing; wait for current results"
+		m.message = "worktree removal is in progress"
+		return m, nil
+	}
+	if (key.Matches(msg, m.keys.New) ||
+		key.Matches(msg, m.keys.Existing) ||
+		key.Matches(msg, m.keys.Delete) ||
+		key.Matches(msg, m.keys.Sync) ||
+		key.Matches(msg, m.keys.Kill)) && !m.selectedScopeCurrent() {
+		if m.selectedRow().Workspace != nil {
+			m.message = "global inventory is refreshing; wait for current results"
+		} else {
+			m.message = "project inventory is refreshing; wait for current results"
+		}
 		return m, nil
 	}
 
@@ -774,10 +1177,29 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			} else {
 				m.cursor = clampCursor(m.cursor, len(m.filteredRows()))
 			}
+			return m.startFetch()
 		}
 	}
 
 	return m, nil
+}
+
+func (m Model) selectedScopeCurrent() bool {
+	return m.rowScopeCurrent(m.selectedRow())
+}
+
+func (m Model) rowScopeCurrent(row Row) bool {
+	if row.Workspace != nil || row.Entry == nil {
+		if !m.globalFresh.ObservedAt.IsZero() || m.globalFresh.Diagnostic != nil {
+			return m.globalFresh.Current
+		}
+		return m.inventoryCurrent
+	}
+	project := rowProjectKey(row)
+	if freshness, ok := m.projectFresh[projectFreshnessKey(project)]; ok {
+		return freshness.Current
+	}
+	return false
 }
 
 func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -792,8 +1214,12 @@ func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		selectedPath := rowPath(m.selectedRow())
 		wasFilter := m.inputMode == inputFilter
 		wasProjectFilter := m.inputMode == inputProjectFilter
+		wasNewBranch := m.inputMode == inputNewBranch
 		m.inputMode = inputNone
 		m.input.Blur()
+		if wasNewBranch {
+			m.branchRow = Row{}
+		}
 		if wasFilter {
 			m.filter = ""
 			m.input.SetValue("")
@@ -818,14 +1244,20 @@ func (m Model) handleInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		switch m.inputMode {
 		case inputNewBranch:
 			branch := strings.TrimSpace(m.input.Value())
+			target := m.branchRow
 			m.inputMode = inputNone
 			m.input.Blur()
 			m.input.SetValue("")
+			m.branchRow = Row{}
 			if branch == "" {
 				m.message = "branch name required"
 				return m, nil
 			}
-			row := m.selectedRow()
+			row, ok := m.currentBranchTarget(target)
+			if !ok {
+				m.message = "project inventory changed; review the current row and try again"
+				return m, nil
+			}
 			return m.startCreateWorktree(row, branch, "", branch)
 		case inputFilter:
 			m.inputMode = inputNone
@@ -979,12 +1411,17 @@ func (m Model) handleExistingBranchKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		branch := options[clampCursor(m.branchCursor, len(options))]
-		row := m.branchRow
+		target := m.branchRow
 		m.inputMode = inputNone
 		m.input.Blur()
 		m.input.SetValue("")
 		m.branches = nil
 		m.branchRow = Row{}
+		row, ok := m.currentBranchTarget(target)
+		if !ok {
+			m.message = "project inventory changed; review the current row and try again"
+			return m, nil
+		}
 		return m.startCreateWorktree(
 			row,
 			branch.Name,
@@ -1057,9 +1494,15 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	kind := m.confirm.kind
 	force := m.confirm.force
 	m.confirm = confirmState{}
+	current, ok := m.currentConfirmationRow(row)
+	if !ok {
+		m.message = "selection changed; review the current row and try again"
+		return m, nil
+	}
+	row = current
 	switch kind {
 	case confirmDelete:
-		return m, m.removeWorktreeCmd(row, force)
+		return m.enqueueRemoval(row, force)
 	case confirmKill:
 		return m, m.killSessionCmd(row)
 	case confirmUnregister:
@@ -1067,6 +1510,48 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) currentConfirmationRow(confirmed Row) (Row, bool) {
+	for _, row := range m.rows {
+		if !sameConfirmationTarget(confirmed, row) {
+			continue
+		}
+		if !m.rowScopeCurrent(row) ||
+			!sameCheckout(confirmed, row) ||
+			row.SessionName != confirmed.SessionName ||
+			row.TmuxEndpoint != confirmed.TmuxEndpoint ||
+			row.SessionLive != confirmed.SessionLive {
+			return Row{}, false
+		}
+		return row, true
+	}
+	return Row{}, false
+}
+
+func (m Model) currentBranchTarget(target Row) (Row, bool) {
+	if target.Entry == nil {
+		return Row{}, false
+	}
+	for _, row := range m.rows {
+		if row.Entry == nil ||
+			pathIdentity(rowPath(row)) != pathIdentity(rowPath(target)) ||
+			!sameGeneration(target, row) ||
+			!equalProjectKey(rowProjectKey(target), rowProjectKey(row)) ||
+			!m.rowScopeCurrent(row) {
+			continue
+		}
+		return row, true
+	}
+	return Row{}, false
+}
+
+func sameConfirmationTarget(before, now Row) bool {
+	if (before.Entry == nil) != (now.Entry == nil) ||
+		(before.Workspace == nil) != (now.Workspace == nil) {
+		return false
+	}
+	return removalKey(before) == removalKey(now)
 }
 
 func (m Model) openSelected() (Model, tea.Cmd) {
@@ -1082,6 +1567,17 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 		}
 		m.message = "no worktree selected"
 		return m, nil
+	}
+	if !m.selectedScopeCurrent() {
+		if !row.SessionLive {
+			m.message = "project inventory is refreshing; starting a workspace waits for current results"
+			return m, nil
+		}
+		if m.backend.InsideTmux() {
+			return m, m.openExistingInTmuxCmd(row)
+		}
+		m.handoff = Handoff{Kind: HandoffAttach, Row: row, ExistingOnly: true}
+		return m, quitCmd()
 	}
 	if m.backend.InsideTmux() {
 		return m, m.openInTmuxCmd(row)
@@ -1100,8 +1596,29 @@ func (m Model) shellSelected() (Model, tea.Cmd) {
 		m.message = "sync this worktree before opening a shell"
 		return m, nil
 	}
+	if err := validateShellDirectory(rowPath(row)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			m.message = "selected worktree no longer exists"
+		} else {
+			m.message = fmt.Sprintf("cannot open shell: %v", err)
+		}
+		return m, nil
+	}
 	m.handoff = Handoff{Kind: HandoffShell, Row: row}
 	return m, quitCmd()
+}
+
+var validateShellDirectory = defaultValidateShellDirectory
+
+func defaultValidateShellDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("selected path is not a directory")
+	}
+	return nil
 }
 
 func (m Model) cycleLayout() (Model, tea.Cmd) {
@@ -1143,6 +1660,7 @@ func (m Model) startNewBranch() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.inputMode = inputNewBranch
+	m.branchRow = row
 	m.input.Prompt = fmt.Sprintf("new branch in %s: ", rowRepoName(row))
 	m.input.SetValue("")
 	return m, m.input.Focus()
@@ -1226,7 +1744,7 @@ func (m Model) chooseProjectPerspective() (Model, tea.Cmd) {
 	m.input.Blur()
 	m.input.SetValue("")
 	m.cursor = m.cursorAfterProjectChange(selectedPath)
-	return m, nil
+	return m.startFetch()
 }
 
 func (m Model) cursorAfterProjectChange(selectedPath string) int {
@@ -1323,11 +1841,11 @@ func (m Model) fetchRowsCmd() tea.Cmd {
 	}
 }
 
-func (m Model) fetchFastRowsCmd() tea.Cmd {
+func (m Model) fetchInventoryCmd(request InventoryRequest, seq int) tea.Cmd {
 	backend := m.backend
 	return func() tea.Msg {
-		rows, warnings, err := backend.ListFast(context.Background())
-		return fastRowsMsg{rows: rows, warnings: warnings, err: err}
+		result, err := backend.LoadInventory(context.Background(), request)
+		return inventoryMsg{request: request, result: result, seq: seq, err: err}
 	}
 }
 
@@ -1389,23 +1907,141 @@ func (m Model) materializeWorktreeCmd(row Row) tea.Cmd {
 			return actionDoneMsg{err: err}
 		}
 		return actionDoneMsg{
-			message:    fmt.Sprintf("synced %s", rowLabel(row)),
-			refresh:    true,
-			anchorPath: path,
+			message:             fmt.Sprintf("synced %s", rowLabel(row)),
+			refresh:             true,
+			globalStatusRefresh: true,
+			anchorPath:          path,
 		}
 	}
 }
 
-func (m Model) removeWorktreeCmd(row Row, force bool) tea.Cmd {
+func (m Model) enqueueRemoval(row Row, force bool) (Model, tea.Cmd) {
+	key := removalKey(row)
+	if key == "" || m.removalQueued(key) {
+		m.message = "worktree removal is already queued"
+		return m, nil
+	}
+	project := rowProjectKey(row)
+	job := removalJob{
+		row: row, force: force, key: key, projectIdentity: project,
+		workingDirectory: m.removalRefreshAnchor(project, rowPath(row)),
+	}
+	for index := range m.rows {
+		if removalKey(m.rows[index]) == key {
+			m.rows[index].Removing = true
+		}
+	}
+	m.removalQueue = append(m.removalQueue, job)
+	return m.startNextRemoval()
+}
+
+func removalKey(row Row) string {
+	generation := ""
+	if row.Entry != nil {
+		generation = row.Entry.Generation
+	}
+	return pathIdentity(rowPath(row)) + "\x00" + generation
+}
+
+func (m Model) removalQueued(key string) bool {
+	if m.removalActive != nil && m.removalActive.key == key {
+		return true
+	}
+	for _, job := range m.removalQueue {
+		if job.key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) removalRefreshAnchor(project, fallback string) string {
+	for _, row := range m.rows {
+		if row.Entry != nil && row.Entry.IsMain && equalProjectKey(rowProjectKey(row), project) {
+			return row.Entry.Path
+		}
+	}
+	return fallback
+}
+
+func (m Model) startNextRemoval() (Model, tea.Cmd) {
+	if m.removalActive != nil || len(m.removalQueue) == 0 {
+		return m, nil
+	}
+	job := m.removalQueue[0]
+	m.removalQueue = m.removalQueue[1:]
+	m.removalActive = &job
+	return m, m.removeWorktreeCmd(job)
+}
+
+func (m Model) removeWorktreeCmd(job removalJob) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.backend.RemoveWorktree(context.Background(), row, force); err != nil {
-			return actionDoneMsg{
-				err:     err,
-				refresh: git.WorktreeWasRemoved(err) || actionRefreshRequired(err),
+		err := m.backend.RemoveWorktree(context.Background(), job.row, job.force)
+		return removalDoneMsg{
+			job: job, err: err,
+			removed: err == nil || git.WorktreeWasRemoved(err),
+			refresh: err == nil || git.WorktreeWasRemoved(err) || actionRefreshRequired(err),
+		}
+	}
+}
+
+func (m Model) applyRemovalDone(msg removalDoneMsg) (Model, tea.Cmd) {
+	m.removalActive = nil
+	if msg.removed {
+		m.inventorySeq++
+		m.fetching = false
+		m.loadSeq++
+		m.fleetPending = false
+		m = m.cancelFleetMerge()
+		oldRows := m.filteredRows()
+		oldCursor := m.cursor
+		m.rows = removeRowByPath(m.rows, rowPath(msg.job.row))
+		m.cursor = anchorCursorByPath(oldRows, oldCursor, m.filteredRows())
+	} else {
+		for index := range m.rows {
+			if removalKey(m.rows[index]) == msg.job.key {
+				m.rows[index].Removing = false
 			}
 		}
-		return actionDoneMsg{message: fmt.Sprintf("removed %s", rowLabel(row)), refresh: true}
 	}
+	if msg.err != nil {
+		m.err = msg.err
+		m.stickyError = msg.refresh
+		m.message = ""
+	} else {
+		m.message = fmt.Sprintf("removed %s", rowLabel(msg.job.row))
+	}
+	projectIdentity := msg.job.projectIdentity
+	if projectIdentity == "" {
+		projectIdentity = rowProjectKey(msg.job.row)
+	}
+	workingDirectory := msg.job.workingDirectory
+	if workingDirectory == "" {
+		workingDirectory = rowPath(msg.job.row)
+	}
+	if msg.refresh && projectIdentity != "" {
+		m.removalRefreshQueue = append(m.removalRefreshQueue, InventoryRequest{
+			Scope: InventoryCurrentRepository, ProjectIdentity: projectIdentity,
+			WorkingDirectory: workingDirectory, CollectStatuses: true,
+		})
+	}
+	if next, cmd := m.startNextRemoval(); cmd != nil {
+		return next, cmd
+	}
+	return m.startNextRemovalRefresh()
+}
+
+func (m Model) startNextRemovalRefresh() (Model, tea.Cmd) {
+	if len(m.removalRefreshQueue) == 0 {
+		return m, nil
+	}
+	request := m.removalRefreshQueue[0]
+	m.removalRefreshQueue = m.removalRefreshQueue[1:]
+	project := projectFreshnessKey(request.ProjectIdentity)
+	freshness := m.projectFresh[project]
+	freshness.Current = false
+	m.projectFresh[project] = freshness
+	return m.startInventory(request)
 }
 
 func actionRefreshRequired(err error) bool {
@@ -1435,6 +2071,17 @@ func (m Model) openInTmuxCmd(row Row) tea.Cmd {
 	layoutName := m.selectedLayout
 	return func() tea.Msg {
 		process, err := m.backend.OpenInTmux(context.Background(), row, layoutName)
+		return openInTmuxReadyMsg{
+			process: process,
+			message: fmt.Sprintf("attached %s", rowLabel(row)),
+			err:     err,
+		}
+	}
+}
+
+func (m Model) openExistingInTmuxCmd(row Row) tea.Cmd {
+	return func() tea.Msg {
+		process, err := m.backend.OpenExistingInTmux(context.Background(), row)
 		return openInTmuxReadyMsg{
 			process: process,
 			message: fmt.Sprintf("attached %s", rowLabel(row)),
@@ -1573,13 +2220,31 @@ func (m Model) renderStatusLine() string {
 		return m.input.View()
 	case m.message != "":
 		return m.theme.success.Render(m.message)
+	case m.globalFresh.Diagnostic != nil:
+		return m.theme.warning.Render(m.globalFreshnessDiagnostic())
 	default:
 		return m.renderSelectionDetails()
 	}
 }
 
+func (m Model) globalFreshnessDiagnostic() string {
+	age := "unknown age"
+	if !m.globalFresh.ObservedAt.IsZero() {
+		duration := max(m.now().Sub(m.globalFresh.ObservedAt), 0)
+		if duration < time.Minute {
+			age = fmt.Sprintf("%ds old", int(duration/time.Second))
+		} else {
+			age = fmt.Sprintf("%dm old", int(duration/time.Minute))
+		}
+	}
+	return fmt.Sprintf("global inventory %s · %v", age, m.globalFresh.Diagnostic)
+}
+
 func (m Model) renderSelectionDetails() string {
 	row := m.selectedRow()
+	if row.Removing {
+		return fmt.Sprintf("removing %s\n%s", rowLabel(row), abbreviateHome(rowPath(row)))
+	}
 	if row.Creating {
 		return fmt.Sprintf("creating %s\n%s", rowLabel(row), abbreviateHome(rowPath(row)))
 	}

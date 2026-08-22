@@ -6,13 +6,200 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/git"
 	"go.kenn.io/kwt/internal/url"
 	"go.kenn.io/kwt/pkg/models"
 )
+
+func TestParsePorcelainV2CountsFilesAndBranchState(t *testing.T) {
+	raw := strings.Join([]string{
+		"# branch.oid 0123456789abcdef",
+		"# branch.head topic",
+		"# branch.upstream origin/topic",
+		"# branch.ab +2 -3",
+		"1 .M N... 100644 100644 100644 aaaaaaa aaaaaaa tracked.txt",
+		"1 A. N... 000000 100644 100644 0000000 bbbbbbb staged.txt",
+		"? untracked/one.txt",
+		"? untracked/two.txt",
+	}, "\x00") + "\x00"
+
+	got, err := parsePorcelainV2(raw)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.GitStatus.Modified)
+	assert.Equal(t, 1, got.GitStatus.Staged)
+	assert.Equal(t, 2, got.GitStatus.Untracked)
+	assert.Equal(t, 2, got.GitStatus.Ahead)
+	assert.Equal(t, 3, got.GitStatus.Behind)
+	assert.Equal(t, []string{"tracked.txt", "staged.txt", "untracked/one.txt", "untracked/two.txt"}, got.Paths)
+}
+
+func TestParsePorcelainV2CountsUnstagedRenameCopyAndTypeChangeAsModified(t *testing.T) {
+	tests := []struct {
+		name   string
+		record string
+	}{
+		{
+			name:   "rename",
+			record: "2 .R N... 100644 100644 100644 aaaaaaa aaaaaaa R100 renamed.txt\x00original.txt",
+		},
+		{
+			name:   "copy",
+			record: "2 .C N... 100644 100644 100644 aaaaaaa aaaaaaa C100 copied.txt\x00original.txt",
+		},
+		{
+			name:   "type change",
+			record: "1 .T N... 100644 100644 120000 aaaaaaa bbbbbbb link.txt",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePorcelainV2(tt.record + "\x00")
+			require.NoError(t, err)
+			assert.Equal(t, 1, got.GitStatus.Modified)
+			assert.Equal(t, models.WorktreeStatusModified,
+				NewStatusCollectorWithOptions(StatusCollectorOptions{}).
+					determineWorktreeState(&got.GitStatus))
+		})
+	}
+}
+
+func TestCollectPorcelainUsesUAllForPerFileUntrackedCount(t *testing.T) {
+	repo := newStatusTestRepositoryAt(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "new"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "new", "one"), []byte("1"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "new", "two"), []byte("2"), 0o644))
+
+	got, err := NewStatusCollectorWithOptions(StatusCollectorOptions{}).
+		collectPorcelain(context.Background(), git.New(repo))
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.GitStatus.Untracked)
+}
+
+func TestParsePorcelainV2WithoutUpstreamDefaultsAheadBehindToZero(t *testing.T) {
+	got, err := parsePorcelainV2("# branch.oid abc\x00# branch.head main\x00")
+	require.NoError(t, err)
+	assert.Zero(t, got.GitStatus.Ahead)
+	assert.Zero(t, got.GitStatus.Behind)
+}
+
+func TestCollectAllBoundsWorkersAndDegradesOneRow(t *testing.T) {
+	var active atomic.Int32
+	var maximum atomic.Int32
+	collect := func(_ context.Context, wt *models.Worktree) (*models.WorktreeStatus, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			seen := maximum.Load()
+			if current <= seen || maximum.CompareAndSwap(seen, current) {
+				break
+			}
+		}
+		if strings.Contains(wt.Path, "broken") {
+			return nil, errors.New("status unavailable")
+		}
+		return &models.WorktreeStatus{Path: wt.Path, Status: models.WorktreeStatusClean}, nil
+	}
+
+	result, err := collectWorktrees(context.Background(), 2, []*models.Worktree{
+		{Path: "/one"}, {Path: "/broken"}, {Path: "/three"},
+	}, collect)
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, maximum.Load(), int32(2))
+	require.Len(t, result.Statuses, 3)
+	assert.Equal(t, models.WorktreeStatusUnknown, result.Statuses[1].Status)
+	require.Len(t, result.Diagnostics, 1)
+	assert.Equal(t, "/broken", result.Diagnostics[0].Path)
+}
+
+func TestLastActivityUsesRootHeadAndChangedFilesOnly(t *testing.T) {
+	repo := newStatusTestRepositoryAt(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	rootTime := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	changedTime := rootTime.Add(2 * time.Hour)
+	require.NoError(t, os.Chtimes(repo, rootTime, rootTime))
+	changed := filepath.Join(repo, "README.md")
+	require.NoError(t, os.WriteFile(changed, []byte("changed"), 0o644))
+	require.NoError(t, os.Chtimes(changed, changedTime, changedTime))
+
+	result, err := NewStatusCollectorWithOptions(StatusCollectorOptions{Workers: 1}).
+		CollectAll(context.Background(), []*models.Worktree{{Path: repo, Branch: "main"}})
+
+	require.NoError(t, err)
+	assert.Equal(t, changedTime, result.Statuses[0].LastActivity)
+}
+
+func TestLastActivityUsesNewWorktreeRootForCleanOldHead(t *testing.T) {
+	repo := newStatusTestRepositoryAt(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	rootTime := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(repo, rootTime, rootTime))
+
+	result, err := NewStatusCollectorWithOptions(StatusCollectorOptions{Workers: 1}).
+		CollectAll(context.Background(), []*models.Worktree{{Path: repo, Branch: "main"}})
+
+	require.NoError(t, err)
+	assert.Equal(t, rootTime, result.Statuses[0].LastActivity)
+}
+
+func TestLastActivityBoundsHeadLookup(t *testing.T) {
+	root := t.TempDir()
+	rootInfo, err := os.Stat(root)
+	require.NoError(t, err)
+	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{Workers: 1})
+	collector.activityTimeout = 20 * time.Millisecond
+	collector.runHead = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	started := time.Now()
+	got, err := collector.lastActivity(context.Background(), root, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, rootInfo.ModTime().UTC(), got)
+	assert.Less(t, time.Since(started), time.Second)
+}
+
+func TestLastActivityUsesParentDirectoryForDeletedNestedFile(t *testing.T) {
+	repo := newStatusTestRepositoryAt(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	nested := filepath.Join(repo, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	tracked := filepath.Join(nested, "tracked.txt")
+	require.NoError(t, os.WriteFile(tracked, []byte("tracked"), 0o644))
+	runStatusTestGit(t, repo, "add", "nested/tracked.txt")
+	runStatusTestGit(t, repo, "commit", "-m", "add nested file")
+	root, err := os.Stat(repo)
+	require.NoError(t, err)
+	recent := root.ModTime().UTC().Add(time.Hour)
+	require.NoError(t, os.Remove(tracked))
+	require.NoError(t, os.Chtimes(nested, recent, recent))
+
+	result, err := NewStatusCollectorWithOptions(StatusCollectorOptions{Workers: 1}).
+		CollectAll(context.Background(), []*models.Worktree{{Path: repo, Branch: "main"}})
+
+	require.NoError(t, err)
+	assert.Equal(t, recent, result.Statuses[0].LastActivity)
+}
+
+func TestCollectAllCanceledContextReturnsNoPartialCollection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := NewStatusCollectorWithOptions(StatusCollectorOptions{Workers: 1}).
+		CollectAll(ctx, []*models.Worktree{{Path: t.TempDir()}})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, result.Statuses)
+	assert.Empty(t, result.Diagnostics)
+}
 
 func TestCollectAllMarksCurrentPathByDirectoryBoundary(t *testing.T) {
 	root := t.TempDir()
@@ -23,15 +210,15 @@ func TestCollectAllMarksCurrentPathByDirectoryBoundary(t *testing.T) {
 	changeDir(t, mainFixPath)
 
 	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{})
-	statuses, err := collector.CollectAll(context.Background(), []*models.Worktree{
+	result, err := collector.CollectAll(context.Background(), []*models.Worktree{
 		{Path: mainPath, Branch: "main"},
 		{Path: mainFixPath, Branch: "main-fix"},
 	})
 
 	require.NoError(t, err)
-	require.Len(t, statuses, 2)
-	assert.False(t, statuses[0].IsCurrent)
-	assert.True(t, statuses[1].IsCurrent)
+	require.Len(t, result.Statuses, 2)
+	assert.False(t, result.Statuses[0].IsCurrent)
+	assert.True(t, result.Statuses[1].IsCurrent)
 }
 
 func TestCollectAllUsesRemoteFullPathForNestedRepository(t *testing.T) {
@@ -47,13 +234,13 @@ func TestCollectAllUsesRemoteFullPathForNestedRepository(t *testing.T) {
 	runStatusTestGit(t, worktreePath, "commit", "-m", "Initial commit")
 
 	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{BaseDir: baseDir})
-	statuses, err := collector.CollectAll(context.Background(), []*models.Worktree{
+	result, err := collector.CollectAll(context.Background(), []*models.Worktree{
 		{Path: worktreePath, Branch: "feature/read-api"},
 	})
 
 	require.NoError(t, err)
-	require.Len(t, statuses, 1)
-	assert.Equal(t, "gitlab.com/org/team/service", statuses[0].Repository)
+	require.Len(t, result.Statuses, 1)
+	assert.Equal(t, "gitlab.com/org/team/service", result.Statuses[0].Repository)
 }
 
 func TestCollectAllPrefersWorktreeRepository(t *testing.T) {
@@ -62,7 +249,7 @@ func TestCollectAllPrefersWorktreeRepository(t *testing.T) {
 	runStatusTestGit(t, worktreePath, "remote", "add", "origin", "https://github.com/fork/repo.git")
 
 	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{})
-	statuses, err := collector.CollectAll(context.Background(), []*models.Worktree{
+	result, err := collector.CollectAll(context.Background(), []*models.Worktree{
 		{
 			Path:       worktreePath,
 			Branch:     "main",
@@ -71,8 +258,8 @@ func TestCollectAllPrefersWorktreeRepository(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, statuses, 1)
-	assert.Equal(t, "github.com/upstream/repo", statuses[0].Repository)
+	require.Len(t, result.Statuses, 1)
+	assert.Equal(t, "github.com/upstream/repo", result.Statuses[0].Repository)
 }
 
 // TestCollectAllRelativeDotlessRemoteFallsBackToPathIdentity pins the
@@ -94,13 +281,13 @@ func TestCollectAllRelativeDotlessRemoteFallsBackToPathIdentity(t *testing.T) {
 	runStatusTestGit(t, worktreePath, "commit", "-m", "Initial commit")
 
 	collector := NewStatusCollectorWithOptions(StatusCollectorOptions{BaseDir: baseDir})
-	statuses, err := collector.CollectAll(context.Background(), []*models.Worktree{
+	result, err := collector.CollectAll(context.Background(), []*models.Worktree{
 		{Path: worktreePath, Branch: "main"},
 	})
 
 	require.NoError(t, err)
-	require.Len(t, statuses, 1)
-	assert.Equal(t, "repo-main", statuses[0].Repository)
+	require.Len(t, result.Statuses, 1)
+	assert.Equal(t, "repo-main", result.Statuses[0].Repository)
 }
 
 func TestRepositoryFullPathIdentityNormalizesWindowsSeparators(t *testing.T) {
@@ -140,4 +327,21 @@ func runStatusTestGit(t *testing.T, dir string, args ...string) {
 	}
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v failed: %s", args, string(output))
+}
+
+func newStatusTestRepositoryAt(t *testing.T, commitTime time.Time) string {
+	t.Helper()
+	repo := t.TempDir()
+	runStatusTestGit(t, repo, "init", "-b", "main")
+	runStatusTestGit(t, repo, "config", "user.name", "Test User")
+	runStatusTestGit(t, repo, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("initial\n"), 0o644))
+	runStatusTestGit(t, repo, "add", "README.md")
+	command := exec.Command("git", "commit", "-m", "initial")
+	command.Dir = repo
+	stamp := commitTime.Format(time.RFC3339)
+	command.Env = append(os.Environ(), "GIT_AUTHOR_DATE="+stamp, "GIT_COMMITTER_DATE="+stamp)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "git commit failed: %s", output)
+	return repo
 }

@@ -18,34 +18,37 @@ import (
 )
 
 type fakeBackend struct {
-	rows            []Row
-	fleetRows       []Row
-	fleetWarnings   []string
-	layoutNames     []string
-	insideTmux      bool
-	createPath      string
-	createErr       error
-	materializePath string
-	materializeErr  error
-	removeErr       error
-	killErr         error
-	openErr         error
-	openProcess     *exec.Cmd
-	branches        []models.Branch
-	branchErr       error
-	fastListCalls   int
-	listCalls       int
-	branchCalls     []string
-	mergeFleetCalls int
-	mergeCtx        context.Context
-	createCalls     []string
-	createSources   []string
-	materializeRows []string
-	removeCalls     []string
-	removeForces    []bool
-	killCalls       []string
-	openCalls       []string
-	unregistered    []Row
+	rows              []Row
+	fleetRows         []Row
+	fleetWarnings     []string
+	layoutNames       []string
+	insideTmux        bool
+	createPath        string
+	createErr         error
+	materializePath   string
+	materializeErr    error
+	removeErr         error
+	removeWorktree    func(context.Context, Row, bool) error
+	killErr           error
+	openErr           error
+	openProcess       *exec.Cmd
+	branches          []models.Branch
+	branchErr         error
+	fastListCalls     int
+	listCalls         int
+	branchCalls       []string
+	mergeFleetCalls   int
+	mergeCtx          context.Context
+	createCalls       []string
+	createSources     []string
+	materializeRows   []string
+	removeCalls       []string
+	removeForces      []bool
+	killCalls         []string
+	openCalls         []string
+	openExistingCalls []string
+	inventoryCalls    []InventoryRequest
+	unregistered      []Row
 }
 
 type removedWithResidualFilesError struct {
@@ -72,6 +75,422 @@ func (b *fakeBackend) ListFast(ctx context.Context) ([]Row, []string, error) {
 func (b *fakeBackend) List(ctx context.Context) ([]Row, []string, error) {
 	b.listCalls++
 	return append([]Row(nil), b.rows...), nil, nil
+}
+
+func (b *fakeBackend) LoadInventory(_ context.Context, request InventoryRequest) (InventoryResult, error) {
+	b.inventoryCalls = append(b.inventoryCalls, request)
+	if request.Scope == InventoryCachedDashboard {
+		b.fastListCalls++
+	} else {
+		b.listCalls++
+	}
+	return InventoryResult{
+		Rows:       append([]Row(nil), b.rows...),
+		ObservedAt: time.Now(),
+		Current:    request.Scope != InventoryCachedDashboard,
+	}, nil
+}
+
+func TestModelLoadsCacheThenActiveProjectThenBackgroundGlobal(t *testing.T) {
+	row := testRow("widget", "main", "/work/widget")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	backend := &fakeBackend{rows: []Row{row}}
+	model := NewModel(backend, "/work/widget").WithInitialAnchor("/work/widget")
+
+	cached := model.Init()()
+	model, projectCmd := updateModel(t, model, cached)
+	require.NotNil(t, projectCmd)
+	assert.Equal(t, InventoryCachedDashboard, backend.inventoryCalls[0].Scope)
+
+	project := projectCmd()
+	_, globalCmd := updateModel(t, model, project)
+	require.NotNil(t, globalCmd)
+	assert.Equal(t, InventoryCurrentRepository, backend.inventoryCalls[1].Scope)
+	assert.True(t, backend.inventoryCalls[1].CollectStatuses)
+
+	_ = globalCmd()
+	assert.Equal(t, InventoryCurrentDashboard, backend.inventoryCalls[2].Scope)
+	assert.False(t, backend.inventoryCalls[2].CollectStatuses)
+}
+
+func TestModelLoadsCacheThenGlobalForDirectoryPerspective(t *testing.T) {
+	row := Row{Workspace: &WorkspaceInfo{Name: "notes", Path: "/work/notes"}}
+	backend := &fakeBackend{rows: []Row{row}}
+	model := NewModel(backend, rowPath(row)).WithInitialAnchor(rowPath(row))
+
+	cached := model.Init()()
+	_, globalCmd := updateModel(t, model, cached)
+
+	require.NotNil(t, globalCmd)
+	_ = globalCmd()
+	require.Len(t, backend.inventoryCalls, 2)
+	assert.Equal(t, InventoryCurrentDashboard, backend.inventoryCalls[1].Scope)
+	assert.False(t, backend.inventoryCalls[1].CollectStatuses)
+}
+
+func TestInitialProjectRefreshFailureStillStartsBackgroundGlobal(t *testing.T) {
+	project := "github.com/acme/widget"
+	row := testRow("widget", "main", "/work/widget")
+	row.Entry.RepositoryInfo.FullPath = project
+	model := NewModel(&fakeBackend{}, rowPath(row))
+	model.rows = []Row{row}
+
+	model, cmd := updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{
+			Scope: InventoryCurrentRepository, ProjectIdentity: project,
+		},
+		err: errors.New("repository unavailable"),
+	})
+
+	require.NotNil(t, cmd)
+	assert.True(t, model.backgroundGlobalStarted)
+	assert.Equal(t, InventoryCurrentDashboard, model.fetchingRequest.Scope)
+	assert.False(t, model.fetchingRequest.CollectStatuses)
+	assert.Contains(t, model.message, "repository unavailable")
+}
+
+func TestBackgroundGlobalPreservesFreshProjectStatus(t *testing.T) {
+	project := "github.com/acme/widget"
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "GitHub.com/Acme/Widget"
+	row.Status = &models.WorktreeStatus{Path: rowPath(row), Status: models.WorktreeStatusModified}
+	model := NewModel(&fakeBackend{}, "/w/widget/topic")
+	model.rows = []Row{row}
+	model.projectFresh = map[string]scopeFreshness{
+		project: {ObservedAt: time.Now(), Current: true},
+	}
+	structural := row
+	structural.SessionLive = true
+	structural.Status = &models.WorktreeStatus{Path: rowPath(row), Status: models.WorktreeStatusUnknown}
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		result:  InventoryResult{Rows: []Row{structural}, ObservedAt: time.Now(), Current: true},
+	})
+
+	assert.True(t, model.rows[0].SessionLive)
+	assert.Equal(t, models.WorktreeStatusModified, model.rows[0].Status.Status)
+}
+
+func TestBackgroundGlobalMakesProjectStaleWhenHeadChanges(t *testing.T) {
+	project := "github.com/acme/widget"
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = project
+	row.Entry.Generation = "11111111111111111111111111111111"
+	row.Entry.CommitHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	row.Status = &models.WorktreeStatus{Path: rowPath(row), Status: models.WorktreeStatusModified}
+	model := currentModelWithRows(t, &fakeBackend{}, row)
+	structural := row
+	entry := *structural.Entry
+	entry.CommitHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	structural.Entry = &entry
+	structural.Status = &models.WorktreeStatus{Path: rowPath(row), Status: models.WorktreeStatusUnknown}
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		result:  InventoryResult{Rows: []Row{structural}, ObservedAt: time.Now(), Current: true},
+	})
+
+	assert.False(t, model.projectFresh[projectFreshnessKey(project)].Current)
+	assert.Equal(t, models.WorktreeStatusUnknown, model.rows[0].Status.Status)
+}
+
+func TestBackgroundGlobalMakesProjectStaleWhenWorktreeAppears(t *testing.T) {
+	project := "github.com/acme/widget"
+	existing := testRow("widget", "main", "/w/widget/main")
+	existing.Entry.RepositoryInfo.FullPath = project
+	added := testRow("widget", "topic", "/w/widget/topic")
+	added.Entry.RepositoryInfo.FullPath = project
+	model := NewModel(&fakeBackend{}, rowPath(existing))
+	model.rows = []Row{existing}
+	model.projectFresh[projectFreshnessKey(project)] = scopeFreshness{
+		ObservedAt: time.Now(), Current: true,
+	}
+	existing.Status = nil
+	added.Status = nil
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		result: InventoryResult{
+			Rows: []Row{existing, added}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+	model.cursor = indexByPath(model.filteredRows(), rowPath(added))
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmNone, model.confirm.kind)
+	assert.Contains(t, model.message, "project inventory is refreshing")
+}
+
+func TestStatusFreeGlobalRefreshDoesNotAuthorizeProjectMutation(t *testing.T) {
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := NewModel(&fakeBackend{}, "/w/widget/topic")
+	model.rows = []Row{row}
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		result: InventoryResult{
+			Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmNone, model.confirm.kind)
+	assert.Contains(t, model.message, "project inventory is refreshing")
+}
+
+func TestStatusBearingGlobalRefreshAuthorizesProjectMutation(t *testing.T) {
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := NewModel(&fakeBackend{}, "/w/widget/topic")
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard, CollectStatuses: true},
+		result: InventoryResult{
+			Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmDelete, model.confirm.kind)
+}
+
+func TestStatusBearingGlobalRefreshMakesExistingProjectFreshnessStale(t *testing.T) {
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := currentModelWithRows(t, &fakeBackend{}, row)
+	model.fetching = false
+
+	model, refreshCmd := updateModel(t, model, press("r"))
+	require.NotNil(t, refreshCmd)
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmNone, model.confirm.kind)
+	assert.Contains(t, model.message, "project inventory is refreshing")
+}
+
+func TestDirectoryWorkspaceMutationRequiresCurrentGlobalScope(t *testing.T) {
+	workspace := Row{Workspace: &WorkspaceInfo{Name: "notes", Path: "/work/notes"}}
+	model := NewModel(&fakeBackend{}, "/work")
+	model.rows = []Row{workspace}
+
+	blocked, _ := updateModel(t, model, press("d"))
+	assert.Equal(t, confirmNone, blocked.confirm.kind)
+	assert.Contains(t, blocked.message, "global inventory is refreshing")
+
+	model.globalFresh = scopeFreshness{ObservedAt: time.Now(), Current: true}
+	current, _ := updateModel(t, model, press("d"))
+	assert.Equal(t, confirmUnregister, current.confirm.kind)
+}
+
+func TestProjectSwitchRefreshesOnlySelectedProject(t *testing.T) {
+	widget := testRow("widget", "main", "/w/widget")
+	widget.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	other := testRow("other", "main", "/w/other")
+	other.Entry.RepositoryInfo.FullPath = "github.com/acme/other"
+	model := NewModel(&fakeBackend{}, "/w/widget")
+	model.rows = []Row{widget, other}
+	model.projectPerspective = "github.com/acme/widget"
+	model.inputMode = inputProjectSwitch
+	model.projectSwitchCursor = indexProjectSwitchOption(model.projectSwitchOptions(), "github.com/acme/other")
+
+	model, cmd := model.chooseProjectPerspective()
+
+	require.NotNil(t, cmd)
+	assert.Equal(t, InventoryCurrentRepository, model.fetchingRequest.Scope)
+	assert.Equal(t, "github.com/acme/other", model.fetchingRequest.ProjectIdentity)
+}
+
+func TestProjectPerspectiveWithoutLocalRepositoryRefreshesDashboard(t *testing.T) {
+	tests := []struct {
+		name string
+		row  Row
+	}{
+		{
+			name: "directory workspace",
+			row:  Row{Workspace: &WorkspaceInfo{Name: "notes", Path: "/w/notes"}},
+		},
+		{
+			name: "remote-only fleet project",
+			row: Row{Fleet: &FleetInfo{
+				ProjectIdentity: "github.com/acme/widget",
+				ProjectName:     "widget",
+				Kind:            "branch",
+				Ref:             "topic",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewModel(&fakeBackend{}, "/w")
+			model.rows = []Row{tt.row}
+			model.projectPerspective = rowProjectKey(tt.row)
+			model.fetching = false
+
+			model, cmd := updateModel(t, model, press("r"))
+
+			require.NotNil(t, cmd)
+			assert.Equal(t, InventoryCurrentDashboard, model.fetchingRequest.Scope)
+			assert.Empty(t, model.fetchingRequest.WorkingDirectory)
+			assert.False(t, model.fetchingRequest.CollectStatuses)
+		})
+	}
+}
+
+func TestRepositoryRefreshNormalizesProjectFreshnessIdentity(t *testing.T) {
+	row := testRow("widget", "topic", "/w/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := NewModel(&fakeBackend{}, rowPath(row))
+	model.rows = []Row{row}
+	model.projectPerspective = rowProjectKey(row)
+	model.backgroundGlobalStarted = true
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{
+			Scope:           InventoryCurrentRepository,
+			ProjectIdentity: "GitHub.com/Acme/Widget",
+		},
+		result: InventoryResult{
+			Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+	model, _ = updateModel(t, model, press("d"))
+
+	assert.Equal(t, confirmDelete, model.confirm.kind)
+}
+
+func TestRepositoryRefreshPreservesPendingCreationAbsentFromResult(t *testing.T) {
+	project := "github.com/acme/widget"
+	main := testRow("widget", "main", "/w/widget")
+	main.Entry.RepositoryInfo.FullPath = project
+	pending := testRow("widget", "topic", "/w/widget/topic")
+	pending.Entry.RepositoryInfo.FullPath = project
+	pending.Creating = true
+	model := NewModel(&fakeBackend{}, rowPath(main))
+	model.rows = []Row{main, pending}
+	model.creating = []string{rowPath(pending)}
+	model.backgroundGlobalStarted = true
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{
+			Scope: InventoryCurrentRepository, ProjectIdentity: project,
+		},
+		result: InventoryResult{
+			Rows: []Row{main}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+
+	index, ok := identityRowIndex(model.rows, rowPath(pending))
+	require.True(t, ok)
+	assert.True(t, model.rows[index].Creating)
+}
+
+func TestAllProjectsStartsCurrentGlobalStatusRefresh(t *testing.T) {
+	row := testRow("widget", "main", "/w/widget")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := NewModel(&fakeBackend{}, "/w/widget")
+	model.rows = []Row{row}
+	model.projectPerspective = "github.com/acme/widget"
+	model.inputMode = inputProjectSwitch
+	model.projectSwitchCursor = indexProjectSwitchOption(model.projectSwitchOptions(), "")
+
+	model, cmd := model.chooseProjectPerspective()
+
+	require.NotNil(t, cmd)
+	assert.Equal(t, InventoryCurrentDashboard, model.fetchingRequest.Scope)
+	assert.True(t, model.fetchingRequest.CollectStatuses)
+}
+
+func TestBackgroundGlobalFailureKeepsRowsAndShowsAge(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	row := testRow("widget", "main", "/w/widget")
+	model := NewModel(&fakeBackend{}, "/w/widget")
+	model.now = func() time.Time { return now }
+	model.rows = []Row{row}
+	model.globalFresh = scopeFreshness{ObservedAt: now.Add(-2 * time.Minute)}
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		err:     errors.New("daemon refresh failed"),
+	})
+
+	assert.Len(t, model.rows, 1)
+	content := stripANSI(viewContent(model))
+	assert.Contains(t, content, "global inventory 2m old")
+	assert.Contains(t, content, "daemon refresh failed")
+}
+
+func TestModelShellOnCachedDeletedPathStaysOpen(t *testing.T) {
+	backend := &fakeBackend{rows: []Row{testRow("widget", "topic", "/missing")}}
+	model := NewModel(backend, "/work")
+	model.rows = backend.rows
+	oldValidate := validateShellDirectory
+	validateShellDirectory = func(string) error { return os.ErrNotExist }
+	t.Cleanup(func() { validateShellDirectory = oldValidate })
+
+	next, cmd := updateModel(t, model, press("c"))
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, HandoffNone, next.Handoff().Kind)
+	assert.Contains(t, next.message, "no longer exists")
+}
+
+func TestRemovingRowDetailShowsOperationAndPath(t *testing.T) {
+	row := testRow("widget", "topic", "/work/topic")
+	row.Removing = true
+	model := NewModel(&fakeBackend{}, "/work/topic")
+	model.rows = []Row{row}
+
+	text := stripANSI(model.renderSelectionDetails())
+
+	assert.Contains(t, text, "removing widget:topic")
+	assert.Contains(t, text, "/work/topic")
+}
+
+func TestCachedLiveAttachUsesExistingOnlyBackend(t *testing.T) {
+	row := testRow("widget", "topic", "/work/topic")
+	row.SessionLive = true
+	backend := &fakeBackend{rows: []Row{row}, insideTmux: true}
+	model := NewModel(backend, "/work")
+	model.rows = backend.rows
+
+	_, cmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, cmd)
+	_ = cmd()
+	assert.Equal(t, []string{"/work/topic"}, backend.openExistingCalls)
+	assert.Empty(t, backend.openCalls)
+}
+
+func TestCachedLiveAttachOutsideTmuxMarksExistingOnlyHandoff(t *testing.T) {
+	row := testRow("widget", "topic", "/work/topic")
+	row.SessionLive = true
+	model := NewModel(&fakeBackend{rows: []Row{row}}, "/work")
+	model.rows = []Row{row}
+
+	next, cmd := updateModel(t, model, press("enter"))
+
+	require.NotNil(t, cmd)
+	assert.Equal(t, HandoffAttach, next.Handoff().Kind)
+	assert.True(t, next.Handoff().ExistingOnly)
+}
+
+func TestMergeRepositoryRowsPreservesDashboardRepositoryURL(t *testing.T) {
+	oldRow := testRow("widget", "topic", "/work/topic")
+	oldRow.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	oldRow.Entry.RepositoryURL = "https://github.com/acme/widget.git"
+	newRow := testRow("widget", "topic", "/work/topic")
+	newRow.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	previous := []Row{oldRow}
+	current := []Row{newRow}
+	current[0].Status = &models.WorktreeStatus{Path: "/work/topic", Status: models.WorktreeStatusModified}
+
+	merged := mergeRepositoryRows(previous, current, "github.com/acme/widget")
+
+	assert.Equal(t, "https://github.com/acme/widget.git", merged[0].Entry.RepositoryURL)
+	assert.Equal(t, models.WorktreeStatusModified, merged[0].Status.Status)
 }
 
 func (b *fakeBackend) MergeFleet(ctx context.Context, rows []Row) ([]Row, []string) {
@@ -113,7 +532,210 @@ func (b *fakeBackend) PreviewWorktree(row Row, branch string) (Row, error) {
 func (b *fakeBackend) RemoveWorktree(ctx context.Context, row Row, force bool) error {
 	b.removeCalls = append(b.removeCalls, rowPath(row))
 	b.removeForces = append(b.removeForces, force)
+	if b.removeWorktree != nil {
+		return b.removeWorktree(ctx, row, force)
+	}
 	return b.removeErr
+}
+
+func TestModelQueuesRemovalFIFOAndKeepsNavigationResponsive(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{}, 2)
+	backend := &fakeBackend{removeWorktree: func(_ context.Context, row Row, _ bool) error {
+		started <- rowPath(row)
+		<-release
+		return nil
+	}}
+	first := testRow("widget", "one", "/work/one")
+	second := testRow("widget", "two", "/work/two")
+	model := currentModelWithRows(t, backend, first, second)
+
+	model, firstCmd := confirmDeleteRow(t, model, 0)
+	require.NotNil(t, firstCmd)
+	model, secondCmd := confirmDeleteRow(t, model, 1)
+	assert.Nil(t, secondCmd)
+	assert.True(t, model.rows[0].Removing)
+	assert.True(t, model.rows[1].Removing)
+
+	messages := make(chan tea.Msg, 1)
+	go func() { messages <- firstCmd() }()
+	assert.Equal(t, "/work/one", <-started)
+	before := model.cursor
+	model, _ = updateModel(t, model, press("k"))
+	assert.NotEqual(t, before, model.cursor)
+	release <- struct{}{}
+	model, nextCmd := updateModel(t, model, <-messages)
+	require.NotNil(t, nextCmd)
+	go func() { messages <- nextCmd() }()
+	assert.Equal(t, "/work/two", <-started)
+	release <- struct{}{}
+	model, _ = updateModel(t, model, <-messages)
+	assert.Nil(t, model.removalActive)
+	assert.Empty(t, model.removalQueue)
+}
+
+func TestRemovalCompletionRefreshesOnlyAffectedProject(t *testing.T) {
+	backend := &fakeBackend{}
+	row := testRow("widget", "topic", "/work/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := currentModelWithRows(t, backend, row)
+	job := removalJob{
+		row: row, key: removalKey(row), projectIdentity: "github.com/acme/widget",
+		workingDirectory: rowPath(row),
+	}
+	model.removalActive = &job
+
+	model, cmd := updateModel(t, model, removalDoneMsg{job: job, removed: true, refresh: true})
+	require.NotNil(t, cmd)
+	_ = cmd()
+	last := backend.inventoryCalls[len(backend.inventoryCalls)-1]
+	assert.Equal(t, InventoryCurrentRepository, last.Scope)
+	assert.Equal(t, "github.com/acme/widget", last.ProjectIdentity)
+}
+
+func TestNewerRemovalRefreshRejectsOlderGlobalInventory(t *testing.T) {
+	project := "github.com/acme/widget"
+	main := testRow("widget", "main", "/work/widget")
+	main.Entry.RepositoryInfo.FullPath = project
+	topic := testRow("widget", "topic", "/work/widget/topic")
+	topic.Entry.RepositoryInfo.FullPath = project
+	backend := &fakeBackend{rows: []Row{main, topic}}
+	model := currentModelWithRows(t, backend, main, topic)
+	model.backgroundGlobalStarted = true
+
+	model, globalCmd := model.startInventory(InventoryRequest{Scope: InventoryCurrentDashboard})
+	job := removalJob{
+		row: topic, key: removalKey(topic), projectIdentity: project,
+		workingDirectory: rowPath(main),
+	}
+	model.removalActive = &job
+	model, projectCmd := updateModel(t, model, removalDoneMsg{
+		job: job, removed: true, refresh: true,
+	})
+	require.NotNil(t, projectCmd)
+
+	backend.rows = []Row{main}
+	model, _ = updateModel(t, model, projectCmd())
+	backend.rows = []Row{main, topic}
+	model, _ = updateModel(t, model, globalCmd())
+
+	_, restored := identityRowIndex(model.rows, rowPath(topic))
+	assert.False(t, restored)
+}
+
+func TestSuccessfulRemovalImmediatelyRejectsOlderInventory(t *testing.T) {
+	project := "github.com/acme/widget"
+	main := testRow("widget", "main", "/work/widget")
+	main.Entry.RepositoryInfo.FullPath = project
+	removed := testRow("widget", "removed", "/work/widget/removed")
+	removed.Entry.RepositoryInfo.FullPath = project
+	next := testRow("widget", "next", "/work/widget/next")
+	next.Entry.RepositoryInfo.FullPath = project
+	model := currentModelWithRows(t, &fakeBackend{}, main, removed, next)
+	model.backgroundGlobalStarted = true
+	model, _ = model.startInventory(InventoryRequest{Scope: InventoryCurrentDashboard})
+	staleSeq := model.inventorySeq
+	removedJob := removalJob{
+		row: removed, key: removalKey(removed), projectIdentity: project,
+		workingDirectory: rowPath(main),
+	}
+	nextJob := removalJob{
+		row: next, key: removalKey(next), projectIdentity: project,
+		workingDirectory: rowPath(main),
+	}
+	model.removalActive = &removedJob
+	model.removalQueue = []removalJob{nextJob}
+
+	model, nextRemovalCmd := updateModel(t, model, removalDoneMsg{
+		job: removedJob, removed: true, refresh: true,
+	})
+	require.NotNil(t, nextRemovalCmd)
+	model, _ = updateModel(t, model, inventoryMsg{
+		seq:     staleSeq,
+		request: InventoryRequest{Scope: InventoryCurrentDashboard},
+		result: InventoryResult{
+			Rows: []Row{main, removed, next}, ObservedAt: time.Now(), Current: true,
+		},
+	})
+
+	_, restored := identityRowIndex(model.rows, rowPath(removed))
+	assert.False(t, restored)
+}
+
+func TestRemovalRejectsFleetRowsStartedBeforeDeletion(t *testing.T) {
+	project := "github.com/acme/widget"
+	main := testRow("widget", "main", "/work/widget")
+	main.Entry.RepositoryInfo.FullPath = project
+	topic := testRow("widget", "topic", "/work/widget/topic")
+	topic.Entry.RepositoryInfo.FullPath = project
+	model := currentModelWithRows(t, &fakeBackend{}, main, topic)
+	staleFleet := fleetRowsMsg{seq: model.loadSeq, rows: []Row{main, topic}}
+	job := removalJob{
+		row: topic, key: removalKey(topic), projectIdentity: project,
+		workingDirectory: rowPath(main),
+	}
+	model.removalActive = &job
+
+	model, _ = updateModel(t, model, removalDoneMsg{
+		job: job, removed: true, refresh: true,
+	})
+	model, _ = updateModel(t, model, staleFleet)
+
+	_, restored := identityRowIndex(model.rows, rowPath(topic))
+	assert.False(t, restored)
+}
+
+func TestRepositoryRefreshPreservesActiveRemovalState(t *testing.T) {
+	project := "github.com/acme/widget"
+	row := testRow("widget", "topic", "/work/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = project
+	model := currentModelWithRows(t, &fakeBackend{}, row)
+	job := removalJob{row: row, key: removalKey(row), projectIdentity: project}
+	model.removalActive = &job
+
+	model, _ = updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentRepository, ProjectIdentity: project},
+		result:  InventoryResult{Rows: []Row{row}, ObservedAt: time.Now(), Current: true},
+	})
+
+	assert.True(t, model.rows[0].Removing)
+}
+
+func TestIndeterminateRemovalKeepsRowUntilScopedRefresh(t *testing.T) {
+	row := testRow("widget", "topic", "/work/widget/topic")
+	row.Entry.RepositoryInfo.FullPath = "github.com/acme/widget"
+	model := currentModelWithRows(t, &fakeBackend{}, row)
+	job := removalJob{row: row, key: removalKey(row)}
+	model.rows[0].Removing = true
+	model.removalActive = &job
+
+	model, _ = updateModel(t, model, removalDoneMsg{
+		job: job, err: refreshRequiredActionError{errors.New("outcome unknown")}, refresh: true,
+	})
+
+	assert.NotNil(t, model.rows[0].Entry)
+	assert.False(t, model.rows[0].Removing)
+	assert.ErrorContains(t, model.err, "outcome unknown")
+}
+
+func currentModelWithRows(t *testing.T, backend *fakeBackend, rows ...Row) Model {
+	t.Helper()
+	model := NewModel(backend, rowPath(rows[0]))
+	model.rows = append([]Row(nil), rows...)
+	model.inventoryCurrent = true
+	for _, row := range rows {
+		model.projectFresh[projectFreshnessKey(rowProjectKey(row))] = scopeFreshness{
+			ObservedAt: time.Now(), Current: true,
+		}
+	}
+	return model
+}
+
+func confirmDeleteRow(t *testing.T, model Model, index int) (Model, tea.Cmd) {
+	t.Helper()
+	model.cursor = index
+	model, _ = updateModel(t, model, press("d"))
+	return updateModel(t, model, press("y"))
 }
 
 func (b *fakeBackend) MaterializeWorktree(ctx context.Context, row Row) (string, error) {
@@ -134,6 +756,11 @@ func (b *fakeBackend) OpenInTmux(
 	layoutName string,
 ) (*exec.Cmd, error) {
 	b.openCalls = append(b.openCalls, rowPath(row)+":"+layoutName)
+	return b.openProcess, b.openErr
+}
+
+func (b *fakeBackend) OpenExistingInTmux(_ context.Context, row Row) (*exec.Cmd, error) {
+	b.openExistingCalls = append(b.openExistingCalls, rowPath(row))
 	return b.openProcess, b.openErr
 }
 
@@ -816,6 +1443,8 @@ func TestModelNewBranchUsesProjectPerspective(t *testing.T) {
 	model, _ = updateModel(t, model, press("a"))
 	model, _ = updateModel(t, model, press("t"))
 	model, _ = updateModel(t, model, press("enter"))
+	model.projectFresh["kata"] = scopeFreshness{ObservedAt: time.Now(), Current: true}
+	model.inventoryCurrent = true
 	model, _ = updateModel(t, model, press("n"))
 	model, _ = updateModel(t, model, press("f"))
 	model, _ = updateModel(t, model, press("e"))
@@ -843,6 +1472,69 @@ func TestModelNewBranchAcceptsPaste(t *testing.T) {
 	_ = cmd()
 	assert.Equal(t, []string{"/w/kwt/main:feature/pasted"}, backend.createCalls)
 	assert.Equal(t, []string{""}, backend.createSources)
+}
+
+func TestModelBranchInputRejectsChangedTarget(t *testing.T) {
+	t.Run("new branch after generation change", func(t *testing.T) {
+		row := testRow("kwt", "main", "/w/kwt/main")
+		row.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+		row.Entry.Generation = "11111111111111111111111111111111"
+		backend := &fakeBackend{createPath: "/w/kwt/topic"}
+		model := currentModelWithRows(t, backend, row)
+		model.backgroundGlobalStarted = true
+		model, _ = updateModel(t, model, press("n"))
+		replacement := row
+		entry := *replacement.Entry
+		entry.Generation = "22222222222222222222222222222222"
+		replacement.Entry = &entry
+		model, _ = updateModel(t, model, inventoryMsg{
+			request: InventoryRequest{
+				Scope: InventoryCurrentRepository, ProjectIdentity: rowProjectKey(row),
+			},
+			result: InventoryResult{
+				Rows: []Row{replacement}, ObservedAt: time.Now(), Current: true,
+			},
+		})
+		model, _ = updateModel(t, model, paste("topic"))
+
+		model, cmd := updateModel(t, model, press("enter"))
+
+		assert.Nil(t, cmd)
+		assert.Empty(t, backend.createCalls)
+		assert.Contains(t, model.message, "changed")
+	})
+
+	t.Run("existing branch after project change", func(t *testing.T) {
+		row := testRow("kwt", "main", "/w/kwt/main")
+		row.Entry.RepositoryInfo.FullPath = "github.com/example/kwt"
+		row.Entry.Generation = "11111111111111111111111111111111"
+		backend := &fakeBackend{
+			createPath: "/w/kwt/topic",
+			branches:   []models.Branch{{Name: "topic", Source: "topic"}},
+		}
+		model := currentModelWithRows(t, backend, row)
+		model, loadCmd := updateModel(t, model, press("b"))
+		require.NotNil(t, loadCmd)
+		model, _ = updateModel(t, model, loadCmd())
+		replacement := row
+		entry := *replacement.Entry
+		info := *entry.RepositoryInfo
+		info.FullPath = "github.com/example/replacement"
+		entry.RepositoryInfo = &info
+		replacement.Entry = &entry
+		model, _ = updateModel(t, model, inventoryMsg{
+			request: InventoryRequest{Scope: InventoryCurrentDashboard, CollectStatuses: true},
+			result: InventoryResult{
+				Rows: []Row{replacement}, ObservedAt: time.Now(), Current: true,
+			},
+		})
+
+		model, cmd := updateModel(t, model, press("enter"))
+
+		assert.Nil(t, cmd)
+		assert.Empty(t, backend.createCalls)
+		assert.Contains(t, model.message, "changed")
+	})
 }
 
 func TestModelExistingBranchPickerCreatesSelectedRemote(t *testing.T) {
@@ -1261,6 +1953,7 @@ func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
 	backend := &fakeBackend{materializePath: "/worktrees/github.com/example/kwt/feature-studio-only"}
 	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
+	model.projectPerspective = rowProjectKey(row)
 
 	model, cmd := updateModel(t, model, press("s"))
 
@@ -1273,6 +1966,12 @@ func TestModelMaterializeRemoteOnlyFleetRow(t *testing.T) {
 	assert.True(t, done.refresh)
 	assert.Equal(t, "/worktrees/github.com/example/kwt/feature-studio-only", done.anchorPath)
 	assert.Contains(t, done.message, "synced kwt:feature/studio-only")
+
+	model, refresh := updateModel(t, model, done)
+	require.NotNil(t, refresh)
+	assert.Equal(t, InventoryCurrentDashboard, model.fetchingRequest.Scope)
+	assert.True(t, model.fetchingRequest.CollectStatuses)
+	assert.Equal(t, "github.com/example/kwt", model.projectPerspective)
 }
 
 func TestModelCancelNewBranchInputKeepsExistingFilter(t *testing.T) {
@@ -1327,7 +2026,7 @@ func TestModelDeleteLiveWorktreeConfirmsAndCallsRemove(t *testing.T) {
 	_, cmd := updateModel(t, model, press("y"))
 	require.NotNil(t, cmd)
 	msg := cmd()
-	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.IsType(t, removalDoneMsg{}, msg)
 	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
 	assert.Equal(t, []bool{false}, backend.removeForces)
 }
@@ -1353,7 +2052,7 @@ func TestModelRefreshesAfterPartialRemovalWarning(t *testing.T) {
 	}
 	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: backend.rows})
-	done, ok := model.removeWorktreeCmd(row, false)().(actionDoneMsg)
+	done, ok := model.removeWorktreeCmd(removalJob{row: row, key: removalKey(row)})().(removalDoneMsg)
 	require.True(t, ok)
 
 	require.Error(t, done.err)
@@ -1364,9 +2063,7 @@ func TestModelRefreshesAfterPartialRemovalWarning(t *testing.T) {
 	assert.True(t, updated.fetching)
 
 	backend.rows = nil
-	updated, fullRefreshCmd := updateModel(t, updated, refreshCmd())
-	require.NotNil(t, fullRefreshCmd)
-	updated, _ = updateModel(t, updated, fullRefreshCmd())
+	updated, _ = updateModel(t, updated, refreshCmd())
 	assert.Empty(t, updated.rows)
 	assert.ErrorContains(t, updated.err, "files remain")
 
@@ -1384,7 +2081,7 @@ func TestModelRefreshesAfterIndeterminateRemoval(t *testing.T) {
 	}
 	model := NewModel(backend, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: backend.rows})
-	done, ok := model.removeWorktreeCmd(row, false)().(actionDoneMsg)
+	done, ok := model.removeWorktreeCmd(removalJob{row: row, key: removalKey(row)})().(removalDoneMsg)
 	require.True(t, ok)
 
 	require.Error(t, done.err)
@@ -1407,7 +2104,7 @@ func TestModelDeleteDirtyWorktreeConfirmsDiscardAndForcesRemove(t *testing.T) {
 	_, cmd := updateModel(t, model, press("y"))
 	require.NotNil(t, cmd)
 	msg := cmd()
-	assert.IsType(t, actionDoneMsg{}, msg)
+	assert.IsType(t, removalDoneMsg{}, msg)
 	assert.Equal(t, []string{"/w/kwt/feature"}, backend.removeCalls)
 	assert.Equal(t, []bool{true}, backend.removeForces)
 }
@@ -1443,7 +2140,103 @@ func TestModelKillWorkspaceConfirm(t *testing.T) {
 	assert.Equal(t, []string{"kwt-workspace-kwt-feature"}, backend.killCalls)
 }
 
+func TestKillConfirmationRejectsChangedOrStaleRow(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*testing.T, Model, Row) Model
+	}{
+		{
+			name: "project became stale",
+			change: func(_ *testing.T, model Model, row Row) Model {
+				project := projectFreshnessKey(rowProjectKey(row))
+				freshness := model.projectFresh[project]
+				freshness.Current = false
+				model.projectFresh[project] = freshness
+				return model
+			},
+		},
+		{
+			name: "worktree generation changed",
+			change: func(t *testing.T, model Model, row Row) Model {
+				entry := *row.Entry
+				entry.Generation = "22222222222222222222222222222222"
+				row.Entry = &entry
+				model.backgroundGlobalStarted = true
+				model, _ = updateModel(t, model, inventoryMsg{
+					request: InventoryRequest{
+						Scope: InventoryCurrentRepository, ProjectIdentity: rowProjectKey(row),
+					},
+					result: InventoryResult{
+						Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+					},
+				})
+				return model
+			},
+		},
+		{
+			name: "worktree checkout changed",
+			change: func(t *testing.T, model Model, row Row) Model {
+				entry := *row.Entry
+				entry.Branch = "replacement"
+				row.Entry = &entry
+				model.backgroundGlobalStarted = true
+				model, _ = updateModel(t, model, inventoryMsg{
+					request: InventoryRequest{
+						Scope: InventoryCurrentRepository, ProjectIdentity: rowProjectKey(row),
+					},
+					result: InventoryResult{
+						Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+					},
+				})
+				return model
+			},
+		},
+		{
+			name: "worktree head changed",
+			change: func(t *testing.T, model Model, row Row) Model {
+				entry := *row.Entry
+				entry.CommitHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				row.Entry = &entry
+				model.backgroundGlobalStarted = true
+				model, _ = updateModel(t, model, inventoryMsg{
+					request: InventoryRequest{
+						Scope: InventoryCurrentRepository, ProjectIdentity: rowProjectKey(row),
+					},
+					result: InventoryResult{
+						Rows: []Row{row}, ObservedAt: time.Now(), Current: true,
+					},
+				})
+				return model
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := testRow("kwt", "feature", "/w/kwt/feature")
+			row.Entry.Generation = "11111111111111111111111111111111"
+			row.Entry.CommitHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			row.SessionLive = true
+			row.SessionName = "kwt-workspace-kwt-feature"
+			backend := &fakeBackend{}
+			model := currentModelWithRows(t, backend, row)
+			model, _ = model.startKill()
+			model = tt.change(t, model, row)
+
+			model, cmd := updateModel(t, model, press("y"))
+
+			assert.Nil(t, cmd)
+			assert.Empty(t, backend.killCalls)
+			assert.Equal(t, confirmNone, model.confirm.kind)
+			assert.Contains(t, model.message, "changed")
+		})
+	}
+}
+
 func TestModelShellAndAttachHandoffsQuitFirst(t *testing.T) {
+	oldValidate := validateShellDirectory
+	validateShellDirectory = func(string) error { return nil }
+	t.Cleanup(func() { validateShellDirectory = oldValidate })
 	row := testRow("kwt", "feature", "/w/kwt/feature")
 	model := NewModel(&fakeBackend{layoutNames: []string{"quad", "focus"}}, "/worktrees")
 	model, _ = updateModel(t, model, rowsMsg{rows: []Row{row}})
@@ -1544,14 +2337,14 @@ func TestModelQueuesActionRefreshWhileFetchInFlight(t *testing.T) {
 	require.Nil(t, actionCmd)
 
 	backend.rows = []Row{testRow("kwt", "main", "/w/kwt/main")}
-	model, queuedRefreshCmd := updateModel(t, model, fastRowsMsg{rows: backend.rows})
+	model, queuedRefreshCmd := updateModel(t, model, refreshCmd())
 
 	require.NotNil(t, queuedRefreshCmd)
 	assert.True(t, model.fetching)
-	before := backend.fastListCalls
+	before := backend.listCalls
 	msg := queuedRefreshCmd()
-	assert.Equal(t, before+1, backend.fastListCalls)
-	assert.IsType(t, fastRowsMsg{}, msg)
+	assert.Equal(t, before+1, backend.listCalls)
+	assert.IsType(t, inventoryMsg{}, msg)
 }
 
 func TestFastRefreshKeepsEnrichmentWhenFullLoadFails(t *testing.T) {
@@ -1898,16 +2691,18 @@ func TestModelKeepsQueuedActionRefreshWhenFastLoadFails(t *testing.T) {
 
 	// Nothing else retries the queued refresh, so losing it here would leave the
 	// removed worktree on screen until the user refreshes by hand.
-	model, queuedRefreshCmd := updateModel(t, model, fastRowsMsg{
-		err: errors.New("discovery failed"),
+	model, queuedRefreshCmd := updateModel(t, model, inventoryMsg{
+		request: InventoryRequest{Scope: InventoryCurrentDashboard, CollectStatuses: true},
+		seq:     model.inventorySeq,
+		err:     errors.New("discovery failed"),
 	})
 
 	require.NotNil(t, queuedRefreshCmd, "a failed fast load must still run the queued refresh")
 	assert.False(t, model.pendingRefresh, "the queued refresh is consumed, not re-queued")
-	before := backend.fastListCalls
+	before := backend.listCalls
 	msg := queuedRefreshCmd()
-	assert.Equal(t, before+1, backend.fastListCalls)
-	assert.IsType(t, fastRowsMsg{}, msg)
+	assert.Equal(t, before+1, backend.listCalls)
+	assert.IsType(t, inventoryMsg{}, msg)
 }
 
 func TestModelPreservesCreateAnchorAcrossQueuedRefresh(t *testing.T) {
@@ -2140,8 +2935,11 @@ func TestEscapeClearsSearchFilterBeforeProjectPerspective(t *testing.T) {
 	assert.Empty(t, model.filter, "first escape clears the search filter")
 	assert.NotEmpty(t, model.projectPerspective, "perspective survives the first escape")
 
-	model, _ = updateModel(t, model, press("esc"))
+	model, refreshCmd := updateModel(t, model, press("esc"))
 	assert.Empty(t, model.projectPerspective, "second escape clears the perspective")
+	require.NotNil(t, refreshCmd)
+	assert.Equal(t, InventoryCurrentDashboard, model.fetchingRequest.Scope)
+	assert.True(t, model.fetchingRequest.CollectStatuses)
 }
 
 func TestRowsLoadMergesFleetAsynchronously(t *testing.T) {
