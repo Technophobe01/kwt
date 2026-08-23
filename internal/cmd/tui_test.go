@@ -210,10 +210,13 @@ func TestBuildTUIRowMarksLiveSessionWhenRepositoryInfoPresent(t *testing.T) {
 }
 
 func TestTUIStatusCollectorOptionsFetchesSyncState(t *testing.T) {
-	opts := tuiStatusCollectorOptions("/worktrees")
+	protectedNames := []string{"CUSTOM_FLEET_TOKEN"}
+	opts := tuiStatusCollectorOptions("/worktrees", protectedNames)
+	protectedNames[0] = "MUTATED_AFTER_CALL"
 
 	assert.True(t, opts.FetchRemote)
 	assert.Equal(t, "/worktrees", opts.BaseDir)
+	assert.Equal(t, []string{"CUSTOM_FLEET_TOKEN"}, opts.ProtectedNames)
 }
 
 func TestCollectTUIStatusesSurfacesPerRowDiagnostic(t *testing.T) {
@@ -223,7 +226,7 @@ func TestCollectTUIStatusesSurfacesPerRowDiagnostic(t *testing.T) {
 		RepositoryInfo: &url.RepositoryInfo{FullPath: "github.com/acme/widget"},
 	}
 
-	statuses, warnings, err := collectTUIStatuses(context.Background(), t.TempDir(), []*discovery.GlobalWorktreeEntry{entry})
+	statuses, warnings, err := collectTUIStatuses(context.Background(), t.TempDir(), []*discovery.GlobalWorktreeEntry{entry}, nil)
 
 	require.NoError(t, err)
 	require.Contains(t, statuses, missing)
@@ -311,6 +314,7 @@ func TestTUIBackendListAndMergeFleetAreConcurrencySafe(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -366,6 +370,7 @@ func TestTUIBackendListIncludesLaunchRepositoryWorktrees(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		assert.Equal(t, "/global", baseDir)
 		assert.Len(t, entries, 2)
@@ -408,6 +413,7 @@ func TestTUIBackendListFastSkipsStatusCollection(t *testing.T) {
 		context.Context,
 		string,
 		[]*discovery.GlobalWorktreeEntry,
+		[]string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		t.Fatal("fast listing must not collect Git status")
 		return nil, nil, nil
@@ -443,6 +449,7 @@ func TestTUIBackendListCollectsStatusForImportedWorktree(t *testing.T) {
 		_ context.Context,
 		_ string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Equal(t, []*discovery.GlobalWorktreeEntry{entry}, entries)
 		return map[string]*models.WorktreeStatus{
@@ -543,6 +550,7 @@ func TestTUIBackendListIncludesRegisteredProjectWorktrees(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		assert.ElementsMatch(t, []string{globalEntry.Path, projectEntry.Path}, []string{
 			entries[0].Path,
@@ -728,6 +736,7 @@ func TestTUIBackendMergeFleetIncludesRemoteOnlyFleetRows(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
@@ -806,6 +815,7 @@ func TestTUIBackendMergeFleetDoesNotOfferSyncWithoutRegisteredProject(t *testing
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -869,6 +879,7 @@ func TestTUIBackendMergeFleetLocalPresenceComesFromLocalDiscovery(t *testing.T) 
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
@@ -974,6 +985,7 @@ func TestTUIBackendMergeFleetRendersFleetStatusFromLocalObservations(t *testing.
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			localEntry.Path: {Path: localEntry.Path, Branch: localEntry.Branch},
@@ -1074,6 +1086,7 @@ func TestTUIBackendMergeFleetMatchesLocalDetachedWorktreeToFleetRow(t *testing.T
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			detachedEntry.Path: {Path: detachedEntry.Path},
@@ -1125,6 +1138,7 @@ func TestTUIBackendListIncludesRegisteredProjectWithoutOrigin(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Len(t, entries, 1)
 		return map[string]*models.WorktreeStatus{
@@ -1182,6 +1196,7 @@ func TestTUIBackendListPrefersRegisteredIdentityForGlobalLocalOnlyDuplicate(t *t
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		require.Len(t, entries, 1)
 		require.NotNil(t, entries[0].RepositoryInfo)
@@ -1233,6 +1248,7 @@ func TestTUIBackendListRegistersLaunchRepositoryBestEffort(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
@@ -1279,6 +1295,7 @@ func TestTUIBackendRegistersLaunchRepositoryOnceAcrossStagedLoad(t *testing.T) {
 		context.Context,
 		string,
 		[]*discovery.GlobalWorktreeEntry,
+		[]string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -1322,6 +1339,7 @@ func TestTUIBackendListAddsLaunchRepositoryToInMemoryProjects(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
@@ -1374,6 +1392,7 @@ func TestTUIBackendLaunchRegistrationReusesExistingProjectByPath(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return map[string]*models.WorktreeStatus{
 			launchEntry.Path: {Path: launchEntry.Path, Branch: launchEntry.Branch},
@@ -3790,6 +3809,7 @@ func TestTUIBackendMergeFleetReturnsHubWarnings(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -3825,6 +3845,7 @@ func TestTUIBackendListIncludesWorkspaceRows(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -3867,6 +3888,7 @@ func TestTUIBackendAutoRegistersNonGitLaunchDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -3899,6 +3921,7 @@ func TestTUIBackendSkipsAutoRegisterWhenAlreadyRegisteredWithCustomName(t *testi
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -3930,6 +3953,7 @@ func TestTUIBackendAutoRegistersLaunchWorkspaceOnlyOnce(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -3979,6 +4003,7 @@ func TestTUIBackendNeverRegistersWorkspaceForGitLaunchDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -4008,6 +4033,7 @@ func TestTUIBackendNeverAutoRegistersHomeDir(t *testing.T) {
 		ctx context.Context,
 		baseDir string,
 		entries []*discovery.GlobalWorktreeEntry,
+		_ []string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		return nil, nil, nil
 	}
@@ -4735,6 +4761,7 @@ func TestTUIBackendSerializesUnregisterWithFullLoad(t *testing.T) {
 	release := make(chan struct{})
 	backend.collectStatuses = func(
 		context.Context, string, []*discovery.GlobalWorktreeEntry,
+		[]string,
 	) (map[string]*models.WorktreeStatus, []string, error) {
 		close(collecting)
 		<-release
