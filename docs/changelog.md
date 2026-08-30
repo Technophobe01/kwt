@@ -5,6 +5,18 @@ description: Release history for kwt
 
 # Changelog
 
+## Unreleased
+
+- Recognize bare-container repositories where a `.bare/` control directory
+  manages a checked-out `main/` worktree and flat sibling worktrees.
+  `kwt projects add` accepts the container or any of its worktrees, `.bare/`
+  stays out of worktree inventory, and generated worktrees preserve the flat
+  sibling layout using the sanitized branch name. An explicit destination path
+  still takes precedence.
+- Deliver each SSH askpass protocol frame in a single socket write, so a
+  helper answering a prompt with no hint text can no longer fail spuriously
+  when the responder closes the connection first.
+
 ## 0.5.1
 
 <small>2026-08-29</small>
