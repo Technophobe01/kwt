@@ -1,5 +1,7 @@
 # Agent Guidelines
 
+@AGENTS.md
+
 ## Core Principles
 
 - **Do NOT maintain backward compatibility** unless explicitly requested. Break things boldly.
@@ -56,4 +58,5 @@ contract. The short version:
 - Close only verified work: `kata close <ref> --done --message "<scope + verification>" --commit <sha>`.
 - If work is incomplete, label `needs-review` and comment what remains rather than closing.
 - Never `kata delete` or `kata purge` without explicit user authorization.
+
 <!-- END KATA -->
