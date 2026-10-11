@@ -229,7 +229,7 @@ func TestReadWorktreeBacklinkFollowsDotGitClaim(t *testing.T) {
 		t.Run(layout, func(t *testing.T) {
 			root, path := fixture(t)
 			admin := git(t, path, "rev-parse", "--absolute-git-dir")
-			want := admin
+			want := filepath.FromSlash(admin)
 			switch layout {
 			case "relative":
 				relative, err := filepath.Rel(path, admin)

@@ -64,11 +64,11 @@ func TestRepositoryScopeDoesNotReacquireForIdentityOrList(t *testing.T) {
 	require.NoError(t, repo.WithLock(ctx, func(scope *worktree.Scope) error {
 		primary, primaryErr := repo.PrimaryPath(ctx)
 		require.NoError(t, primaryErr)
-		require.Equal(t, root, primary)
+		require.Equal(t, root, filepath.FromSlash(primary))
 		escaped = scope
 		out, rootErr := scope.RunGit(ctx, "", "rev-parse", "--path-format=absolute", "--git-common-dir")
 		require.NoError(t, rootErr)
-		require.Equal(t, filepath.Join(root, ".git"), strings.TrimSpace(string(out)))
+		require.Equal(t, filepath.Join(root, ".git"), filepath.FromSlash(strings.TrimSpace(string(out))))
 		var err error
 		generation, err = scope.EnsureIdentity(ctx, path, identity)
 		require.NoError(t, err)
@@ -247,7 +247,7 @@ func TestInventoryOpenedAtCommonGitDirectoryFindsPrimaryCheckout(t *testing.T) {
 	require.Len(t, inventory.Entries, 2)
 	require.Equal(t, root, inventory.Entries[0].Path)
 	require.True(t, inventory.Entries[0].IsMain)
-	require.Equal(t, path, inventory.Entries[1].Path)
+	require.Equal(t, path, filepath.FromSlash(inventory.Entries[1].Path))
 	primary, err := repo.PrimaryPath(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, root, primary)
@@ -296,7 +296,7 @@ func TestListReportsKwtGenerationOnlyForItsMarker(t *testing.T) {
 	} {
 		entries, err := repo.List(t.Context(), identity)
 		require.NoError(t, err)
-		require.Equal(t, path, entries[1].Path)
+		require.Equal(t, path, filepath.FromSlash(entries[1].Path))
 		require.Equal(t, generation, entries[1].Generation, identity.FileName)
 		require.Equal(t, worktree.GenerationValid, entries[1].GenerationStatus, identity.FileName)
 	}

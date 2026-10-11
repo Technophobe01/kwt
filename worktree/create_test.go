@@ -109,7 +109,7 @@ func TestRequiredIdentityFailureKeepsCheckout(t *testing.T) {
 	remaining, err := partial.Rollback(t.Context(), managed.RollbackFreshOwned)
 	require.ErrorIs(t, err, managed.ErrWorktreeCleanupIncomplete)
 	require.Equal(t, path, remaining.Path)
-	require.Equal(t, git(t, path, "rev-parse", "--absolute-git-dir"), remaining.Registration)
+	require.Equal(t, filepath.FromSlash(git(t, path, "rev-parse", "--absolute-git-dir")), remaining.Registration)
 	require.DirExists(t, path)
 }
 
