@@ -7,6 +7,7 @@ import (
 	gitcmd "go.kenn.io/kit/git/cmd"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -271,4 +272,48 @@ func TestRecoveryThroughRelativeRepositoryPath(t *testing.T) {
 	require.Equal(t, worktree.Recovered, result.Disposition)
 	require.Equal(t, head, git(t, path, "rev-parse", "HEAD"))
 	require.Equal(t, "topic", git(t, path, "branch", "--show-current"))
+}
+
+// A base branch cannot be created while a branch already occupies its ref
+// namespace; sync must skip it without touching the occupying branch.
+func TestSyncBaseSkipsOccupiedRefNamespace(t *testing.T) {
+	root, _ := fixture(t)
+	mainTip := git(t, root, "rev-parse", "refs/heads/main")
+	git(t, root, "checkout", "--detach")
+	git(t, root, "branch", "-D", "main")
+	git(t, root, "branch", "main/topic", mainTip)
+	repo := open(t, root, kwtPolicy())
+
+	require.NoError(t, repo.WithLock(t.Context(), func(s *worktree.Scope) error {
+		return s.SyncBase(t.Context(), worktree.BaseSyncRequest{Branch: "main", SourceRef: mainTip, Managed: true, BackupPrefix: "refs/kenn-forge/base-backups/"})
+	}))
+
+	_, err := gitcmd.New().Output(t.Context(), root, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+	require.Error(t, err)
+	require.Equal(t, mainTip, git(t, root, "rev-parse", "refs/heads/main/topic"))
+}
+
+// Deciding whether the base is checked out needs only Git's branch list. An
+// unrelated worktree whose files cannot be read must not stop the sync.
+func TestSyncBaseIgnoresUnreadableUnrelatedWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions make the checkout unreadable")
+	}
+	root, path := fixture(t)
+	git(t, path, "checkout", "--detach")
+	other := filepath.Join(t.TempDir(), "other")
+	git(t, root, "worktree", "add", "-b", "other", other)
+	git(t, root, "-c", "user.name=Example", "-c", "user.email=example@example.com", "commit", "--allow-empty", "-m", "remote update")
+	target := git(t, root, "rev-parse", "HEAD")
+	require.NoError(t, os.Chmod(other, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(other, 0o755) })
+	repo := open(t, root, kwtPolicy())
+
+	err := repo.WithLock(t.Context(), func(s *worktree.Scope) error {
+		return s.SyncBase(t.Context(), worktree.BaseSyncRequest{Branch: "topic", SourceRef: target})
+	})
+
+	require.NoError(t, os.Chmod(other, 0o755))
+	require.NoError(t, err)
+	require.Equal(t, target, git(t, root, "rev-parse", "topic"))
 }
