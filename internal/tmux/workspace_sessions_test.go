@@ -359,3 +359,122 @@ func TestWorkspaceSessionsPreparesCrossServerAttachForResidentUI(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceSessionsExpectedEstablishmentNeverRepairsOrCreatesOtherSession(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		resolvedName string
+		live         bool
+		adopted      bool
+	}{
+		{name: "current-branch session absent", resolvedName: "current"},
+		{name: "other live canonical session", resolvedName: "other", live: true},
+		{name: "other adopted session", resolvedName: "other", live: true, adopted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ensurer := &recordingWorkspaceEnsurer{}
+			runner := &WorkspaceSessions{
+				resolveSession: func(
+					context.Context,
+					WorkspaceEndpointRequest,
+				) (resolvedWorkspaceSession, error) {
+					return newResolvedWorkspaceSession(
+						test.resolvedName, test.live, test.adopted,
+					), nil
+				},
+				workspaceForEndpoint: func(
+					SessionEndpoint,
+				) (workspaceSessionEnsurer, error) {
+					return ensurer, nil
+				},
+			}
+
+			_, err := runner.EstablishExpectedWithGeneration(
+				context.Background(),
+				"current",
+				"retained",
+				"/work/widget",
+				resolverTestGeneration,
+				BlankLayout(),
+			)
+
+			require.ErrorIs(t, err, ErrWorkspaceSessionChanged)
+			assert.False(t, ensurer.repaired)
+			assert.False(t, ensurer.ensured)
+		})
+	}
+}
+
+func TestWorkspaceSessionsExpectedEstablishmentRejectsReplacementAfterRetainedSessionExits(t *testing.T) {
+	retained := &recordingWorkspaceEnsurer{repairErr: errWorkspaceSessionAbsent}
+	current := &recordingWorkspaceEnsurer{}
+	resolveCalls := 0
+	runner := &WorkspaceSessions{
+		resolveSession: func(
+			_ context.Context,
+			request WorkspaceEndpointRequest,
+		) (resolvedWorkspaceSession, error) {
+			assert.Equal(t, "current", request.SessionName)
+			resolveCalls++
+			if resolveCalls == 1 {
+				return newResolvedWorkspaceSession("retained", true, false), nil
+			}
+			return newResolvedWorkspaceSession("current", false, false), nil
+		},
+		workspaceForEndpoint: func(
+			endpoint SessionEndpoint,
+		) (workspaceSessionEnsurer, error) {
+			if endpoint == canonicalEndpoint("retained") {
+				return retained, nil
+			}
+			return current, nil
+		},
+	}
+
+	_, err := runner.EstablishExpectedWithGeneration(
+		context.Background(),
+		"current",
+		"retained",
+		"/work/widget",
+		resolverTestGeneration,
+		BlankLayout(),
+	)
+
+	require.ErrorIs(t, err, ErrWorkspaceSessionChanged)
+	assert.Equal(t, 2, resolveCalls)
+	assert.True(t, retained.repaired)
+	assert.False(t, current.repaired)
+	assert.False(t, current.ensured)
+}
+
+func TestWorkspaceSessionsExpectedEstablishmentRepairsRetainedSession(t *testing.T) {
+	ensurer := &recordingWorkspaceEnsurer{}
+	runner := &WorkspaceSessions{
+		resolveSession: func(
+			context.Context,
+			WorkspaceEndpointRequest,
+		) (resolvedWorkspaceSession, error) {
+			return newResolvedWorkspaceSession("retained", true, false), nil
+		},
+		workspaceForEndpoint: func(
+			SessionEndpoint,
+		) (workspaceSessionEnsurer, error) {
+			return ensurer, nil
+		},
+	}
+
+	got, err := runner.EstablishExpectedWithGeneration(
+		context.Background(),
+		"current",
+		"retained",
+		"/work/widget",
+		resolverTestGeneration,
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, canonicalEndpoint("retained"), got)
+	assert.Equal(t, "retained", ensurer.ensureSession)
+	assert.True(t, ensurer.repaired)
+	assert.False(t, ensurer.ensured)
+}

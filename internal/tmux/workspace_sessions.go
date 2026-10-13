@@ -182,9 +182,34 @@ func (s *WorkspaceSessions) EstablishWithGeneration(
 	return s.establish(ctx, session, workspacePath, generation, layout)
 }
 
+// ErrWorkspaceSessionChanged reports that establishment resolved a session
+// other than the exact session its caller required.
+var ErrWorkspaceSessionChanged = errors.New("tmux workspace session changed before establishment")
+
+// EstablishExpectedWithGeneration establishes the workspace only when it
+// resolves to expectedSession. Every resolution is checked before any repair
+// or creation, so a vanished session is never replaced under another name.
+func (s *WorkspaceSessions) EstablishExpectedWithGeneration(
+	ctx context.Context,
+	session, expectedSession, workspacePath, generation string,
+	layout models.Layout,
+) (SessionEndpoint, error) {
+	return s.establishExpected(ctx, session, expectedSession, workspacePath, generation, layout)
+}
+
 func (s *WorkspaceSessions) establish(
 	ctx context.Context,
 	session, workspacePath, generation string,
+	layout models.Layout,
+) (SessionEndpoint, error) {
+	return s.establishExpected(ctx, session, "", workspacePath, generation, layout)
+}
+
+// establishExpected accepts any resolved endpoint when expectedSession is
+// empty.
+func (s *WorkspaceSessions) establishExpected(
+	ctx context.Context,
+	session, expectedSession, workspacePath, generation string,
 	layout models.Layout,
 ) (SessionEndpoint, error) {
 	request := WorkspaceEndpointRequest{
@@ -198,6 +223,9 @@ func (s *WorkspaceSessions) establish(
 			return SessionEndpoint{}, err
 		}
 		effectiveSession := resolved.Endpoint.SessionName
+		if expectedSession != "" && effectiveSession != expectedSession {
+			return SessionEndpoint{}, ErrWorkspaceSessionChanged
+		}
 		workspace, err := s.workspaceForEndpoint(resolved.Endpoint)
 		if err != nil {
 			return SessionEndpoint{}, err

@@ -4,11 +4,14 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kwt/internal/url"
+	"go.kenn.io/kwt/pkg/models"
 )
 
 type realWorkspaceSessionsFixture struct {
@@ -301,4 +304,91 @@ func TestProtectedWorkspaceStillUsesUniqueSocket(t *testing.T) {
 	assert.True(t, protected.HasSession(fixture.session))
 	assert.False(t, fixture.servers.kwtServer().HasSession(fixture.session))
 	assert.False(t, fixture.servers.defaultServer().HasSession(fixture.session))
+}
+
+func TestWorkspaceSessionsExpectedEstablishmentUsesRetainedBranchSession(t *testing.T) {
+	fixture := newRealWorkspaceSessionsFixture(t)
+	info, ok := url.CanonicalRepositoryInfo("github.com/acme/widget")
+	require.True(t, ok)
+	retained := WorkspaceSessionName(info, "feat-58", fixture.workspace)
+	current := WorkspaceSessionName(info, "main", fixture.workspace)
+	require.NotEqual(t, retained, current)
+	fixture.session = retained
+	fixture.createMatching(t, fixture.servers.kwtServer())
+
+	got, err := fixture.sessions.EstablishExpectedWithGeneration(
+		fixture.ctx,
+		current,
+		retained,
+		fixture.workspace,
+		fixture.generation,
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, canonicalEndpoint(retained), got)
+	names, err := fixture.servers.kwtServer().ListSessions()
+	require.NoError(t, err)
+	assert.Equal(t, []string{retained}, names)
+}
+
+func TestWorkspaceSessionsExpectedEstablishmentDoesNotReplaceExitedRetainedSession(t *testing.T) {
+	fixture := newRealWorkspaceSessionsFixture(t)
+	info, ok := url.CanonicalRepositoryInfo("github.com/acme/widget")
+	require.True(t, ok)
+	retained := WorkspaceSessionName(info, "feat-58", fixture.workspace)
+	current := WorkspaceSessionName(info, "main", fixture.workspace)
+	fixture.session = retained
+	fixture.createMatching(t, fixture.servers.kwtServer())
+	// Killing the server's last session shuts the server down, and the
+	// resolver's list-sessions call would race that shutdown.
+	require.NoError(t, fixture.servers.kwtServer().RunCommandContext(
+		fixture.ctx, "new-session", "-d", "-s", "keepalive",
+	))
+	require.NoError(t, fixture.servers.kwtServer().RunCommandContext(
+		fixture.ctx, "kill-session", "-t", "="+retained,
+	))
+	layoutRan := filepath.Join(fixture.tempDir, "layout-ran")
+	layout := models.Layout{
+		Name:  "probe",
+		Panes: []string{"touch " + layoutRan + "; exec sleep 60"},
+	}
+
+	_, err := fixture.sessions.EstablishExpectedWithGeneration(
+		fixture.ctx,
+		current,
+		retained,
+		fixture.workspace,
+		fixture.generation,
+		layout,
+	)
+
+	assert.ErrorIs(t, err, ErrWorkspaceSessionChanged)
+	for _, command := range []*TmuxCommand{
+		fixture.servers.kwtServer(), fixture.servers.defaultServer(),
+	} {
+		assert.False(t, command.HasSession(current))
+		assert.False(t, command.HasSession(retained))
+	}
+	assert.NoFileExists(t, layoutRan)
+}
+
+func TestWorkspaceSessionsExpectedEstablishmentCreatesCurrentBranchSession(t *testing.T) {
+	fixture := newRealWorkspaceSessionsFixture(t)
+	info, ok := url.CanonicalRepositoryInfo("github.com/acme/widget")
+	require.True(t, ok)
+	current := WorkspaceSessionName(info, "main", fixture.workspace)
+
+	got, err := fixture.sessions.EstablishExpectedWithGeneration(
+		fixture.ctx,
+		current,
+		current,
+		fixture.workspace,
+		fixture.generation,
+		BlankLayout(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, canonicalEndpoint(current), got)
+	assert.True(t, fixture.servers.kwtServer().HasSession(current))
 }

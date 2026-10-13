@@ -41,6 +41,7 @@ var (
 type openWorkspaceRunner interface {
 	Establish(context.Context, string, string, models.Layout) (tmux.SessionEndpoint, error)
 	EstablishWithGeneration(context.Context, string, string, string, models.Layout) (tmux.SessionEndpoint, error)
+	EstablishExpectedWithGeneration(context.Context, string, string, string, string, models.Layout) (tmux.SessionEndpoint, error)
 	Attach(context.Context, tmux.SessionEndpoint) error
 }
 
@@ -555,15 +556,9 @@ func openExpectedWorktree(
 		if discoverErr != nil || current == nil || current.RepositoryInfo == nil {
 			return registrationChangedOpenError(discoverErr)
 		}
-		currentSession := tmux.WorkspaceSessionName(
-			current.RepositoryInfo,
-			current.Branch,
-			current.Path,
-		)
 		if utils.PathKey(current.Path) != utils.PathKey(entry.Path) ||
 			!lifecycle.EqualProjectIdentity(current.RepositoryInfo.FullPath, openExpectedRepository) ||
-			current.Generation != openExpectedGeneration ||
-			currentSession != openExpectedSession {
+			current.Generation != openExpectedGeneration {
 			return registrationChangedOpenError(nil)
 		}
 		_, generationErr := withCurrentWorktreeSession(
@@ -574,21 +569,26 @@ func openExpectedWorktree(
 			[]models.Project{guard.claim.Registration.Effective},
 			protectedNames,
 			func(lockedSession string) error {
-				if lockedSession != openExpectedSession {
-					return registrationChangedOpenError(nil)
-				}
-				if err := acknowledgeRemoteSourcePath(current.Path); err != nil {
-					return err
-				}
+				// Inventory reports the resolved endpoint. A live session
+				// keeps the name of the branch it was created on, so
+				// establishment must resolve to the expected session rather
+				// than to the name derived from the current branch.
 				var establishErr error
-				endpoint, establishErr = runner.EstablishWithGeneration(
+				endpoint, establishErr = runner.EstablishExpectedWithGeneration(
 					ctx,
+					lockedSession,
 					openExpectedSession,
 					current.Path,
 					openExpectedGeneration,
 					layout,
 				)
-				return establishErr
+				if errors.Is(establishErr, tmux.ErrWorkspaceSessionChanged) {
+					return registrationChangedOpenError(establishErr)
+				}
+				if establishErr != nil {
+					return establishErr
+				}
+				return acknowledgeRemoteSourcePath(current.Path)
 			},
 		)
 		var conditionErr *shared.ConditionError

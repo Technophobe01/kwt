@@ -493,6 +493,15 @@ attach-only client, or use `kwt pr attach <path>` when
 without a client creating it bare or bypassing protected attach policy. See
 [Attaching from other tools](#attaching-from-other-tools) before using
 `new-session`.
+Automation clients that pass `--expected-session` supply the worktree's
+`session_name` from inventory. A live session keeps the name of the branch it
+was created on, so kwt compares the flag to the resolved live endpoint rather
+than to a name derived from the current branch. If the open resolves any other
+session, it fails with retryable `registration_changed` before kwt creates or
+repairs a session. This includes a retained session that exits before the open,
+because kwt would otherwise create a session under the current branch's name.
+When the flag matches the current branch's name, kwt creates that session if it
+is not running.
 `kwt open` and dashboard open actions refuse protected pull-request imports
 and direct the user through `kwt pr attach`.
 `created_at` and `generation` are populated in both local and `-g` mode.
