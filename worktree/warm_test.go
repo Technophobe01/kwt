@@ -58,15 +58,15 @@ func TestWarmPreparationAndClaimLockOrder(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "warm reset did not start")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	lockCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	require.NoError(t, repo.WithLock(ctx, func(*worktree.Scope) error { return nil }))
+	require.NoError(t, repo.WithLock(lockCtx, func(*worktree.Scope) error { return nil }))
 	pool := flock.New(filepath.Join(filepath.Dir(req.Path), req.PoolLockName))
 	locked, err := pool.TryLock()
 	require.NoError(t, err)
 	require.False(t, locked)
 	claim := worktree.WarmClaimRequest{Warm: req, Create: worktree.CreateRequest{Git: managed.CreateWorktreeOptions{Path: filepath.Join(t.TempDir(), "workspace"), Mode: managed.CheckoutDetached, BaseRef: "HEAD"}, Identity: worktree.IdentityPolicy{FileName: "workspace-id", Value: "workspace-a"}}}
-	_, claimed, err := repo.ClaimWarm(ctx, claim)
+	_, claimed, err := repo.ClaimWarm(t.Context(), claim)
 	require.NoError(t, err)
 	require.False(t, claimed)
 	close(release)
@@ -77,17 +77,17 @@ func TestWarmPreparationAndClaimLockOrder(t *testing.T) {
 	require.True(t, os.SameFile(before, before))
 	require.NoError(t, pool.Lock())
 	defer func() { require.NoError(t, pool.Unlock()) }()
-	result, claimed, err := repo.ClaimWarm(ctx, claim)
+	result, claimed, err := repo.ClaimWarm(t.Context(), claim)
 	require.NoError(t, err)
 	require.True(t, claimed)
 	after, err := os.Stat(filepath.Join(result.Path, "file"))
 	require.NoError(t, err)
 	require.True(t, os.SameFile(before, after))
 	require.NoDirExists(t, req.Path)
-	_, claimed, err = repo.ClaimWarm(ctx, claim)
+	_, claimed, err = repo.ClaimWarm(t.Context(), claim)
 	require.NoError(t, err)
 	require.False(t, claimed)
-	_, err = result.Rollback(ctx, managed.RollbackUnchanged)
+	_, err = result.Rollback(t.Context(), managed.RollbackUnchanged)
 	require.NoError(t, err)
 	require.NoDirExists(t, result.Path)
 }
@@ -164,34 +164,51 @@ func TestWarmCanceledRegistrationCompletesBeforeReleasingRepository(t *testing.T
 }
 
 func TestWarmClaimReportsCheckoutRetainedAfterCleanupFailure(t *testing.T) {
-	root, _ := fixture(t)
-	req := warmRequest(t)
-	repo := openHookless(t, root, kwtPolicy())
-	require.NoError(t, repo.PrepareWarm(t.Context(), req))
-	coordinator, err := worktree.NewCoordinator(kwtPolicy())
-	require.NoError(t, err)
-	checkoutFailure, removeFailure := errors.New("checkout interrupted"), errors.New("cleanup unavailable")
-	repo, err = coordinator.Open(t.Context(), worktree.RepositoryOptions{Path: root, Runner: hooklessRunner(), RunGit: func(ctx context.Context, r gitcmd.Runner, dir string, args ...string) ([]byte, error) {
-		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
-			return nil, removeFailure
-		}
-		out, err := r.Output(ctx, dir, args...)
-		if err == nil && slices.Contains(args, "--no-guess") {
-			return out, checkoutFailure
-		}
-		return out, err
-	}})
-	require.NoError(t, err)
-	result, claimed, err := repo.ClaimWarm(t.Context(), worktree.WarmClaimRequest{Warm: req, Create: worktree.CreateRequest{Git: managed.CreateWorktreeOptions{Path: filepath.Join(t.TempDir(), "workspace"), Mode: managed.CheckoutDetached, BaseRef: "HEAD"}}})
-	require.True(t, claimed)
-	require.ErrorIs(t, err, checkoutFailure)
-	require.ErrorIs(t, err, removeFailure)
-	require.DirExists(t, req.Path)
-	require.Equal(t, req.Path, result.Path)
-	remaining, err := result.Rollback(t.Context(), managed.RollbackFreshOwned)
-	require.ErrorIs(t, err, managed.ErrWorktreeCleanupIncomplete)
-	require.Equal(t, req.Path, remaining.Path)
-	require.NotEmpty(t, remaining.Registration)
+	for _, tc := range []struct {
+		mode          managed.CheckoutMode
+		failedCommand string
+	}{{managed.CheckoutDetached, "remove"}, {managed.CheckoutNewBranch, "remove"}, {managed.CheckoutNewBranch, "list"}} {
+		mode := tc.mode
+		t.Run(fmt.Sprintf("mode=%d/failure=%s", mode, tc.failedCommand), func(t *testing.T) {
+			require := require.New(t)
+			root, _ := fixture(t)
+			req := warmRequest(t)
+			repo := openHookless(t, root, kwtPolicy())
+			require.NoError(repo.PrepareWarm(t.Context(), req))
+			coordinator, err := worktree.NewCoordinator(kwtPolicy())
+			require.NoError(err)
+			checkoutFailure, removeFailure := errors.New("checkout interrupted"), errors.New("cleanup unavailable")
+			checkoutFailed := false
+			repo, err = coordinator.Open(t.Context(), worktree.RepositoryOptions{Path: root, Runner: hooklessRunner(), RunGit: func(ctx context.Context, r gitcmd.Runner, dir string, args ...string) ([]byte, error) {
+				if checkoutFailed && len(args) > 1 && args[0] == "worktree" && args[1] == tc.failedCommand {
+					return nil, removeFailure
+				}
+				out, err := r.Output(ctx, dir, args...)
+				if err == nil && slices.Contains(args, "--no-guess") {
+					checkoutFailed = true
+					return out, checkoutFailure
+				}
+				return out, err
+			}})
+			require.NoError(err)
+			result, claimed, err := repo.ClaimWarm(t.Context(), worktree.WarmClaimRequest{Warm: req, Create: worktree.CreateRequest{Git: managed.CreateWorktreeOptions{Path: filepath.Join(t.TempDir(), "workspace"), Mode: mode, Branch: "new-topic", BaseRef: "HEAD"}}})
+			require.True(claimed)
+			require.ErrorIs(err, checkoutFailure)
+			require.ErrorIs(err, removeFailure)
+			require.DirExists(req.Path)
+			require.Equal(req.Path, result.Path)
+			if mode == managed.CheckoutNewBranch {
+				require.Equal("new-topic", result.OwnedBranch)
+			}
+			remaining, err := result.Rollback(t.Context(), managed.RollbackFreshOwned)
+			require.ErrorIs(err, managed.ErrWorktreeCleanupIncomplete)
+			require.Equal(req.Path, remaining.Path)
+			require.NotEmpty(remaining.Registration)
+			if mode == managed.CheckoutNewBranch {
+				require.Equal("new-topic", remaining.Branch)
+			}
+		})
+	}
 }
 
 func TestWarmExistingBranchKeepsAttachmentSemantics(t *testing.T) {
@@ -249,6 +266,81 @@ func TestWarmClaimCreatesAndRollsBackNewBranch(t *testing.T) {
 	require.NoDirExists(t, result.Path)
 	_, err = gitcmd.New().Output(t.Context(), root, "rev-parse", "--verify", "refs/heads/new-topic")
 	require.Error(t, err)
+}
+
+func TestWarmNewBranchClaimCleansUpCanceledCheckout(t *testing.T) {
+	for _, afterCheckout := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after-checkout=%t", afterCheckout), func(t *testing.T) {
+			require := require.New(t)
+			root, _ := fixture(t)
+			req := warmRequest(t)
+			require.NoError(openHookless(t, root, kwtPolicy()).PrepareWarm(t.Context(), req))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			coordinator, err := worktree.NewCoordinator(kwtPolicy())
+			require.NoError(err)
+			repo, err := coordinator.Open(t.Context(), worktree.RepositoryOptions{Path: root, Runner: hooklessRunner(), RunGit: func(ctx context.Context, r gitcmd.Runner, dir string, args ...string) ([]byte, error) {
+				checkout := slices.Contains(args, "--no-track") && slices.Contains(args, "-b")
+				if checkout && !afterCheckout {
+					cancel()
+				}
+				out, err := r.Output(ctx, dir, args...)
+				if checkout && afterCheckout {
+					cancel()
+					return out, errors.Join(err, ctx.Err())
+				}
+				return out, err
+			}})
+			require.NoError(err)
+			claim := worktree.WarmClaimRequest{Warm: req, Create: worktree.CreateRequest{Git: managed.CreateWorktreeOptions{Path: filepath.Join(t.TempDir(), "workspace"), Mode: managed.CheckoutNewBranch, Branch: "new-topic", BaseRef: "HEAD"}}}
+
+			result, claimed, err := repo.ClaimWarm(ctx, claim)
+
+			require.ErrorIs(err, context.Canceled)
+			require.True(claimed)
+			require.Empty(result.Path)
+			require.Empty(result.OwnedBranch)
+			require.NoDirExists(req.Path)
+			require.NoDirExists(claim.Create.Git.Path)
+			_, err = gitcmd.New().Output(t.Context(), root, "rev-parse", "--verify", "refs/heads/new-topic")
+			require.Error(err)
+			repo = openHookless(t, root, kwtPolicy())
+			require.NoError(repo.PrepareWarm(t.Context(), req))
+			result, claimed, err = repo.ClaimWarm(t.Context(), claim)
+			require.NoError(err)
+			require.True(claimed)
+			require.Equal("new-topic", git(t, result.Path, "branch", "--show-current"))
+			require.NoDirExists(req.Path)
+		})
+	}
+}
+
+func TestWarmNewBranchClaimPreservesUnknownMoveOutcome(t *testing.T) {
+	require := require.New(t)
+	root, _ := fixture(t)
+	req := warmRequest(t)
+	require.NoError(openHookless(t, root, kwtPolicy()).PrepareWarm(t.Context(), req))
+	coordinator, err := worktree.NewCoordinator(kwtPolicy())
+	require.NoError(err)
+	moveFailure := errors.New("move outcome unavailable")
+	repo, err := coordinator.Open(t.Context(), worktree.RepositoryOptions{Path: root, Runner: hooklessRunner(), RunGit: func(ctx context.Context, r gitcmd.Runner, dir string, args ...string) ([]byte, error) {
+		out, err := r.Output(ctx, dir, args...)
+		if err == nil && len(args) > 1 && args[0] == "worktree" && args[1] == "move" {
+			return out, moveFailure
+		}
+		return out, err
+	}})
+	require.NoError(err)
+	path := filepath.Join(t.TempDir(), "workspace")
+	result, claimed, err := repo.ClaimWarm(t.Context(), worktree.WarmClaimRequest{Warm: req, Create: worktree.CreateRequest{Git: managed.CreateWorktreeOptions{Path: path, Mode: managed.CheckoutNewBranch, Branch: "new-topic", BaseRef: "HEAD"}}})
+	require.ErrorIs(err, moveFailure)
+	require.True(claimed)
+	require.Equal(path, result.Path)
+	remaining, err := result.Rollback(t.Context(), managed.RollbackFreshOwned)
+	require.ErrorIs(err, managed.ErrWorktreeCleanupIncomplete)
+	require.Equal(path, remaining.Path)
+	require.DirExists(path)
+	require.Equal("new-topic", git(t, path, "branch", "--show-current"))
 }
 
 func TestWarmPreparationPreservesMissingNonSpareRegistration(t *testing.T) {
